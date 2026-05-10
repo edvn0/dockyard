@@ -1,0 +1,5 @@
+.vscode
+build
+CMakeUserPresets.json
+compile_commands.json
+.idea

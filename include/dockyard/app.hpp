@@ -1,0 +1,54 @@
+#pragma once
+
+#include "dockyard/events.hpp"
+#include <dockyard/context.hpp>
+#include <dockyard/types.hpp>
+
+#include <tuple>
+
+extern "C" {
+struct GLFWwindow;
+}
+
+namespace dy {
+
+struct RenderContext;
+
+struct InitialisationContext {
+  std::tuple<u32, u32> window_extent;
+  std::tuple<u32, u32> viewport_extent;
+  VulkanContext &context;
+  SwapchainResources &swapchain_resources;
+};
+
+class App {
+public:
+  virtual ~App() = default;
+  auto run(i32 argc, char *argv[]) -> i32;
+
+  virtual auto init(const InitialisationContext &) -> void = 0;
+  virtual auto update(float ts) -> void = 0;
+  virtual auto resize(u32, u32) -> void = 0;
+  virtual auto render(RenderContext &) -> u64 = 0;
+  virtual auto destroy() -> void = 0;
+
+  virtual auto on_key_pressed(const events::key_pressed &) -> void {}
+  virtual auto on_key_released(const events::key_released &) -> void {}
+  virtual auto on_mouse_button_pressed(const events::mouse_button_pressed &)
+      -> void {}
+  virtual auto on_mouse_button_released(const events::mouse_button_released &)
+      -> void {}
+  virtual auto on_mouse_moved(const events::mouse_moved &) -> void {}
+  virtual auto on_mouse_scrolled(const events::mouse_scrolled &) -> void {}
+
+protected:
+  auto get_window() const { return window; }
+
+private:
+  GLFWwindow *window;
+
+  auto recreate_swapchain_manually(GLFWwindow *, const RendererListener &)
+      -> void;
+  auto on_swapchain_resized(const events::swapchain_resized &) -> void;
+};
+} // namespace dy
