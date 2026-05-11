@@ -314,26 +314,11 @@ struct BindlessSet {
             u32 initial_samplers, u32 initial_comparison_samplers,
             u32 initial_storage_images, u32 initial_accel_structs) -> void;
 
-  // Destroys all Vulkan objects; safe to call multiple times.
   auto destroy() -> void;
 
-  // -----------------------------------------------------------------------
-  // Per-frame update
-  // -----------------------------------------------------------------------
-
-  // Call at the top of each frame before recording draw commands.
-  // Returns true if the set was recreated (i.e. all bound pipelines that
-  // reference the old layout are now invalid and must be re-bound).
   auto repopulate_if_needed(TexturePool &textures, SamplerPool &samplers,
                             ComparisonSamplerPool &comparison_samplers) -> bool;
 
-  // -----------------------------------------------------------------------
-  // Incremental writes
-  // -----------------------------------------------------------------------
-
-  // Push a single texture slot update into the pending queue.
-  // Flushed automatically by repopulate_if_needed when need_repopulate
-  // is false, or discarded when a full repopulate is scheduled.
   auto queue_texture_write(u32 pool_index, VkImageView sampled_view,
                            VkImageView storage_view, VkImageViewType view_type)
       -> void {
@@ -345,23 +330,13 @@ struct BindlessSet {
     });
   }
 
-  // -----------------------------------------------------------------------
-  // Growth
-  // -----------------------------------------------------------------------
-
-  // Expands capacities (doubling strategy, clamped to caps) when any
-  // requested count exceeds the current maximum.  Triggers a recreate and
-  // sets need_repopulate.  Returns true if the set was recreated.
   auto grow_if_needed(u32 req_textures, u32 req_samplers, u32 req_storage,
                       u32 req_accel) -> bool;
 
 private:
-  // Flushes pending_texture_writes via targeted vkUpdateDescriptorSets
-  // calls instead of a full repopulate.
   auto flush_pending_writes(VkImageView dummy_sampled,
                             VkImageView dummy_storage) -> void;
 
-  // Destroys and rebuilds layout / pool / set from current max_* values.
   auto recreate() -> void;
 };
 

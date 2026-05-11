@@ -16,6 +16,7 @@ class Buffer {
   VmaAllocation allocation{nullptr};
   VmaAllocationInfo allocation_info{};
   DeviceAddress address{};
+  VkBufferUsageFlags usage_flags{};
   void *mapped_data = nullptr;
 
   Buffer(VmaAllocator allocator, VkDeviceSize size, VkBufferUsageFlags usage);
@@ -31,15 +32,32 @@ public:
     }
   }
 
+  auto upload_with_offset(std::ranges::contiguous_range auto &&range,
+                          usize byte_offset) {
+    const auto bytes = std::ranges::size(range) *
+                       sizeof(std::ranges::range_value_t<decltype(range)>);
+    assert(byte_offset + bytes <= allocation_info.size &&
+           "Buffer overflow in upload");
+
+    if (mapped_data) {
+      u8 *destination = static_cast<u8 *>(mapped_data) + byte_offset;
+      std::memcpy(destination, std::ranges::data(range), bytes);
+    }
+  }
+
   [[nodiscard]] auto get_mapped_pointer() const { return mapped_data; }
   [[nodiscard]] auto get_device_address() const { return address; }
   [[nodiscard]] auto get_allocation_info() const -> const auto & {
     return allocation_info;
   }
+  [[nodiscard]] constexpr auto size() const { return allocation_info.size; }
   [[nodiscard]] auto get_allocation() const -> const auto & {
     return allocation;
   }
   [[nodiscard]] auto get_buffer() const -> const auto & { return buffer; }
+  [[nodiscard]] auto get_usage_flags() const -> const auto & {
+    return usage_flags;
+  }
 
   static auto create(VmaAllocator allocator, VkDeviceSize size,
                      VkBufferUsageFlags usage) -> std::unique_ptr<Buffer>;

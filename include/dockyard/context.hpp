@@ -78,6 +78,7 @@ struct ViewportResources {
   Texture forward_target_msaa{};
 
   TextureHandle forward_target{};
+  TextureHandle display_target{};
 
   auto extent() const { return forward_target_msaa.extent; }
 
@@ -92,6 +93,9 @@ struct SwapchainResources {
   std::vector<VkImage> images;
   std::vector<VkImageView> image_views;
   std::vector<ImageSync> image_sync;
+
+  auto extent() const { return swapchain.extent; }
+  auto format() const { return swapchain.image_format; }
 
   auto rebuild(const VulkanContext &ctx, VkSurfaceKHR surface, u32 width,
                u32 height) -> void;

@@ -41,6 +41,10 @@ public:
    * @brief Maps "prefix://path" to an absolute physical path.
    */
   auto resolve(std::string_view virtual_path) -> std::filesystem::path;
+  /**
+   * @brief Maps "prefix://path" to an absolute physical path.
+   */
+  auto resolve(const VFSPath &virtual_path) -> std::filesystem::path;
 
   /**
    * @brief Synchronous binary read.

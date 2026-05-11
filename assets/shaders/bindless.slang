@@ -21,6 +21,12 @@ float4 sample_2d(TextureHandle tex, SamplerHandle samp, float2 uv)
         .Sample(samplers[NonUniformResourceIndex(samp.index)], uv);
 }
 
+float4 sample_2d(uint tex, SamplerHandle samp, float2 uv)
+{
+    return sampled_images[NonUniformResourceIndex(tex)]
+        .Sample(samplers[NonUniformResourceIndex(samp.index)], uv);
+}
+
 float4 sample_2d_lod(TextureHandle tex, SamplerHandle samp, float2 uv, float lod)
 {
     if (!tex.isValid)

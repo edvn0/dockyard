@@ -37,6 +37,11 @@ public:
     return VFSPath{raw};
   }
 
+  template <typename... Args>
+  static auto create(std::format_string<Args...> fmt, Args &&...args) {
+    return create(std::format(fmt, std::forward<Args>(args)...));
+  }
+
   auto scheme() const -> std::string_view {
     return std::string_view{path}.substr(0, path.find("://"));
   }

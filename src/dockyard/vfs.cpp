@@ -19,11 +19,16 @@ void VFS::initialize(const std::filesystem::path& assets_root) {
   mounts["res"] = root;
   mounts["shaders"] = root / "shaders";
   mounts["scripts"] = root / "scripts";
+  mounts["scripts"] = root / "fonts";
+  mounts["editor"] = root / "editor";
 
   info("[VFS] Initialized with root: {}", root);
   for (auto &&[k, v] : mounts) {
     info("\t[VFS]: Mount {} -> {}", k, v);
   }
+}
+auto VFS::resolve(const VFSPath &virtual_path) -> std::filesystem::path {
+  return resolve(virtual_path.view());
 }
 auto VFS::resolve(std::string_view virtual_path) -> std::filesystem::path {
   ensure_initialised();

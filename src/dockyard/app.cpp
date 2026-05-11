@@ -1,6 +1,8 @@
+#include <csignal>
 #include <dockyard/app.hpp>
 #include <dockyard/context.hpp>
 #include <dockyard/event_callbacks.hpp>
+#include <dockyard/imgui_renderer.hpp>
 #include <dockyard/log.hpp>
 #include <dockyard/renderdoc.hpp>
 #include <dockyard/scope_exit.hpp>
@@ -38,7 +40,15 @@ auto submit_to_queue(const VulkanContext &, VkCommandBuffer, const FrameSync &,
                      const ImageSync &, u64) -> bool;
 auto glfw_error_logger() -> void;
 
+std::atomic_bool running{true};
+static auto handler(auto) -> void {
+  warn("Interrupted - exiting");
+  running = false;
+}
+
 auto App::run(i32 argc, char *argv[]) -> i32 {
+  std::signal(SIGINT, handler);
+
 #ifdef ASSETS_ROOT_PATH
   VFS::get().initialize(ASSETS_ROOT_PATH);
 #else
@@ -57,8 +67,23 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   auto parameters =
       std::span{argv, static_cast<usize>(argc)} | std::views::drop(1) |
       std::views::transform([](auto arg) { return std::string_view{arg}; });
-  for (const auto &p : parameters)
-    info("Argument: {}", p);
+  auto find_or_default = [&p = parameters](std::string_view prefix,
+                                           int default_val) -> int {
+    auto it = std::ranges::find_if(
+        p, [prefix](auto arg) { return arg.starts_with(prefix); });
+
+    if (it == p.end())
+      return default_val;
+
+    std::string_view value_str = *it;
+    value_str.remove_prefix(prefix.size());
+
+    int result{};
+    auto [ptr, ec] = std::from_chars(
+        value_str.data(), value_str.data() + value_str.size(), result);
+
+    return (ec == std::errc{}) ? result : default_val;
+  };
 
   if (glfwInit() != GLFW_TRUE) {
     glfw_error_logger();
@@ -67,7 +92,10 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   DEFER(glfwTerminate());
 
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-  window = glfwCreateWindow(800, 600, "Dockyard", nullptr, nullptr);
+
+  int width = find_or_default("--width=", 1280);
+  int height = find_or_default("--height=", 720);
+  window = glfwCreateWindow(width, height, "Dockyard", nullptr, nullptr);
   if (!window) {
     glfw_error_logger();
     return -1;
@@ -96,14 +124,29 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
                  VkDebugUtilsMessageTypeFlagsEXT,
                  const VkDebugUtilsMessengerCallbackDataEXT *data,
                  void *) -> VkBool32 {
-                std::string_view msg = data->pMessage;
+                std::string object_names;
+                if (data->objectCount > 0) {
+                  object_names = " | Objects: ";
+                  for (uint32_t i = 0; i < data->objectCount; ++i) {
+                    // pObjectName may be null if the application didn't set it
+                    const char *name = data->pObjects[i].pObjectName;
+                    object_names += (name ? name : "<unnamed>");
+                    if (i < data->objectCount - 1)
+                      object_names += ", ";
+                  }
+                }
+
+                std::string full_msg =
+                    std::string(data->pMessage) + object_names;
+
                 if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
-                  error("Vulkan: {}", msg);
+                  error("Vulkan: {}", full_msg);
                 else if (severity &
                          VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)
-                  warn("Vulkan: {}", msg);
+                  warn("Vulkan: {}", full_msg);
                 else
-                  info("Vulkan: {}", msg);
+                  info("Vulkan: {}", full_msg);
+
                 return VK_FALSE;
               })
           .build();
@@ -127,7 +170,8 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   u64 frame_index = 0;
   u64 frame_id = 1;
 
-  auto sc = SwapchainResources::create(ctx, surface, 800, 600);
+  auto sc = SwapchainResources::create(ctx, surface, static_cast<u32>(width),
+                                       static_cast<u32>(height));
   auto frames = FrameResources::create(ctx);
   DEFER(sc.destroy(ctx));
   DEFER(frames.destroy(ctx));
@@ -166,7 +210,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   glfwShowWindow(window);
 
   TimeStep ts{};
-  while (!glfwWindowShouldClose(window)) {
+  while (running && !glfwWindowShouldClose(window)) {
     glfwPollEvents();
     poll_pending_events();
     dispatcher.update();

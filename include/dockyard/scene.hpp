@@ -20,7 +20,12 @@ struct Camera {
   float yaw = 0.0f;
   float pitch = 0.0f;
 
+  std::optional<glm::vec3> forward_override = std::nullopt;
+
   [[nodiscard]] auto forward() const -> glm::vec3 {
+    if (forward_override.has_value())
+      return *forward_override;
+
     return glm::normalize(glm::vec3{
         glm::cos(pitch) * glm::sin(yaw),
         glm::sin(pitch),

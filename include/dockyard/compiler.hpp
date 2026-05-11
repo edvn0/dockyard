@@ -41,20 +41,14 @@ struct PushConstantRange {
 struct EntryPointInfo {
   std::string name;
   Stage stage{};
-  // Only meaningful when stage == Compute.
   u32 workgroup_x{1}, workgroup_y{1}, workgroup_z{1};
 };
 
-// Per-entry-point output: SPIR-V blob + the metadata needed to create a
-// VkShaderModule and wire up pipeline stage info.
 struct CompiledEntryPoint {
   std::vector<u32> spirv{};
   EntryPointInfo entry_point{};
 };
 
-// Program-level output. Descriptor bindings and push constants are shared
-// across all stages in the same Slang file, so they live here rather than
-// inside each CompiledEntryPoint.
 struct CompiledShader {
   std::vector<CompiledEntryPoint> entry_points{};
   std::vector<DescriptorBinding> bindings{};

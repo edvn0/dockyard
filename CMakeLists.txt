@@ -23,7 +23,7 @@ set(ASSETS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/assets" CACHE PATH
 # ─── Dependencies ─────────────────────────────────────────────────────────────
 
 find_package(Vulkan REQUIRED)
-find_package(PkgConfig REQUIRED)
+find_package(X11 REQUIRED)
 
 include(cmake/CPM.cmake)
 
@@ -79,9 +79,26 @@ CPMAddPackage(
     "GLFW_INSTALL OFF"
 )
 CPMAddPackage(
-  NAME imgui
+  NAME ImGui
   GITHUB_REPOSITORY ocornut/imgui
-  GIT_TAG docking
+  GIT_TAG v1.92.5-docking
+  GIT_SHALLOW YES
+  DOWNLOAD_ONLY YES
+)
+
+CPMAddPackage(
+  NAME ImPlot
+  GITHUB_REPOSITORY epezent/implot
+  GIT_TAG bd99f8d8b9a80c493782ab8cb3335af102f61304
+  GIT_SHALLOW NO
+  DOWNLOAD_ONLY YES
+)
+
+CPMAddPackage(
+  NAME ImGuizmo
+  GITHUB_REPOSITORY CedricGuillemet/ImGuizmo
+  GIT_TAG a15acd87a3f3241a29ea1363ceafc680dca3a96b
+  GIT_SHALLOW NO
   DOWNLOAD_ONLY YES
 )
 
@@ -97,15 +114,15 @@ CPMAddPackage(
   NAME glm
   GITHUB_REPOSITORY g-truc/glm
   GIT_TAG master
-  OPTIONS 
-    "GLM_ENABLE_SIMD_SSE2=ON" 
-    "GLM_ENABLE_SIMD_SSE3=ON" 
-    "GLM_ENABLE_SIMD_SSSE3=ON" 
-    "GLM_ENABLE_SIMD_SSE4_1=ON" 
-    "GLM_ENABLE_SIMD_SSE4_2=ON" 
-    "GLM_ENABLE_SIMD_AVX=ON" 
-    "GLM_ENABLE_SIMD_AVX2=ON" 
-    "GLM_ENABLE_SIMD_NEON=ON" 
+  OPTIONS
+    "GLM_ENABLE_SIMD_SSE2=ON"
+    "GLM_ENABLE_SIMD_SSE3=ON"
+    "GLM_ENABLE_SIMD_SSSE3=ON"
+    "GLM_ENABLE_SIMD_SSE4_1=ON"
+    "GLM_ENABLE_SIMD_SSE4_2=ON"
+    "GLM_ENABLE_SIMD_AVX=ON"
+    "GLM_ENABLE_SIMD_AVX2=ON"
+    "GLM_ENABLE_SIMD_NEON=ON"
     "GLM_FORCE_PURE=ON"
 )
 
@@ -137,27 +154,47 @@ set(DOCKYARD_SUPPRESSED_WARNINGS
   -Wno-missing-designated-field-initializers
 )
 
-# ─── imgui ────────────────────────────────────────────────────────────────────
+if(ImGui_SOURCE_DIR AND ImPlot_SOURCE_DIR AND ImGuizmo_SOURCE_DIR)
+  set(IMGUI_SRCS
+    ${ImGui_SOURCE_DIR}/imgui.cpp
+    ${ImGui_SOURCE_DIR}/imgui_demo.cpp
+    ${ImGui_SOURCE_DIR}/imgui_draw.cpp
+    ${ImGui_SOURCE_DIR}/imgui_tables.cpp
+    ${ImGui_SOURCE_DIR}/imgui_widgets.cpp
+    ${ImGui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+    ${ImGui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+  )
 
-add_library(imgui STATIC
-  ${imgui_SOURCE_DIR}/imgui.cpp
-  ${imgui_SOURCE_DIR}/imgui_demo.cpp
-  ${imgui_SOURCE_DIR}/imgui_draw.cpp
-  ${imgui_SOURCE_DIR}/imgui_tables.cpp
-  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
-  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
-  ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
-)
-target_include_directories(imgui PUBLIC
-  ${imgui_SOURCE_DIR}
-  ${imgui_SOURCE_DIR}/backends
-)
-target_compile_definitions(imgui PUBLIC
-  IMGUI_IMPL_VULKAN_USE_VOLK
-  ${DOCKYARD_PUBLIC_DEFINES}
-)
-target_link_libraries(imgui PUBLIC glfw volk)
-set_target_properties(imgui PROPERTIES FOLDER external)
+  set(IMPLOT_SRCS
+    ${ImPlot_SOURCE_DIR}/implot.cpp
+    ${ImPlot_SOURCE_DIR}/implot_items.cpp
+  )
+
+  set(IMGUIZMO_SRCS
+    ${ImGuizmo_SOURCE_DIR}/ImGuizmo.cpp
+  )
+  add_library(imgui STATIC ${IMGUI_SRCS} ${IMPLOT_SRCS} ${IMGUIZMO_SRCS})
+
+  target_include_directories(imgui PUBLIC
+    ${ImGui_SOURCE_DIR}
+    ${ImGui_SOURCE_DIR}/backends
+    ${ImPlot_SOURCE_DIR}
+    ${ImGuizmo_SOURCE_DIR}
+  )
+
+  target_link_libraries(imgui PUBLIC
+    glfw
+    volk
+    volk::volk_headers
+    X11::X11
+  )
+
+  target_compile_definitions(imgui
+    PUBLIC
+    GLFW_INCLUDE_NONE
+    IMGUI_IMPL_VULKAN_USE_VOLK
+  )
+endif()
 
 # ─── dockyard-allocator ───────────────────────────────────────────────────────
 
@@ -199,6 +236,8 @@ add_library(dockyard STATIC
   src/dockyard/bindless_descriptor.cpp
   src/dockyard/texture.cpp
   src/dockyard/scene_renderer.cpp
+  src/dockyard/imgui_renderer.cpp
+  src/dockyard/pipeline_builder.cpp
 )
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
 target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -243,6 +282,6 @@ endif()
 # ─── dockforge ────────────────────────────────────────────────────────────────
 
 add_executable(dockforge src/dockforge/main.cpp)
-target_link_libraries(dockforge PRIVATE dockyard)
+target_link_libraries(dockforge PRIVATE dockyard imgui)
 target_set_warnings(dockforge)
 set_target_properties(dockforge PROPERTIES FOLDER apps)

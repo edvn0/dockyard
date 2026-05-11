@@ -1,5 +1,6 @@
-#include "dockyard/vfs_path.hpp"
 #include <dockyard/compiler.hpp>
+
+#include <dockyard/vfs_path.hpp>
 
 #include <slang-com-helper.h>
 #include <slang-com-ptr.h>

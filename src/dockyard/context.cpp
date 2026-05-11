@@ -115,7 +115,6 @@ auto SwapchainResources::create(const VulkanContext &ctx, VkSurfaceKHR surface,
 
 auto ViewportResources::resize(const VulkanContext &ctx,
                                SceneRenderer &renderer, u32 w, u32 h) -> void {
-  // plain textures — just destroy and recreate
   depth_msaa.destroy(ctx);
   depth_msaa =
       Texture::create(ctx, "depth_msaa", w, h, VK_FORMAT_D32_SFLOAT,
@@ -146,6 +145,31 @@ auto ViewportResources::resize(const VulkanContext &ctx,
             VK_IMAGE_USAGE_STORAGE_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT);
     forward_target = renderer.textures.create(TextureEntry{
+        .texture = std::move(tex),
+        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+    });
+  }
+
+  // display_target: tonemapped LDR output, sampled by ImGui as a widget.
+  // RGBA8 is sufficient post-tonemapping, and matches what ImGui expects to
+  // display. NOTE: ensure your composite pipeline is also created with
+  // VK_FORMAT_R8G8B8A8_UNORM.
+  if (display_target.valid()) {
+    auto *entry = renderer.textures.get(display_target);
+    entry->texture.destroy(ctx);
+    entry->texture = Texture::create(
+        ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT);
+    renderer.bindless.queue_texture_write(
+        display_target.index(), entry->texture.sampled_view,
+        entry->texture.storage_view, entry->sampled_view_type);
+  } else {
+    auto tex = Texture::create(
+        ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_UNORM,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT);
+    display_target = renderer.textures.create(TextureEntry{
         .texture = std::move(tex),
         .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
     });

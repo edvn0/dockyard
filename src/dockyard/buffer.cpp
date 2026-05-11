@@ -2,12 +2,12 @@
 
 namespace dy {
 
-Buffer::Buffer(VmaAllocator alloc, VkDeviceSize size,
-               VkBufferUsageFlags usage):allocator(alloc) {
+Buffer::Buffer(VmaAllocator alloc, VkDeviceSize size, VkBufferUsageFlags u)
+    : allocator(alloc) {
   VkBufferCreateInfo buffer_ci{};
   buffer_ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   buffer_ci.size = size;
-  buffer_ci.usage = usage | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+  buffer_ci.usage = u | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
   buffer_ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
   VmaAllocationCreateInfo alloc_ci{};
@@ -29,6 +29,7 @@ Buffer::Buffer(VmaAllocator alloc, VkDeviceSize size,
   address =
       DeviceAddress {vkGetBufferDeviceAddress(info.device, &address_info)};
   mapped_data = allocation_info.pMappedData;
+  usage_flags = u;
 }
 
 auto Buffer::create(VmaAllocator allocator, VkDeviceSize size,

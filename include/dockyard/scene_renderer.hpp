@@ -1,9 +1,11 @@
 #pragma once
 
-#include "dockyard/app.hpp"
+#include "dockyard/device_geometry.hpp"
+#include <dockyard/app.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/compiler.hpp>
 #include <dockyard/context.hpp>
+#include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene.hpp>
 
 #include <glm/glm.hpp>
@@ -11,141 +13,13 @@
 
 namespace dy {
 
-template <std::ranges::random_access_range R,
-          std::indirect_strict_weak_order<std::ranges::iterator_t<R>> Compare =
-              std::ranges::less>
-  requires std::ranges::sized_range<R>
-auto sorted_copy(R range, Compare comp = {})
-    -> std::vector<std::ranges::range_value_t<R>> {
-  using value_type = std::ranges::range_value_t<R>;
-  using diff_type = std::ranges::range_difference_t<R>;
-
-  auto const n = static_cast<diff_type>(std::ranges::size(range));
-  auto const first = std::ranges::begin(range);
-
-  std::vector<diff_type> order(static_cast<std::size_t>(n));
-  std::ranges::iota(order.begin(), order.end(), diff_type{0});
-
-  std::ranges::sort(order, [&](diff_type a, diff_type b) {
-    return comp(first[a], first[b]);
-  });
-
-  std::vector<value_type> result;
-  result.reserve(static_cast<std::size_t>(n));
-  for (auto idx : order) {
-    if constexpr (std::ranges::view<R>)
-      result.push_back(first[idx]);
-    else
-      result.push_back(std::move(first[idx]));
-  }
-
-  return result;
-}
-
-struct TransientStage {
-  std::vector<u32> code;
-  VkShaderModuleCreateInfo module_ci{};
-  VkPipelineShaderStageCreateInfo stage_ci{};
-  std::string entry_name;
-
-  TransientStage() = default;
-
-  TransientStage(TransientStage &&o) noexcept {
-    code = std::move(o.code);
-    entry_name = std::move(o.entry_name);
-    module_ci = o.module_ci;
-    module_ci.pCode = code.data();
-    stage_ci = o.stage_ci;
-    stage_ci.pName = entry_name.c_str();
-    stage_ci.pNext = &module_ci;
-  }
-
-  TransientStage &operator=(TransientStage &&) = delete;
-  TransientStage(const TransientStage &) = delete;
-
-  static auto load(std::string_view virtual_path, VkShaderStageFlagBits stage,
-                   std::string entry = "main")
-      -> std::expected<TransientStage, std::string> {
-    auto result = VFS::get().read_binary(virtual_path);
-    if (!result)
-      return std::unexpected(result.error());
-
-    TransientStage ts{};
-    ts.code = std::move(result.value());
-    ts.entry_name = std::move(entry);
-    ts.module_ci = {
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = ts.code.size() * sizeof(u32),
-        .pCode = ts.code.data(),
-    };
-    ts.stage_ci = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .pNext = &ts.module_ci,
-        .stage = stage,
-        .module = VK_NULL_HANDLE,
-        .pName = ts.entry_name.c_str(),
-    };
-    return ts;
-  }
-
-  static constexpr auto to_vk_stage(shader::Stage stage)
-      -> VkShaderStageFlagBits {
-    switch (stage) {
-    case shader::Stage::Vertex:
-      return VK_SHADER_STAGE_VERTEX_BIT;
-    case shader::Stage::Fragment:
-      return VK_SHADER_STAGE_FRAGMENT_BIT;
-    case shader::Stage::Mesh:
-      return VK_SHADER_STAGE_MESH_BIT_EXT;
-    case shader::Stage::Task:
-      return VK_SHADER_STAGE_TASK_BIT_EXT;
-    case shader::Stage::Compute:
-      return VK_SHADER_STAGE_COMPUTE_BIT;
-    }
-  }
-
-  // Build a single TransientStage from one compiled entry point.
-  static auto create_from_entry_point(shader::CompiledEntryPoint ep)
-      -> TransientStage {
-    TransientStage ts{};
-    ts.code = std::move(ep.spirv);
-    ts.entry_name = std::move(ep.entry_point.name);
-    ts.module_ci = {
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .codeSize = ts.code.size() * sizeof(u32),
-        .pCode = ts.code.data(),
-    };
-    ts.stage_ci = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .pNext = &ts.module_ci,
-        .stage = to_vk_stage(ep.entry_point.stage),
-        .module = VK_NULL_HANDLE,
-        .pName = ts.entry_name.c_str(),
-    };
-    return ts;
-  }
-
-  // Build one TransientStage per entry point in a CompiledShader.
-  static auto create_all(shader::CompiledShader shader)
-      -> std::vector<TransientStage> {
-    std::vector<TransientStage> stages;
-    stages.reserve(shader.entry_points.size());
-    for (auto &ep : shader.entry_points)
-      stages.push_back(create_from_entry_point(std::move(ep)));
-
-    return sorted_copy(std::move(stages),
-                       [](const TransientStage &a, const TransientStage &b) {
-                         return a.stage_ci.stage < b.stage_ci.stage;
-                       });
-  }
-};
-
 struct GpuPushConstants {
   const DeviceAddress vertex_buffer_ptr;               // 8 bytes
   const DeviceAddress position_only_vertex_buffer_ptr; // 8 bytes
   const DeviceAddress transform_buffer_ptr;            // 8 bytes
   const DeviceAddress remap_buffer_ptr;                // 8 bytes
   const DeviceAddress frame_ubo;                       // 8 bytes
+  const DeviceAddress material_ptr;                    // 8 bytes
 };
 
 struct CompositePushConstants {
@@ -201,20 +75,18 @@ struct RenderPass {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
     if (!indirect_buffer ||
-        indirect_buffer->get_allocation_info().size <
+        indirect_buffer->size() <
             command_count * sizeof(VkDrawIndexedIndirectCommand)) {
       indirect_buffer = Buffer::create(
           allocator, command_count * sizeof(VkDrawIndexedIndirectCommand),
           indirect_flags);
     }
     if (!index_remapping_buffer ||
-        index_remapping_buffer->get_allocation_info().size <
-            instance_count * sizeof(u32)) {
+        index_remapping_buffer->size() < instance_count * sizeof(u32)) {
       index_remapping_buffer = Buffer::create(
           allocator, instance_count * sizeof(u32), storage_flags);
     }
-    if (!count_buffer ||
-        count_buffer->get_allocation_info().size < batch_count * sizeof(u32)) {
+    if (!count_buffer || count_buffer->size() < batch_count * sizeof(u32)) {
       count_buffer =
           Buffer::create(allocator, batch_count * sizeof(u32), indirect_flags);
     }
@@ -295,32 +167,13 @@ struct FrameUBO {
   glm::mat4 inverse_view_projection;
 };
 
-struct PipelineRegistry {
-  VkPipelineLayout &layout;
-  VkDevice device;
-  std::vector<VkPipeline> pipelines{};
-
-  auto register_pipeline(VkPipeline pipeline) -> u32 {
-    const u32 id = static_cast<u32>(pipelines.size());
-    pipelines.push_back(pipeline);
-    return id;
-  }
-
-  auto get(u32 id) const -> VkPipeline { return pipelines[id]; }
-
-  auto cleanup() -> void {
-    for (auto p : pipelines)
-      vkDestroyPipeline(device, p, nullptr);
-    pipelines.clear();
-  }
-};
-
 auto create_main_pipeline_layout(VkDevice device,
                                  VkDescriptorSetLayout bindless_layout)
     -> VkPipelineLayout;
 auto create_composite_pipeline(VkDevice device,
-                               VkDescriptorSetLayout bindless_layout)
-    -> std::pair<VkPipelineLayout, VkPipeline>;
+                               VkDescriptorSetLayout bindless_layout,
+                               VkPipelineLayout &out_layout,
+                               VkPipeline &out_pipeline) -> void;
 
 struct SceneRenderer {
   VulkanContext &ctx;
@@ -414,13 +267,10 @@ struct SceneRenderer {
                   /*initial_accel_structs       =*/0u);
 
     pipeline_layout = create_main_pipeline_layout(ctx.device, bindless.layout);
-    pipeline_registry =
-        std::make_unique<PipelineRegistry>(pipeline_layout, ctx.device);
+    pipeline_registry = std::make_unique<PipelineRegistry>(ctx.device);
 
-    auto [comp_layout, comp_pipeline] =
-        create_composite_pipeline(ctx.device, bindless.layout);
-    composite_pipeline_layout = comp_layout;
-    composite_pipeline = comp_pipeline;
+    create_composite_pipeline(ctx.device, bindless.layout,
+                              composite_pipeline_layout, composite_pipeline);
   }
 
   auto upload_texture(std::span<const u32> data, std::string_view name, u32 w,
@@ -491,8 +341,7 @@ struct SceneRenderer {
 
   void ensure_global_capacity(usize instance_count) {
     if (const auto size = instance_count * sizeof(InstanceData);
-        !global_instance_buffer ||
-        global_instance_buffer->get_allocation_info().size < size) {
+        !global_instance_buffer || global_instance_buffer->size() < size) {
       global_instance_buffer = Buffer::create(
           ctx.allocator, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     }
@@ -535,17 +384,29 @@ struct SceneRenderer {
 
     const GpuPushConstants push_constants{
         .vertex_buffer_ptr =
-            DeviceAddress{pool.vertex_buffer->get_device_address()},
+            DeviceAddress{
+                pool.vertex_buffer->get_device_address(),
+            },
         .position_only_vertex_buffer_ptr =
             DeviceAddress{
-                pool.position_only_vertex_buffer->get_device_address()},
+                pool.position_only_vertex_buffer->get_device_address(),
+            },
         .transform_buffer_ptr =
-            DeviceAddress{global_instance_buffer->get_device_address()},
+            DeviceAddress{
+                global_instance_buffer->get_device_address(),
+            },
         .remap_buffer_ptr =
-            DeviceAddress{pass.index_remapping_buffer->get_device_address()},
+            DeviceAddress{
+                pass.index_remapping_buffer->get_device_address(),
+            },
         .frame_ubo =
             DeviceAddress{
-                frame_ubo_buffers.at(frame_index)->get_device_address()},
+                frame_ubo_buffers.at(frame_index)->get_device_address(),
+            },
+        .material_ptr =
+            DeviceAddress{
+                pool.material_buffer->get_device_address(),
+            },
     };
 
     for (const auto &batch : pass.batches) {

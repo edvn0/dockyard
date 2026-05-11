@@ -7,6 +7,7 @@
 #include <cstring>
 
 #include <dockyard/context.hpp>
+#include <vulkan/vulkan_core.h>
 
 namespace dy {
 // ---------------------------------------------------------------------------
@@ -243,6 +244,12 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
     std::abort();
   }
   vmaSetAllocationName(ctx.allocator, rt.allocation, name.data());
+  VkDebugUtilsObjectNameInfoEXT name_info{};
+  name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+  name_info.pObjectName = name.data();
+  name_info.objectType = VK_OBJECT_TYPE_IMAGE;
+  name_info.objectHandle = std::bit_cast<u64>(rt.image);
+  vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info);
 
   VkImageViewCreateInfo view_info{};
   view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -322,6 +329,12 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
   vk::check(vmaCreateImage(ctx.allocator, &image_ci, &image_alloc_ci,
                            &tex.image, &tex.allocation, &tex.allocation_info));
   vmaSetAllocationName(ctx.allocator, tex.allocation, name.data());
+  VkDebugUtilsObjectNameInfoEXT name_info{};
+  name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+  name_info.pObjectName = name.data();
+  name_info.objectType = VK_OBJECT_TYPE_IMAGE;
+  name_info.objectHandle = std::bit_cast<u64>(tex.image);
+  vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info);
 
   auto scratch = ScratchCmd::begin(ctx, ci.upload_queue_family);
   const VkCommandBuffer cmd = scratch.cmd;
