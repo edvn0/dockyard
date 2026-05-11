@@ -33,22 +33,22 @@ auto dy::GeometryPool::allocate(std::span<const Vertex> vertices,
   const usize i_bytes = indices.size_bytes();
   const usize sv_bytes = vertices.size() * sizeof(PositionOnlyVertex);
 
-  auto *v_dst = static_cast<uint8_t *>(vertex_buffer->get_mapped_pointer());
-  auto *sv_dst =
-      static_cast<uint8_t *>(position_only_vertex_buffer->get_mapped_pointer());
-  auto *i_dst = static_cast<uint8_t *>(index_buffer->get_mapped_pointer());
+  auto *v_dst =
+      static_cast<std::uint8_t *>(vertex_buffer->get_mapped_pointer());
+  auto *sv_dst = static_cast<std::uint8_t *>(
+      position_only_vertex_buffer->get_mapped_pointer());
+  auto *i_dst = static_cast<std::uint8_t *>(index_buffer->get_mapped_pointer());
 
-  std::ranges::copy(vertices,
-                    reinterpret_cast<Vertex *>(v_dst + vertex_offset));
+  std::ranges::copy(vertices, std::bit_cast<Vertex *>(v_dst + vertex_offset));
 
-  std::ranges::copy(indices, reinterpret_cast<u32 *>(i_dst + index_offset));
+  std::ranges::copy(indices, std::bit_cast<u32 *>(i_dst + index_offset));
 
   auto position_view =
       vertices |
       std::views::transform([](const Vertex &v) -> PositionOnlyVertex {
         return {.position = {v.position[0], v.position[1], v.position[2]}};
       });
-  std::ranges::copy(position_view, reinterpret_cast<PositionOnlyVertex *>(
+  std::ranges::copy(position_view, std::bit_cast<PositionOnlyVertex *>(
                                        sv_dst + shadow_vertex_offset));
 
   vmaFlushAllocation(allocator, vertex_buffer->get_allocation(), vertex_offset,

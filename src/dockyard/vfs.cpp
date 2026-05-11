@@ -1,3 +1,4 @@
+#include "dockyard/vfs_path.hpp"
 #include <dockyard/vfs.hpp>
 
 namespace dy {
@@ -66,6 +67,30 @@ auto VFS::read_binary(std::string_view virtual_path)
   file.read(reinterpret_cast<char *>(buffer.data()), size);
 
   return buffer;
+}
+
+auto VFS::read_binary(const VFSPath &p)
+    -> std::expected<std::vector<u32>, std::string> {
+  return read_binary(p.view());
+}
+
+auto VFS::read_bytes(const VFSPath &p)
+    -> std::expected<std::vector<u8>, std::string> {
+  const std::filesystem::path physical = resolve(p.view());
+
+  std::ifstream file(physical, std::ios::binary | std::ios::ate);
+  if (!file.is_open())
+    return std::unexpected(
+        std::format("VFS: could not open: {}", physical.string()));
+
+  const auto size = file.tellg();
+  if (size <= 0)
+    return std::vector<u8>{};
+
+  std::vector<u8> buf(static_cast<usize>(size));
+  file.seekg(0);
+  file.read(reinterpret_cast<char *>(buf.data()), size);
+  return buf;
 }
 
 auto VFS::read_binary_async(std::string_view virtual_path)

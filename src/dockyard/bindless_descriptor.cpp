@@ -205,10 +205,9 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
 auto BindlessSet::repopulate_if_needed(
     TexturePool &textures, SamplerPool &samplers,
     ComparisonSamplerPool &comparison_samplers) -> bool {
-  // Fast path — just flush any pending incremental writes.
   if (!need_repopulate) [[likely]] {
     if (!pending_texture_writes.empty()) {
-      const auto &dummy_tex = *textures.get(textures.handle_at(0u));
+      const auto &dummy_tex = textures.get(textures.handle_at(0u))->texture;
       const VkImageView ds = dummy_tex.sampled_view;
       const VkImageView dst = dummy_tex.storage_view != VK_NULL_HANDLE
                                   ? dummy_tex.storage_view
@@ -218,24 +217,19 @@ auto BindlessSet::repopulate_if_needed(
     return false;
   }
 
-  // Full repopulate — discard stale incremental queue.
   pending_texture_writes.clear();
 
-  // Opportunistically grow to fit the current pool contents.
   const bool did_resize =
       grow_if_needed(textures.num_objects(), samplers.num_objects(),
                      textures.num_objects(), 0u);
 
-  // Dummy entries — slot 0 must always be a valid fallback.
-  const auto &dummy_tex = *textures.get(textures.handle_at(0u));
+  const auto &dummy_tex = textures.get(textures.handle_at(0u))->texture;
   const auto &dummy_sampler = *samplers.get(samplers.handle_at(0u));
   const VkImageView dummy_sampled = dummy_tex.sampled_view;
   const VkImageView dummy_storage = dummy_tex.storage_view != VK_NULL_HANDLE
                                         ? dummy_tex.storage_view
                                         : dummy_tex.sampled_view;
   const VkSampler dummy_vk_sampler = dummy_sampler.sampler;
-
-  // --- Build info arrays, pre-filled with dummy values ---
 
   std::vector<VkDescriptorImageInfo> sampled_infos(
       max_textures, {VK_NULL_HANDLE, dummy_sampled, VK_IMAGE_LAYOUT_GENERAL});
@@ -262,7 +256,8 @@ auto BindlessSet::repopulate_if_needed(
       if (!textures.is_live(i))
         continue;
 
-      const auto &tex = textures.data()[i].object;
+      const auto &tex = textures.data()[i].object.texture;
+      const auto &view_type = textures.data()[i].object.sampled_view_type;
 
       if (tex.sampled_view != VK_NULL_HANDLE)
         sampled_infos[i].imageView = tex.sampled_view;
@@ -270,11 +265,11 @@ auto BindlessSet::repopulate_if_needed(
       if (i < max_storage_images && tex.storage_view != VK_NULL_HANDLE)
         storage_infos[i].imageView = tex.storage_view;
 
-      if (i < max_cubemaps && is_cubemap_view(tex.sampled_view_type) &&
+      if (i < max_cubemaps && is_cubemap_view(view_type) &&
           tex.sampled_view != VK_NULL_HANDLE)
         cubemap_infos[i].imageView = tex.sampled_view;
 
-      if (i < max_3d_images && is_3d_view(tex.sampled_view_type) &&
+      if (i < max_3d_images && is_3d_view(view_type) &&
           tex.sampled_view != VK_NULL_HANDLE)
         image_3d_infos[i].imageView = tex.sampled_view;
     }
@@ -305,20 +300,6 @@ auto BindlessSet::repopulate_if_needed(
           s != VK_NULL_HANDLE ? s : dummy_vk_sampler;
     }
   }
-
-  // --- Issue single batched write ---
-  /**
-sType
-pNext
-dstSet
-dstBinding
-dstArrayElement
-descriptorCount
-descriptorType
-pImageInfo
-pBufferInfo
-pTexelBufferView
-*/
 
   constexpr auto make_image_read_wds = [](const auto &ptr, auto type,
                                           const auto &set, uint32_t binding,
@@ -418,20 +399,11 @@ auto BindlessSet::recreate() -> void {
   };
   vk::check(vkCreateDescriptorSetLayout(device, &lci, nullptr, &layout));
 
-  // --- Pipeline layout ---
-  // Owns only the bindless set (set=0).  Wire this into
-  // create_main_pipeline_layout() as the bindless_layout argument when you
-  // integrate with SceneRenderer; push constant ranges are added there.
-
   VkPipelineLayoutCreateInfo plci{};
   plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
   plci.setLayoutCount = 1u;
   plci.pSetLayouts = &layout;
   vk::check(vkCreatePipelineLayout(device, &plci, nullptr, &pipeline_layout));
-
-  // --- Descriptor pool ---
-  // UPDATE_AFTER_BIND_BIT instead of FREE_DESCRIPTOR_SET_BIT because the
-  // pool holds exactly one set and is reset wholesale on grow.
 
   std::vector<VkDescriptorPoolSize> pool_sizes{{
       {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, max_textures},

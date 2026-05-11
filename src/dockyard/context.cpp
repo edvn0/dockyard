@@ -1,12 +1,12 @@
-#include "dockyard/events.hpp"
 #include <dockyard/context.hpp>
 
 #include <volk.h>
 
 #include <dockyard/app.hpp>
+#include <dockyard/events.hpp>
 #include <dockyard/log.hpp>
+#include <dockyard/scene_renderer.hpp>
 #include <dockyard/vk_check.hpp>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
 
@@ -112,35 +112,55 @@ auto SwapchainResources::create(const VulkanContext &ctx, VkSurfaceKHR surface,
   r.rebuild(ctx, surface, width, height);
   return r;
 }
-auto ViewportResources::resize(const VulkanContext &ctx, u32 width, u32 height)
-    -> void {
+
+auto ViewportResources::resize(const VulkanContext &ctx,
+                               SceneRenderer &renderer, u32 w, u32 h) -> void {
+  // plain textures — just destroy and recreate
   depth_msaa.destroy(ctx);
-  forward_target.destroy(ctx);
-
   depth_msaa =
-      RenderTarget::create(ctx, width, height, VK_FORMAT_D32_SFLOAT,
-                           VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                           VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_4_BIT);
+      Texture::create(ctx, "depth_msaa", w, h, VK_FORMAT_D32_SFLOAT,
+                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                      VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_4_BIT);
 
-  forward_target = RenderTarget::create(
-      ctx, width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
-      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-          VK_IMAGE_USAGE_STORAGE_BIT,
-      VK_IMAGE_ASPECT_COLOR_BIT);
+  forward_target_msaa.destroy(ctx);
   forward_target_msaa =
-      RenderTarget::create(ctx, width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
-                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                           VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_4_BIT);
+      Texture::create(ctx, "forward_msaa", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+                      VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_4_BIT);
+
+  if (forward_target.valid()) {
+    auto *entry = renderer.textures.get(forward_target);
+    entry->texture.destroy(ctx);
+    entry->texture = Texture::create(
+        ctx, "forward_target", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_STORAGE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT);
+    renderer.bindless.queue_texture_write(
+        forward_target.index(), entry->texture.sampled_view,
+        entry->texture.storage_view, entry->sampled_view_type);
+  } else {
+    auto tex = Texture::create(
+        ctx, "forward_target", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_STORAGE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT);
+    forward_target = renderer.textures.create(TextureEntry{
+        .texture = std::move(tex),
+        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+    });
+  }
 }
+
 auto ViewportResources::destroy(const VulkanContext &ctx) -> void {
   depth_msaa.destroy(ctx);
-  forward_target.destroy(ctx);
   forward_target_msaa.destroy(ctx);
 }
-auto ViewportResources::create(const VulkanContext &ctx, u32 width, u32 height)
+auto ViewportResources::create(const VulkanContext &ctx,
+                               SceneRenderer &renderer, u32 w, u32 h)
     -> ViewportResources {
   ViewportResources r{};
-  r.resize(ctx, width, height);
+  r.resize(ctx, renderer, w, h);
   return r;
 }
 
@@ -168,6 +188,11 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   ctx.surface = std::move(s);
   ctx.instance = std::move(inst);
   volkLoadInstance(ctx.instance.instance);
+
+  VkPhysicalDeviceFeatures features{};
+  features.multiDrawIndirect = VK_TRUE;
+  features.samplerAnisotropy = VK_TRUE;
+  features.textureCompressionBC = VK_TRUE;
 
   VkPhysicalDeviceVulkan11Features features_11{};
   features_11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
@@ -220,6 +245,7 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   auto phys_ret = vkb::PhysicalDeviceSelector{ctx.instance}
                       .set_surface(ctx.surface)
                       .set_minimum_version(1, 4)
+                      .set_required_features(features)
                       .set_required_features_11(features_11)
                       .set_required_features_12(features_12)
                       .set_required_features_13(features_13)
@@ -369,75 +395,6 @@ auto CommandBuffer::create(const VulkanContext &ctx) -> CommandBuffer {
     std::abort();
   }
   return cb;
-}
-
-auto RenderTarget::valid() const -> bool { return image != VK_NULL_HANDLE; }
-auto RenderTarget::destroy(const VulkanContext &ctx) -> void {
-  if (!valid())
-    return;
-  vkDestroyImageView(ctx.device, view, nullptr);
-  vmaDestroyImage(ctx.allocator, image, allocation);
-  *this = {};
-}
-
-auto RenderTarget::create(const VulkanContext &ctx, u32 width, u32 height,
-                          VkFormat format, VkImageUsageFlags usage,
-                          VkImageAspectFlags aspect,
-                          VkSampleCountFlagBits samples) -> RenderTarget {
-  RenderTarget rt{};
-  rt.format = format;
-  rt.extent = {width, height};
-
-  VkImageCreateInfo image_info{};
-  image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-  image_info.imageType = VK_IMAGE_TYPE_2D;
-  image_info.format = format;
-  image_info.extent = {width, height, 1};
-  image_info.mipLevels = 1;
-  image_info.arrayLayers = 1;
-  image_info.samples = samples;
-  image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-  image_info.usage = usage;
-
-  if (samples > VK_SAMPLE_COUNT_1_BIT) {
-    image_info.usage |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
-  }
-
-  image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-  VmaAllocationCreateInfo vma_info{};
-  vma_info.usage = VMA_MEMORY_USAGE_AUTO;
-
-  if (image_info.usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT) {
-    vma_info.preferredFlags = VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
-  }
-
-  if (const auto result =
-          vmaCreateImage(ctx.allocator, &image_info, &vma_info, &rt.image,
-                         &rt.allocation, &rt.allocation_info);
-      result != VK_SUCCESS) {
-    error("Failed to create render target image: {}", result);
-    std::abort();
-  }
-
-  VkImageViewCreateInfo view_info{};
-  view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-  view_info.image = rt.image;
-  view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-  view_info.format = format;
-  view_info.subresourceRange.aspectMask = aspect;
-  view_info.subresourceRange.baseMipLevel = 0;
-  view_info.subresourceRange.levelCount = 1;
-  view_info.subresourceRange.baseArrayLayer = 0;
-  view_info.subresourceRange.layerCount = 1;
-
-  if (const auto result =
-          vkCreateImageView(ctx.device, &view_info, nullptr, &rt.view);
-      result != VK_SUCCESS) {
-    std::abort();
-  }
-
-  return rt;
 }
 
 } // namespace dy

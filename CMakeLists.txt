@@ -84,10 +84,29 @@ CPMAddPackage(
   GIT_TAG docking
   DOWNLOAD_ONLY YES
 )
+
+set(GLM_ENABLE_SIMD_SSE2 CACHE FORCE "Enable SSE2 optimizations" ON)
+set(GLM_ENABLE_SIMD_SSE3 CACHE FORCE "Enable SSE3 optimizations" ON)
+set(GLM_ENABLE_SIMD_SSSE3 CACHE FORCE "Enable SSSE3 optimizations" ON)
+set(GLM_ENABLE_SIMD_SSE4_1 CACHE FORCE "Enable SSE 4.1 optimizations" ON)
+set(GLM_ENABLE_SIMD_SSE4_2 CACHE FORCE "Enable SSE 4.2 optimizations" ON)
+set(GLM_ENABLE_SIMD_AVX CACHE FORCE "Enable AVX optimizations" ON)
+set(GLM_ENABLE_SIMD_AVX2 CACHE FORCE "Enable AVX2 optimizations" ON)
+set(GLM_ENABLE_SIMD_NEON CACHE FORCE "Enable ARM NEON optimizations" ON)
 CPMAddPackage(
   NAME glm
   GITHUB_REPOSITORY g-truc/glm
   GIT_TAG master
+  OPTIONS 
+    "GLM_ENABLE_SIMD_SSE2=ON" 
+    "GLM_ENABLE_SIMD_SSE3=ON" 
+    "GLM_ENABLE_SIMD_SSSE3=ON" 
+    "GLM_ENABLE_SIMD_SSE4_1=ON" 
+    "GLM_ENABLE_SIMD_SSE4_2=ON" 
+    "GLM_ENABLE_SIMD_AVX=ON" 
+    "GLM_ENABLE_SIMD_AVX2=ON" 
+    "GLM_ENABLE_SIMD_NEON=ON" 
+    "GLM_FORCE_PURE=ON"
 )
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -152,6 +171,18 @@ target_link_libraries(dockyard-allocator
   PRIVATE volk
 )
 
+# dockyard-compiler
+
+find_package(slang REQUIRED CONFIG)
+
+add_library(dockyard-compiler STATIC src/dockyard/compiler.cpp)
+target_link_libraries(dockyard-compiler PRIVATE slang::slang)
+target_compile_definitions(dockyard-compiler PRIVATE
+    ${DOCKYARD_PUBLIC_DEFINES}
+    ASSETS_ROOT_PATH="${ASSETS_ROOT_ABS}"
+    $<$<CONFIG:Debug>:DOCKYARD_DEBUG>)
+target_include_directories(dockyard-compiler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
 # ─── dockyard ─────────────────────────────────────────────────────────────────
 
 get_filename_component(ASSETS_ROOT_ABS "${ASSETS_ROOT}" ABSOLUTE)
@@ -166,6 +197,8 @@ add_library(dockyard STATIC
   src/dockyard/renderdoc.cpp
   src/dockyard/device_geometry.cpp
   src/dockyard/bindless_descriptor.cpp
+  src/dockyard/texture.cpp
+  src/dockyard/scene_renderer.cpp
 )
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
 target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -180,6 +213,7 @@ target_compile_definitions(dockyard
 target_link_libraries(dockyard
   PUBLIC
     dockyard-allocator
+    dockyard-compiler
     imgui
     glfw
     volk

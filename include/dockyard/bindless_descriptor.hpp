@@ -1,7 +1,11 @@
+#pragma once
+
+#include <cassert>
 #include <vector>
 #include <volk.h>
 
 #include <dockyard/log.hpp>
+#include <dockyard/texture.hpp>
 #include <dockyard/types.hpp>
 #include <dockyard/vk_check.hpp>
 
@@ -29,19 +33,23 @@ template <typename Tag> struct Handle {
   Handle() = default;
 
   Handle(u32 index, u32 gen)
-      : value_((gen & k_gen_mask) << k_index_bits | (index & k_index_mask)) {
+      : handle_value((gen & k_gen_mask) << k_index_bits |
+                     (index & k_index_mask)) {
     assert(gen != 0u && "generation 0 is reserved for the empty sentinel");
     assert(index <= k_index_mask);
   }
 
-  [[nodiscard]] auto index() const -> u32 { return value_ & k_index_mask; }
-  [[nodiscard]] auto gen() const -> u32 { return value_ >> k_index_bits; }
-  [[nodiscard]] auto empty() const -> bool { return value_ == 0u; }
+  [[nodiscard]] auto index() const -> u32 {
+    return handle_value & k_index_mask;
+  }
+  [[nodiscard]] auto gen() const -> u32 { return handle_value >> k_index_bits; }
+  [[nodiscard]] auto empty() const -> bool { return handle_value == 0u; }
+  [[nodiscard]] auto valid() const -> bool { return !empty(); }
 
   auto operator==(const Handle &) const -> bool = default;
 
 private:
-  u32 value_ = 0u;
+  u32 handle_value = 0u;
 };
 
 // ---------------------------------------------------------------------------
@@ -147,6 +155,9 @@ public:
   [[nodiscard]] auto data() const -> const std::span<const Slot> {
     return slots_;
   }
+  [[nodiscard]] auto mutable_data() -> std::span<Slot> {
+    return std::span(slots_);
+  }
   [[nodiscard]] auto num_objects() const -> u32 { return num_live_; }
   [[nodiscard]] auto capacity() const -> u32 {
     return static_cast<u32>(slots_.size());
@@ -171,10 +182,8 @@ private:
 // ---------------------------------------------------------------------------
 
 struct TextureEntry {
-  VkImageView sampled_view = VK_NULL_HANDLE;
-  VkImageView storage_view = VK_NULL_HANDLE;
-  VkImageViewType sampled_view_type = VK_IMAGE_VIEW_TYPE_2D;
-
+  Texture texture{};
+  VkImageViewType sampled_view_type{VK_IMAGE_VIEW_TYPE_2D};
   auto operator==(const TextureEntry &) const -> bool = default;
 };
 

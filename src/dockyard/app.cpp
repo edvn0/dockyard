@@ -22,7 +22,6 @@
 
 struct TimeStep {
   double last_time{glfwGetTime()};
-
   float step() {
     const double current_time = glfwGetTime();
     const auto delta_time = static_cast<float>(current_time - last_time);
@@ -165,16 +164,6 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   }
 
   glfwShowWindow(window);
-  struct TimeStep {
-    double last_time{glfwGetTime()};
-
-    float step() {
-      const double current_time = glfwGetTime();
-      const auto delta_time = static_cast<float>(current_time - last_time);
-      last_time = current_time;
-      return delta_time;
-    }
-  };
 
   TimeStep ts{};
   while (!glfwWindowShouldClose(window)) {
@@ -194,6 +183,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
     auto &frame = frames.frame_sync[frame_index];
     vkWaitForFences(ctx.device, 1, &frame.in_flight_fence, VK_TRUE, UINT64_MAX);
+    DeletionQueue::get().begin_frame(frame_index);
 
     auto maybe_index = acquire_swapchain_image(sc, frame);
     if (!maybe_index) {
@@ -270,8 +260,9 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   }
 
   vkDeviceWaitIdle(ctx.device);
-
   destroy();
+  vkDeviceWaitIdle(ctx.device);
+  DeletionQueue::get().flush_all();
 
   info("Application exited successfully");
   return 0;

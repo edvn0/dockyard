@@ -21,6 +21,45 @@ struct InitialisationContext {
   SwapchainResources &swapchain_resources;
 };
 
+struct DeletionQueue {
+  using Fn = std::function<void()>;
+
+  static auto get() -> DeletionQueue & {
+    static DeletionQueue instance;
+    return instance;
+  }
+
+  auto begin_frame(std::unsigned_integral auto frame_index) -> void {
+    current_frame = static_cast<u32>(frame_index);
+    flush(static_cast<u32>(frame_index));
+  }
+
+  auto push(Fn fn) -> void {
+    per_frame[current_frame].push_back(std::move(fn));
+  }
+
+  auto flush_all() {
+    std::ranges::for_each(per_frame, [](auto &v) {
+      std::ranges::for_each(v, [](auto &k) { k(); });
+    });
+  }
+
+private:
+  std::array<std::vector<Fn>, frames_in_flight> per_frame{};
+  u32 current_frame = 0u;
+  auto flush(u32 frame_index) -> void {
+    for (auto &fn : per_frame[frame_index])
+      fn();
+    per_frame[frame_index].clear();
+  }
+
+  DeletionQueue() = default;
+  DeletionQueue(const DeletionQueue &) = delete;
+  DeletionQueue &operator=(const DeletionQueue &) = delete;
+  DeletionQueue(DeletionQueue &&) = delete;
+  DeletionQueue &operator=(DeletionQueue &&) = delete;
+};
+
 class App {
 public:
   virtual ~App() = default;

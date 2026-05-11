@@ -1,7 +1,8 @@
 #pragma once
 
-#include "dockyard/events.hpp"
-#include "entt/signal/fwd.hpp"
+#include <dockyard/bindless_descriptor.hpp>
+#include <dockyard/events.hpp>
+#include <dockyard/texture.hpp>
 #include <dockyard/types.hpp>
 
 #include <volk.h>
@@ -9,9 +10,10 @@
 #include <VkBootstrap.h>
 #include <entt/entt.hpp>
 #include <vk_mem_alloc.h>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
+
+struct SceneRenderer;
 
 struct VulkanContext {
   vkb::Instance instance{};
@@ -56,6 +58,8 @@ struct RenderContext {
   u64 wait_value;              // Start of this frame's GPU timeline
   VkSemaphore image_available; // Wait on this for the FIRST swapchain touch
   VkSemaphore render_finished; // Signal this in the LAST submit
+
+  auto next_frame_wait_value() const { return wait_value + 1; }
 };
 struct CommandBuffer {
   VkCommandPool command_pool{};
@@ -68,33 +72,20 @@ struct CommandBuffer {
   auto destroy(const VulkanContext &ctx) -> void;
   static auto create(const VulkanContext &ctx) -> CommandBuffer;
 };
-struct RenderTarget {
-  VkImage image{};
-  VkImageView view{};
-  VmaAllocation allocation{};
-  VmaAllocationInfo allocation_info{};
-  VkFormat format{};
-  VkExtent2D extent{};
 
-  auto valid() const -> bool;
-  auto destroy(const VulkanContext &ctx) -> void;
-  static auto create(const VulkanContext &ctx, u32 width, u32 height,
-                     VkFormat format, VkImageUsageFlags usage,
-                     VkImageAspectFlags aspect,
-                     VkSampleCountFlagBits = VK_SAMPLE_COUNT_1_BIT)
-      -> RenderTarget;
-};
 struct ViewportResources {
-  RenderTarget depth_msaa{};
-  RenderTarget forward_target{};
-  RenderTarget forward_target_msaa{};
+  Texture depth_msaa{};
+  Texture forward_target_msaa{};
 
-  auto extent() const { return forward_target.extent; }
+  TextureHandle forward_target{};
 
-  auto resize(const VulkanContext &ctx, u32 width, u32 height) -> void;
+  auto extent() const { return forward_target_msaa.extent; }
+
+  auto resize(const VulkanContext &ctx, SceneRenderer &, u32 width, u32 height)
+      -> void;
   auto destroy(const VulkanContext &ctx) -> void;
-  static auto create(const VulkanContext &ctx, u32 width, u32 height)
-      -> ViewportResources;
+  static auto create(const VulkanContext &ctx, SceneRenderer &, u32 width,
+                     u32 height) -> ViewportResources;
 };
 struct SwapchainResources {
   vkb::Swapchain swapchain{};

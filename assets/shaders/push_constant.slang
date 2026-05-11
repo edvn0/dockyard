@@ -2,16 +2,16 @@ import handle;
 
 struct Transform
 {
-    column_major float4x4 transform;
+    float4x4 transform;
 }
 
 struct FrameUBO
 {
-    column_major float4x4 view;
-    column_major float4x4 projection;
-    column_major float4x4 view_projection;
-    column_major float4x4 inverse_projection;
-    column_major float4x4 inverse_view_projection;
+    float4x4 view;
+    float4x4 projection;
+    float4x4 view_projection;
+    float4x4 inverse_projection;
+    float4x4 inverse_view_projection;
 }
 
 struct Vertex

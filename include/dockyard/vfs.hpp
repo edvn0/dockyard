@@ -1,6 +1,8 @@
 #pragma once
 
 #include <dockyard/log.hpp>
+#include <dockyard/types.hpp>
+#include <dockyard/vfs_path.hpp>
 
 #include <expected>
 #include <filesystem>
@@ -10,6 +12,7 @@
 #include <iostream>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -44,6 +47,12 @@ public:
    */
   auto read_binary(std::string_view virtual_path)
       -> std::expected<std::vector<u32>, std::string>;
+
+  auto read_binary(const VFSPath &)
+      -> std::expected<std::vector<u32>, std::string>;
+
+  auto read_bytes(const VFSPath &)
+      -> std::expected<std::vector<u8>, std::string>;
 
   /**
    * @brief Asynchronous binary read.
