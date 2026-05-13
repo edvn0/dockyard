@@ -395,4 +395,22 @@ auto glfw_error_logger() -> void {
   error("GLFW error: {}", description);
 }
 
+auto DeletionQueue::get() -> DeletionQueue & {
+  static DeletionQueue instance;
+  return instance;
+}
+auto DeletionQueue::push(Fn fn) -> void {
+  per_frame[current_frame].push_back(std::move(fn));
+}
+auto DeletionQueue::flush_all() -> void {
+  std::ranges::for_each(per_frame, [](auto &v) {
+    std::ranges::for_each(v, [](auto &k) { k(); });
+  });
+}
+auto DeletionQueue::flush(u32 frame_index) -> void {
+  for (auto &fn : per_frame[frame_index])
+    fn();
+  per_frame[frame_index].clear();
+}
+
 } // namespace dy

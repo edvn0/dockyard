@@ -4,7 +4,30 @@
 
 namespace dy {
 
-using namespace detail;
+namespace detail {
+
+inline auto is_cubemap_view(VkImageViewType t) -> bool {
+  return t == VK_IMAGE_VIEW_TYPE_CUBE || t == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+}
+
+inline auto is_3d_view(VkImageViewType t) -> bool {
+  return t == VK_IMAGE_VIEW_TYPE_3D;
+}
+
+inline auto is_depth_format(VkFormat f) -> bool {
+  switch (f) {
+  case VK_FORMAT_D16_UNORM:
+  case VK_FORMAT_D32_SFLOAT:
+  case VK_FORMAT_D16_UNORM_S8_UINT:
+  case VK_FORMAT_D24_UNORM_S8_UINT:
+  case VK_FORMAT_D32_SFLOAT_S8_UINT:
+    return true;
+  default:
+    return false;
+  }
+}
+
+} // namespace detail
 
 auto BindlessSet::init(VkDevice dev, BindlessCaps const &caps_init,
                        u32 initial_textures, u32 initial_samplers,
@@ -165,7 +188,7 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
     }
 
     // binding 4 — cubemap
-    if (is_cubemap_view(pw.view_type) && pw.pool_index < max_cubemaps) {
+    if (detail::is_cubemap_view(pw.view_type) && pw.pool_index < max_cubemaps) {
       cubemap_infos.push_back(sampled_infos[i]);
       VkWriteDescriptorSet wds{};
       wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -179,7 +202,7 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
     }
 
     // binding 5 — 3D
-    if (is_3d_view(pw.view_type) && pw.pool_index < max_3d_images) {
+    if (detail::is_3d_view(pw.view_type) && pw.pool_index < max_3d_images) {
       image_3d_infos.push_back(sampled_infos[i]);
       VkWriteDescriptorSet wds{};
       wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -265,11 +288,11 @@ auto BindlessSet::repopulate_if_needed(
       if (i < max_storage_images && tex.storage_view != VK_NULL_HANDLE)
         storage_infos[i].imageView = tex.storage_view;
 
-      if (i < max_cubemaps && is_cubemap_view(view_type) &&
+      if (i < max_cubemaps && detail::is_cubemap_view(view_type) &&
           tex.sampled_view != VK_NULL_HANDLE)
         cubemap_infos[i].imageView = tex.sampled_view;
 
-      if (i < max_3d_images && is_3d_view(view_type) &&
+      if (i < max_3d_images && detail::is_3d_view(view_type) &&
           tex.sampled_view != VK_NULL_HANDLE)
         image_3d_infos[i].imageView = tex.sampled_view;
     }
@@ -437,5 +460,26 @@ auto BindlessSet::recreate() -> void {
   dai.descriptorSetCount = 1u;
   dai.pSetLayouts = &layout;
   vk::check(vkAllocateDescriptorSets(device, &dai, &set));
+}
+auto query_bindless_caps(VkPhysicalDevice pd) -> BindlessCaps {
+  VkPhysicalDeviceAccelerationStructurePropertiesKHR accel_props{};
+  accel_props.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+  VkPhysicalDeviceVulkan12Properties props12{};
+  props12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
+  props12.pNext = &accel_props;
+  VkPhysicalDeviceProperties2 props2{};
+  props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  props2.pNext = &props12;
+  vkGetPhysicalDeviceProperties2(pd, &props2);
+
+  return BindlessCaps{
+      .max_textures = props12.maxDescriptorSetUpdateAfterBindSampledImages,
+      .max_samplers = props12.maxDescriptorSetUpdateAfterBindSamplers,
+      .max_storage_images =
+          props12.maxDescriptorSetUpdateAfterBindStorageImages,
+      .max_accel_structs =
+          accel_props.maxPerStageDescriptorAccelerationStructures,
+  };
 }
 } // namespace dy

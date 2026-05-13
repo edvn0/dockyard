@@ -1,14 +1,28 @@
 #pragma once
 
+#include <dockyard/mesh.hpp>
+#include <dockyard/pipeline_builder.hpp>
 #include <glm/glm.hpp>
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/glm.hpp>
 #include <glm/gtx/quaternion.hpp>
 
+#include <entt/entt.hpp>
+
 namespace dy {
 
 namespace Components {
+
+struct MeshRequest {
+  VFSPath path;
+};
+
+struct Mesh {
+  MeshHandle handle;
+
+  explicit(false) operator MeshHandle() const { return handle; }
+};
 
 struct Camera {
   float fov_degrees = 70.0f;
@@ -84,6 +98,7 @@ struct Transform {
 // Entity / Scene
 // ---------------------------------------------------------------------------
 
+class Scene;
 class Entity {
   entt::registry &reg;
   entt::entity entity;
@@ -91,6 +106,7 @@ class Entity {
 public:
   Entity(entt::registry &r, entt::entity_like auto identifier)
       : reg(r), entity(identifier) {}
+  Entity(Scene &, entt::entity);
 
   explicit Entity(entt::registry &r) : reg(r), entity(reg.create()) {}
 
@@ -110,6 +126,8 @@ class Scene {
   entt::registry scene;
   entt::entity primary_camera_entity{entt::null};
 
+  friend class Entity;
+
 public:
   template <typename... Ts> auto view(auto &&...excludes) -> decltype(auto) {
     return scene.view<Ts...>(std::forward<decltype(excludes)>(excludes)...);
@@ -119,10 +137,8 @@ public:
     return scene.group<Ts...>(std::forward<decltype(excludes)>(excludes)...);
   }
 
-  template <typename... Ts> auto intialise_group(auto &&...excludes) {
-    std::ignore =
-        scene.group<Ts...>(std::forward<decltype(excludes)>(excludes)...);
-  }
+  template <typename T> auto on_construct() { return scene.on_construct<T>(); }
+  template <typename T> auto on_destroy() { return scene.on_destroy<T>(); }
 
   auto make(std::string_view name) -> Entity {
     auto e = Entity{scene};
@@ -133,20 +149,10 @@ public:
 
   auto make_camera(std::string_view name, u32 width, u32 height,
                    glm::vec3 position = {0.0f, 0.0f, 0.0f},
-                   glm::vec3 look_at = {0.0f, 0.0f, 1.0f}) -> Entity {
-    auto e = make(name);
-    auto &cam = e.emplace<Components::Camera>();
-    cam.position = position;
-    cam.set_aspect(width, height);
-    auto [y, p] = Components::Camera::facing_toward(position, look_at);
-    cam.yaw = y;
-    cam.pitch = p;
-    primary_camera_entity = e.handle();
-    return e;
-  }
+                   glm::vec3 look_at = {0.0f, 0.0f, 1.0f}) -> Entity;
 
-  auto set_primary_camera(entt::entity e) -> void { primary_camera_entity = e; }
-  auto clear_primary_camera() -> void { primary_camera_entity = entt::null; }
+  auto set_primary_camera(entt::entity e) -> void;
+  auto clear_primary_camera() -> void;
 
   [[nodiscard]] auto primary_camera() -> Components::Camera * {
     if (primary_camera_entity == entt::null)

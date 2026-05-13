@@ -1,4 +1,3 @@
-#include "PCH.hpp"
 #include <dockyard/app.hpp>
 #include <dockyard/texture.hpp>
 
@@ -7,7 +6,6 @@
 #include <cstring>
 
 #include <dockyard/context.hpp>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
 // ---------------------------------------------------------------------------

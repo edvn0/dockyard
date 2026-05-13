@@ -223,57 +223,12 @@ struct BindlessCaps {
   u32 max_accel_structs;
 };
 
-inline auto query_bindless_caps(VkPhysicalDevice pd) -> BindlessCaps {
-  VkPhysicalDeviceAccelerationStructurePropertiesKHR accel_props{};
-  accel_props.sType =
-      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
-  VkPhysicalDeviceVulkan12Properties props12{};
-  props12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES;
-  props12.pNext = &accel_props;
-  VkPhysicalDeviceProperties2 props2{};
-  props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-  props2.pNext = &props12;
-  vkGetPhysicalDeviceProperties2(pd, &props2);
-
-  return BindlessCaps{
-      .max_textures = props12.maxDescriptorSetUpdateAfterBindSampledImages,
-      .max_samplers = props12.maxDescriptorSetUpdateAfterBindSamplers,
-      .max_storage_images =
-          props12.maxDescriptorSetUpdateAfterBindStorageImages,
-      .max_accel_structs =
-          accel_props.maxPerStageDescriptorAccelerationStructures,
-  };
-}
-
-namespace detail {
-
-inline auto is_cubemap_view(VkImageViewType t) -> bool {
-  return t == VK_IMAGE_VIEW_TYPE_CUBE || t == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
-}
-
-inline auto is_3d_view(VkImageViewType t) -> bool {
-  return t == VK_IMAGE_VIEW_TYPE_3D;
-}
-
-inline auto is_depth_format(VkFormat f) -> bool {
-  switch (f) {
-  case VK_FORMAT_D16_UNORM:
-  case VK_FORMAT_D32_SFLOAT:
-  case VK_FORMAT_D16_UNORM_S8_UINT:
-  case VK_FORMAT_D24_UNORM_S8_UINT:
-  case VK_FORMAT_D32_SFLOAT_S8_UINT:
-    return true;
-  default:
-    return false;
-  }
-}
-
-} // namespace detail
+auto query_bindless_caps(VkPhysicalDevice pd) -> BindlessCaps;
 
 struct PendingTextureWrite {
   u32 pool_index;
-  VkImageView sampled_view; // VK_NULL_HANDLE → use dummy
-  VkImageView storage_view; // VK_NULL_HANDLE → use dummy
+  VkImageView sampled_view;
+  VkImageView storage_view;
   VkImageViewType view_type;
 };
 

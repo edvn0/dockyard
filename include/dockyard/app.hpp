@@ -23,35 +23,20 @@ struct InitialisationContext {
 
 struct DeletionQueue {
   using Fn = std::function<void()>;
-
-  static auto get() -> DeletionQueue & {
-    static DeletionQueue instance;
-    return instance;
-  }
+  static auto get() -> DeletionQueue &;
 
   auto begin_frame(std::unsigned_integral auto frame_index) -> void {
     current_frame = static_cast<u32>(frame_index);
     flush(static_cast<u32>(frame_index));
   }
 
-  auto push(Fn fn) -> void {
-    per_frame[current_frame].push_back(std::move(fn));
-  }
-
-  auto flush_all() {
-    std::ranges::for_each(per_frame, [](auto &v) {
-      std::ranges::for_each(v, [](auto &k) { k(); });
-    });
-  }
+  auto push(Fn fn) -> void;
+  auto flush_all() -> void;
 
 private:
   std::array<std::vector<Fn>, frames_in_flight> per_frame{};
   u32 current_frame = 0u;
-  auto flush(u32 frame_index) -> void {
-    for (auto &fn : per_frame[frame_index])
-      fn();
-    per_frame[frame_index].clear();
-  }
+  auto flush(u32 frame_index) -> void;
 
   DeletionQueue() = default;
   DeletionQueue(const DeletionQueue &) = delete;

@@ -26,27 +26,19 @@ auto GeometryPool::create(VmaAllocator allocator, usize v_size,
 
   pool->material_buffer = Buffer::create(allocator, m_size, common_usage);
 
-  // Initialize the 0th material
   GPUMaterial default_mat{};
-  std::fill_n(default_mat.albedo_factor, 4, 1.0f); // White base
-  default_mat.albedo_factor[0] = 1.0f; // Magenta is common for "missing"
-  default_mat.albedo_factor[2] = 1.0f;
+  std::fill_n(default_mat.albedo_factor, 4, 1.0f);
+  std::fill_n(default_mat.emissive_factor, 3, 0.0f);
   default_mat.roughness_factor = 0.5f;
   default_mat.metallic_factor = 0.0f;
 
-  // Point texture indices to a "default" texture index (usually 0 in your
-  // TextureSystem)
   default_mat.albedo_index = 0;
-  default_mat.normal_index =
-      0; // Should point to a 1x1 flat blue (0.5, 0.5, 1.0)
-  default_mat.metallic_roughness_index = 0;
-  default_mat.emissive_index = 0;
-  default_mat.occlusion_index = 0;
+  default_mat.normal_index = 1;
+  default_mat.metallic_roughness_index = 2;
+  default_mat.emissive_index = 3;
+  default_mat.occlusion_index = 4;
 
-  // Upload to slot 0 and set offset to 1
-  pool->material_buffer->upload(std::span{&default_mat, 1});
-  pool->material_offset = 1;
-
+  pool->allocate_materials(std::span(&default_mat, 1));
   return pool;
 }
 
@@ -152,11 +144,11 @@ auto GeometryPool::allocate_materials(std::span<const MaterialAsset> mats)
     gpu.alpha_cutoff = asset.alpha_cutoff;
 
     gpu.albedo_index = 0; // tex_system.get_index(asset.albedo_texture);
-    gpu.normal_index = 0; // tex_system.get_index(asset.normal_texture);
+    gpu.normal_index = 1; // tex_system.get_index(asset.normal_texture);
     gpu.metallic_roughness_index =
-        0; // tex_system.get_index(asset.metallic_roughness_texture);
-    gpu.emissive_index = 0;  // tex_system.get_index(asset.emissive_texture);
-    gpu.occlusion_index = 0; // tex_system.get_index(asset.occlusion_texture);
+        2; // tex_system.get_index(asset.metallic_roughness_texture);
+    gpu.emissive_index = 3;  // tex_system.get_index(asset.emissive_texture);
+    gpu.occlusion_index = 4; // tex_system.get_index(asset.occlusion_texture);
 
     gpu_materials.push_back(gpu);
   }

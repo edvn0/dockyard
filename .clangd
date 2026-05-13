@@ -1,0 +1,10 @@
+---
+Index:
+  StandardLibrary: true
+
+InlayHints:
+  Designators: true
+
+Style:
+  IncludeStyle:
+    HeaderSearchStrategy: include-path

@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.25)
 project(
   dockforge
   VERSION 0.1.0
-  LANGUAGES CXX
+  LANGUAGES CXX C
 )
 
 # ─── Global settings ──────────────────────────────────────────────────────────
@@ -85,7 +85,6 @@ CPMAddPackage(
   GIT_SHALLOW YES
   DOWNLOAD_ONLY YES
 )
-
 CPMAddPackage(
   NAME ImPlot
   GITHUB_REPOSITORY epezent/implot
@@ -93,13 +92,17 @@ CPMAddPackage(
   GIT_SHALLOW NO
   DOWNLOAD_ONLY YES
 )
-
 CPMAddPackage(
   NAME ImGuizmo
   GITHUB_REPOSITORY CedricGuillemet/ImGuizmo
   GIT_TAG a15acd87a3f3241a29ea1363ceafc680dca3a96b
   GIT_SHALLOW NO
   DOWNLOAD_ONLY YES
+)
+CPMAddPackage(
+  URI "gh:spnda/fastgltf@0.9.0"
+  GIT_SHALLOW YES
+  OPTIONS "FASTGLTF_COMPILE_AS_CPP20 ON FASTGLTF_USE_CUSTOM_SMALLVECTOR ON FASTGLTF_DISABLE_CUSTOM_MEMORY_POOL ON"
 )
 
 set(GLM_ENABLE_SIMD_SSE2 CACHE FORCE "Enable SSE2 optimizations" ON)
@@ -163,6 +166,7 @@ if(ImGui_SOURCE_DIR AND ImPlot_SOURCE_DIR AND ImGuizmo_SOURCE_DIR)
     ${ImGui_SOURCE_DIR}/imgui_widgets.cpp
     ${ImGui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
     ${ImGui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+    ${ImGui_SOURCE_DIR}/misc/freetype/imgui_freetype.cpp
   )
 
   set(IMPLOT_SRCS
@@ -182,17 +186,21 @@ if(ImGui_SOURCE_DIR AND ImPlot_SOURCE_DIR AND ImGuizmo_SOURCE_DIR)
     ${ImGuizmo_SOURCE_DIR}
   )
 
+  find_package(Freetype REQUIRED)
+
   target_link_libraries(imgui PUBLIC
     glfw
     volk
     volk::volk_headers
     X11::X11
+    Freetype::Freetype
   )
 
   target_compile_definitions(imgui
     PUBLIC
     GLFW_INCLUDE_NONE
     IMGUI_IMPL_VULKAN_USE_VOLK
+    IMGUI_ENABLE_FREETYPE
   )
 endif()
 
@@ -220,6 +228,15 @@ target_compile_definitions(dockyard-compiler PRIVATE
     $<$<CONFIG:Debug>:DOCKYARD_DEBUG>)
 target_include_directories(dockyard-compiler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+# --- 3pp
+add_library(ThirdPartySTB STATIC "3PP/stb.c" "3PP/mikktspace.c")
+target_compile_definitions(ThirdPartySTB PRIVATE
+  STB_IMAGE_IMPLEMENTATION
+  STB_IMAGE_RESIZE_IMPLEMENTATION)
+target_include_directories(ThirdPartySTB PUBLIC "3PP")
+
+
+
 # ─── dockyard ─────────────────────────────────────────────────────────────────
 
 get_filename_component(ASSETS_ROOT_ABS "${ASSETS_ROOT}" ABSOLUTE)
@@ -238,6 +255,8 @@ add_library(dockyard STATIC
   src/dockyard/scene_renderer.cpp
   src/dockyard/imgui_renderer.cpp
   src/dockyard/pipeline_builder.cpp
+  src/dockyard/mesh_loader.cpp
+  src/dockyard/scene.cpp
 )
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
 target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -259,6 +278,8 @@ target_link_libraries(dockyard
     vk-bootstrap::vk-bootstrap
     EnTT::EnTT
     glm::glm
+    ThirdPartySTB
+    fastgltf::fastgltf
     ${CMAKE_DL_LIBS}
   PRIVATE
     spdlog::spdlog
@@ -281,7 +302,12 @@ endif()
 
 # ─── dockforge ────────────────────────────────────────────────────────────────
 
-add_executable(dockforge src/dockforge/main.cpp)
+add_executable(dockforge src/dockforge/main.cpp
+  src/dockforge/dockforge.cpp
+  src/dockforge/free_camera_controller.cpp
+  src/dockforge/path_camera_controller.cpp
+  src/dockforge/editor_camera.cpp
+  src/dockforge/editor_utils.cpp)
 target_link_libraries(dockforge PRIVATE dockyard imgui)
 target_set_warnings(dockforge)
 set_target_properties(dockforge PROPERTIES FOLDER apps)

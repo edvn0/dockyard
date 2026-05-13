@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dockyard/mesh.hpp"
 #include <dockyard/bindless_descriptor.hpp>
 #include <dockyard/types.hpp>
 
@@ -84,7 +85,7 @@ struct AllocatedOffset {
 };
 
 struct MaterialOffset {
-  u32 material_index;
+  u32 start_index;
 };
 
 struct GeometryPool {

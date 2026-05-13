@@ -1,4 +1,3 @@
-#include "dockyard/vfs_path.hpp"
 #include <volk.h>
 
 #include <dockyard/bindless_descriptor.hpp>
@@ -6,6 +5,8 @@
 #include <dockyard/imgui_renderer.hpp>
 #include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene_renderer.hpp>
+#include <dockyard/vfs.hpp>
+#include <dockyard/vfs_path.hpp>
 #include <dockyard/vk_check.hpp>
 
 #include <backends/imgui_impl_glfw.h>
@@ -20,7 +21,6 @@
 #include <fstream>
 
 #include <unordered_map>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
 
@@ -78,7 +78,8 @@ auto ImGuiRenderer::begin_frame(ImGuiFramebuffer fb) -> void {
   io.DisplaySize = ImVec2(static_cast<f32>(dim.width) / display_scale,
                           static_cast<f32>(dim.height) / display_scale);
   io.DisplayFramebufferScale = ImVec2(display_scale, display_scale);
-  auto str = VFS::get().resolve(*config_path).string();
+  // FIXME: Lifetime bug
+  static auto str = VFS::get().resolve(*config_path).string();
   io.IniFilename = str.c_str();
 
   if (force_recompile_primary || !main_pipeline.valid()) {
@@ -333,8 +334,9 @@ auto ImGuiRenderer::update_font(FontChoice f) -> void {
                         ImGuiFreeTypeLoaderFlags_LightHinting;
 
   ImFont *font = nullptr;
-  if (std::filesystem::exists(f.font_path.view())) {
-    std::filesystem::path path = f.font_path.view();
+  auto resolved_font_path = VFS::get().resolve(f.font_path);
+  if (std::filesystem::exists(resolved_font_path)) {
+    std::filesystem::path path = resolved_font_path;
     font = io.Fonts->AddFontFromFileTTF(path.c_str(), cfg.SizePixels, &cfg);
   }
 

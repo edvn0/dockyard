@@ -1,7 +1,7 @@
 #pragma once
 
 #include <dockyard/types.hpp>
-#include <dockyard/vfs.hpp>
+#include <dockyard/vfs_path.hpp>
 
 #include <expected>
 #include <memory>

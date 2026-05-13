@@ -35,10 +35,14 @@ auto error(std::format_string<Args...> fmt, Args &&...args) {
 
 template <typename... Args>
 void trace(std::format_string<Args...> fmt, Args &&...args) {
-  if (is_level_enabled(LogLevel::Trace)) {
-    detail::private_log_message(LogLevel::Trace,
-                                std::format(fmt, std::forward<Args>(args)...));
-  }
+  detail::private_log_message(LogLevel::Trace,
+                              std::format(fmt, std::forward<Args>(args)...));
+}
+
+template <typename... Args>
+void debug(std::format_string<Args...> fmt, Args &&...args) {
+  detail::private_log_message(LogLevel::Debug,
+                              std::format(fmt, std::forward<Args>(args)...));
 }
 } // namespace dy
 
