@@ -47,10 +47,12 @@ struct MeshAsset {
 
 namespace mesh {
 
-auto load_from_path(const VFSPath &, SceneRenderer &)
+auto load_from_path_old(const VFSPath &, SceneRenderer &)
     -> std::expected<MeshHandle, std::string>;
 auto load_from_memory(SceneRenderer &, std::span<const Vertex>,
                       std::span<const u32>)
+    -> std::expected<MeshHandle, std::string>;
+auto load_from_path(const VFSPath &, SceneRenderer &)
     -> std::expected<MeshHandle, std::string>;
 } // namespace mesh
 

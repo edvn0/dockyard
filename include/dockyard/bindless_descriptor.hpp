@@ -257,6 +257,7 @@ struct BindlessSet {
   u32 max_accel_structs = 0u;
   u32 max_cubemaps = 1u;
   u32 max_3d_images = 1u;
+  u32 max_2d_arrays = 1u;
 
   bool need_repopulate = false;
 

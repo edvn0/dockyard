@@ -57,9 +57,8 @@ auto resize_buffer(VmaAllocator allocator, std::unique_ptr<Buffer> &old_buffer,
   old_buffer = std::move(new_buffer);
 }
 
-auto dy::GeometryPool::allocate(std::span<const Vertex> vertices,
-                                std::span<const u32> indices)
-    -> AllocatedOffset {
+auto GeometryPool::allocate(std::span<const Vertex> vertices,
+                            std::span<const u32> indices) -> AllocatedOffset {
 
   const usize v_bytes = vertices.size_bytes();
   const usize i_bytes = indices.size_bytes();
@@ -110,6 +109,24 @@ auto dy::GeometryPool::allocate(std::span<const Vertex> vertices,
   return offsets;
 }
 
+void GeometryPool::reserve(usize additional_vertices,
+                           usize additional_indices) {
+  const usize v_bytes = additional_vertices * sizeof(Vertex);
+  const usize sv_bytes = additional_vertices * sizeof(PositionOnlyVertex);
+  const usize i_bytes = additional_indices * sizeof(u32);
+
+  if (vertex_offset + v_bytes > vertex_buffer->size()) {
+    resize_buffer(allocator, vertex_buffer, vertex_offset + v_bytes);
+  }
+  if (index_offset + i_bytes > index_buffer->size()) {
+    resize_buffer(allocator, index_buffer, index_offset + i_bytes);
+  }
+  if (shadow_vertex_offset + sv_bytes > position_only_vertex_buffer->size()) {
+    resize_buffer(allocator, position_only_vertex_buffer,
+                  shadow_vertex_offset + sv_bytes);
+  }
+}
+
 auto GeometryPool::allocate_materials(std::span<const GPUMaterial> mats)
     -> MaterialOffset {
 
@@ -135,7 +152,7 @@ auto GeometryPool::allocate_materials(std::span<const MaterialAsset> mats)
     GPUMaterial gpu{};
 
     std::memcpy(gpu.albedo_factor, asset.albedo_factor, sizeof(float) * 4);
-    std::memcpy(gpu.emissive_factor, asset.emissive_factor, sizeof(float) * 3);
+    std::memcpy(gpu.emissive_factor, asset.emissive_factor, sizeof(float) * 4);
     gpu.metallic_factor = asset.metallic_factor;
     gpu.roughness_factor = asset.roughness_factor;
     gpu.normal_scale = asset.normal_scale;
@@ -153,6 +170,94 @@ auto GeometryPool::allocate_materials(std::span<const MaterialAsset> mats)
     gpu_materials.push_back(gpu);
   }
   return allocate_materials(gpu_materials);
+}
+
+[[nodiscard]] auto GeometryPool::get_materials(u32 base_slot, u32 count) const
+    -> std::span<const GPUMaterial> {
+  auto *ptr =
+      static_cast<const GPUMaterial *>(material_buffer->get_mapped_pointer());
+  assert(base_slot + count <= material_offset && "out of range material read");
+  return {ptr + base_slot, count};
+}
+
+[[nodiscard]] auto GeometryPool::get_materials_mut(u32 base_slot, u32 count)
+    -> std::span<GPUMaterial> {
+  auto *ptr = static_cast<GPUMaterial *>(material_buffer->get_mapped_pointer());
+  assert(base_slot + count <= material_offset && "out of range material read");
+  return {ptr + base_slot, count};
+}
+
+auto GeometryPool::flush_material(u32 slot) -> void {
+  vmaFlushAllocation(allocator, material_buffer->get_allocation(),
+                     slot * sizeof(GPUMaterial), sizeof(GPUMaterial));
+}
+
+auto GeometryPool::flush_materials(u32 base_slot, u32 count) -> void {
+  vmaFlushAllocation(allocator, material_buffer->get_allocation(),
+                     base_slot * sizeof(GPUMaterial),
+                     count * sizeof(GPUMaterial));
+}
+
+auto GeometryPool::allocate_without_flush(std::span<const Vertex> vertices,
+                                          std::span<const u32> indices)
+    -> AllocatedOffset {
+  AllocatedOffset off{vertex_offset, shadow_vertex_offset, index_offset};
+
+  auto *v_dst =
+      (Vertex *)((u8 *)vertex_buffer->get_mapped_pointer() + vertex_offset);
+  auto *sv_dst = (PositionOnlyVertex *)((u8 *)position_only_vertex_buffer
+                                            ->get_mapped_pointer() +
+                                        shadow_vertex_offset);
+  auto *i_dst =
+      (u32 *)((u8 *)index_buffer->get_mapped_pointer() + index_offset);
+
+  std::memcpy(v_dst, vertices.data(), vertices.size_bytes());
+  std::memcpy(i_dst, indices.data(), indices.size_bytes());
+
+  for (usize n = 0; n < vertices.size(); ++n) {
+    sv_dst[n].position[0] = vertices[n].position[0];
+    sv_dst[n].position[1] = vertices[n].position[1];
+    sv_dst[n].position[2] = vertices[n].position[2];
+  }
+
+  vertex_offset += vertices.size_bytes();
+  shadow_vertex_offset += vertices.size() * sizeof(PositionOnlyVertex);
+  index_offset += indices.size_bytes();
+
+  return off;
+}
+
+GeometryTransaction::~GeometryTransaction() {
+  if (!committed)
+    return;
+  pool.flush_range(start_v, pool.vertex_offset - start_v, start_sv,
+                   pool.shadow_vertex_offset - start_sv, start_i,
+                   pool.index_offset - start_i);
+}
+auto GeometryTransaction::allocate(std::span<const Vertex> v,
+                                   std::span<const u32> i) -> AllocatedOffset {
+  return pool.allocate_without_flush(v, i);
+}
+
+void GeometryTransaction::commit() { committed = true; }
+
+auto GeometryPool::flush_range(usize v_off, usize v_size, usize sv_off,
+                               usize sv_size, usize i_off, usize i_size)
+    -> void {
+  if (v_size > 0) {
+    vmaFlushAllocation(allocator, vertex_buffer->get_allocation(), v_off,
+                       v_size);
+  }
+
+  if (sv_size > 0) {
+    vmaFlushAllocation(allocator, position_only_vertex_buffer->get_allocation(),
+                       sv_off, sv_size);
+  }
+
+  if (i_size > 0) {
+    vmaFlushAllocation(allocator, index_buffer->get_allocation(), i_off,
+                       i_size);
+  }
 }
 
 } // namespace dy

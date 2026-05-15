@@ -33,14 +33,11 @@ public:
     return min.x <= max.x && min.y <= max.y && min.z <= max.z;
   }
 
-  // Expand by another AABB (e.g. merging submesh bounds into mesh bounds)
   auto merge(const AABB &other) -> void {
     min = glm::min(min, other.min);
     max = glm::max(max, other.max);
   }
 
-  // Transform into a different space by expanding all 8 corners.
-  // Returns a new axis-aligned box — always conservative, never wrong.
   [[nodiscard]] auto transform(const glm::mat4 &m) const -> AABB {
     AABB result;
     for (int i = 0; i < 8; ++i) {

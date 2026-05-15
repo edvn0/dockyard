@@ -12,6 +12,8 @@ SamplerComparisonState comparison_samplers[];
 TextureCube<float4> sampled_cubemaps[];
 [[vk::binding(5, 0)]]
 Texture3D<float4> sampled_3d_images[];
+[[vk::binding(7, 0)]] [vk::image_format("r32f")]
+Texture2DArray<float> sampled_2d_arrays[];
 
 float4 sample_2d(TextureHandle tex, SamplerHandle samp, float2 uv)
 {
@@ -53,6 +55,26 @@ float sample_shadow(TextureHandle tex, SamplerHandle samp, float2 uv, float comp
         .SampleCmpLevelZero(comparison_samplers[NonUniformResourceIndex(samp.index)], uv, compare_val);
 }
 
+SamplerComparisonState get_comparison_sampler(SamplerHandle samp)
+{
+    return comparison_samplers[NonUniformResourceIndex(samp.index)];
+}
+
+SamplerComparisonState get_comparison_sampler(uint samp)
+{
+    return comparison_samplers[NonUniformResourceIndex(samp)];
+}
+
+Texture2DArray<float> get_texture_2d_array(TextureHandle tex)
+{
+    return sampled_2d_arrays[NonUniformResourceIndex(tex.index)];
+}
+
+Texture2DArray<float> get_texture_2d_array(uint tex)
+{
+    return sampled_2d_arrays[NonUniformResourceIndex(tex)];
+}
+
 float4 load_storage(TextureHandle tex, uint2 coords)
 {
     return storage_images[NonUniformResourceIndex(tex.index)][coords];
@@ -61,6 +83,12 @@ float4 load_storage(TextureHandle tex, uint2 coords)
 void store_storage(TextureHandle tex, uint2 coords, float4 value)
 {
     storage_images[NonUniformResourceIndex(tex.index)][coords] = value;
+}
+
+float4 sample_2d_array(uint tex, SamplerHandle samp, float3 uv_layer)
+{
+    return sampled_2d_arrays[NonUniformResourceIndex(tex)]
+        .Sample(samplers[NonUniformResourceIndex(samp.index)], uv_layer);
 }
 
 // Specialization for RW types

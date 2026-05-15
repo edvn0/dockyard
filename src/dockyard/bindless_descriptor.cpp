@@ -10,6 +10,10 @@ inline auto is_cubemap_view(VkImageViewType t) -> bool {
   return t == VK_IMAGE_VIEW_TYPE_CUBE || t == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
 }
 
+inline auto is_array_view(VkImageViewType t) -> bool {
+  return t == VK_IMAGE_VIEW_TYPE_2D_ARRAY || t == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
+}
+
 inline auto is_3d_view(VkImageViewType t) -> bool {
   return t == VK_IMAGE_VIEW_TYPE_3D;
 }
@@ -47,6 +51,7 @@ auto BindlessSet::init(VkDevice dev, BindlessCaps const &caps_init,
   // cubemaps and 3D images share the sampled-image cap
   max_cubemaps = std::min(initial_textures, caps.max_textures);
   max_3d_images = std::min(initial_storage_images, caps.max_textures);
+  max_2d_arrays = std::min(initial_textures, caps.max_textures);
 
   recreate();
   need_repopulate = true;
@@ -96,14 +101,15 @@ auto BindlessSet::grow_if_needed(u32 req_textures, u32 req_samplers,
   grow_and_clamp(max_accel_structs, req_accel, caps.max_accel_structs);
   grow_and_clamp(max_cubemaps, req_textures, caps.max_textures);
   grow_and_clamp(max_3d_images, req_textures, caps.max_textures);
+  grow_and_clamp(max_2d_arrays, req_textures, caps.max_textures);
 
   if (!grew && layout != VK_NULL_HANDLE)
     return false;
 
   info("BindlessSet growing: textures={} samplers={} comparison_samplers={} "
-       "storage={} cubemaps={} 3d={} accel={}",
+       "storage={} cubemaps={} 3d={} accel={}, 2d_arrays={}",
        max_textures, max_samplers, max_comparison_samplers, max_storage_images,
-       max_cubemaps, max_3d_images, max_accel_structs);
+       max_cubemaps, max_3d_images, max_accel_structs, max_2d_arrays);
 
   destroy();
   need_repopulate = true;
@@ -120,13 +126,11 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
   if (pending_texture_writes.empty())
     return;
 
-  // A full repopulate supersedes any pending incremental writes.
   if (need_repopulate) {
     pending_texture_writes.clear();
     return;
   }
 
-  // Any out-of-range slot means we need a full repopulate next frame.
   for (const auto &pw : pending_texture_writes) {
     if (pw.pool_index >= max_textures) {
       need_repopulate = true;
@@ -137,18 +141,18 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
 
   const u32 n = static_cast<u32>(pending_texture_writes.size());
 
-  // Keep info arrays alive until vkUpdateDescriptorSets returns.
-  // Separate vectors per view type so that .back() pointers never
-  // invalidate when the vectors grow.
   std::vector<VkDescriptorImageInfo> sampled_infos(n);
   std::vector<VkDescriptorImageInfo> storage_infos(n);
   std::vector<VkDescriptorImageInfo> cubemap_infos;
   std::vector<VkDescriptorImageInfo> image_3d_infos;
+  std::vector<VkDescriptorImageInfo> image_array_2d_infos; // New
+
   cubemap_infos.reserve(n);
   image_3d_infos.reserve(n);
+  image_array_2d_infos.reserve(n); // New
 
   std::vector<VkWriteDescriptorSet> writes;
-  writes.reserve(n * 4u);
+  writes.reserve(n * 5u); // Bumped from 4 to 5
 
   for (u32 i = 0u; i < n; ++i) {
     const auto &pw = pending_texture_writes[i];
@@ -161,7 +165,7 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
     sampled_infos[i] = {VK_NULL_HANDLE, sv, VK_IMAGE_LAYOUT_GENERAL};
     storage_infos[i] = {VK_NULL_HANDLE, stv, VK_IMAGE_LAYOUT_GENERAL};
 
-    // binding 0 — sampled
+    // Binding 0 — sampled 2D
     {
       VkWriteDescriptorSet wds{};
       wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -174,7 +178,7 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
       writes.emplace_back(std::move(wds));
     }
 
-    // binding 2 — storage
+    // Binding 2 — storage
     if (pw.pool_index < max_storage_images) {
       VkWriteDescriptorSet wds{};
       wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -187,7 +191,7 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
       writes.emplace_back(std::move(wds));
     }
 
-    // binding 4 — cubemap
+    // Binding 4 — cubemap
     if (detail::is_cubemap_view(pw.view_type) && pw.pool_index < max_cubemaps) {
       cubemap_infos.push_back(sampled_infos[i]);
       VkWriteDescriptorSet wds{};
@@ -198,10 +202,10 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
       wds.descriptorCount = 1u;
       wds.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
       wds.pImageInfo = &cubemap_infos.back();
-      writes.emplace_back(wds);
+      writes.emplace_back(std::move(wds));
     }
 
-    // binding 5 — 3D
+    // Binding 5 — 3D
     if (detail::is_3d_view(pw.view_type) && pw.pool_index < max_3d_images) {
       image_3d_infos.push_back(sampled_infos[i]);
       VkWriteDescriptorSet wds{};
@@ -212,6 +216,20 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
       wds.descriptorCount = 1u;
       wds.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
       wds.pImageInfo = &image_3d_infos.back();
+      writes.emplace_back(std::move(wds));
+    }
+
+    // Binding 7 — 2D Array (CSM, etc)
+    if (detail::is_array_view(pw.view_type) && pw.pool_index < max_2d_arrays) {
+      image_array_2d_infos.push_back(sampled_infos[i]);
+      VkWriteDescriptorSet wds{};
+      wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      wds.dstSet = set;
+      wds.dstBinding = 7u; // Matches your HLSL binding
+      wds.dstArrayElement = pw.pool_index;
+      wds.descriptorCount = 1u;
+      wds.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+      wds.pImageInfo = &image_array_2d_infos.back();
       writes.emplace_back(std::move(wds));
     }
   }
@@ -269,6 +287,8 @@ auto BindlessSet::repopulate_if_needed(
       max_cubemaps, {VK_NULL_HANDLE, dummy_sampled, VK_IMAGE_LAYOUT_GENERAL});
   std::vector<VkDescriptorImageInfo> image_3d_infos(
       max_3d_images, {VK_NULL_HANDLE, dummy_sampled, VK_IMAGE_LAYOUT_GENERAL});
+  std::vector<VkDescriptorImageInfo> image_2d_array_infos(
+      max_2d_arrays, {VK_NULL_HANDLE, dummy_sampled, VK_IMAGE_LAYOUT_GENERAL});
 
   // --- Textures (bindings 0, 2, 4, 5) ---
   {
@@ -295,6 +315,11 @@ auto BindlessSet::repopulate_if_needed(
       if (i < max_3d_images && detail::is_3d_view(view_type) &&
           tex.sampled_view != VK_NULL_HANDLE)
         image_3d_infos[i].imageView = tex.sampled_view;
+
+      if (i < max_2d_arrays && detail::is_array_view(view_type) &&
+          tex.sampled_view != VK_NULL_HANDLE) {
+        image_2d_array_infos[i].imageView = tex.sampled_view;
+      }
     }
   }
 
@@ -341,7 +366,7 @@ auto BindlessSet::repopulate_if_needed(
     };
   };
 
-  const std::array<VkWriteDescriptorSet, 6u> writes{
+  const std::array<VkWriteDescriptorSet, 7u> writes{
       {
           make_image_read_wds(sampled_infos, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                               set, 0u, max_textures),
@@ -356,6 +381,9 @@ auto BindlessSet::repopulate_if_needed(
                               set, 4u, max_cubemaps),
           make_image_read_wds(image_3d_infos, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                               set, 5u, max_3d_images),
+          make_image_read_wds(image_2d_array_infos,
+                              VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, set, 7u,
+                              max_2d_arrays),
       },
   };
 
@@ -386,6 +414,8 @@ auto BindlessSet::recreate() -> void {
       {4u, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, max_cubemaps, VK_SHADER_STAGE_ALL,
        nullptr},
       {5u, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, max_3d_images, VK_SHADER_STAGE_ALL,
+       nullptr},
+      {7u, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, max_2d_arrays, VK_SHADER_STAGE_ALL,
        nullptr},
   }};
 
@@ -435,6 +465,7 @@ auto BindlessSet::recreate() -> void {
       {VK_DESCRIPTOR_TYPE_SAMPLER, max_comparison_samplers},
       {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, max_cubemaps},
       {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, max_3d_images},
+      {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, max_2d_arrays},
   }};
 
   if (accel_enabled) {

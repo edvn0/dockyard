@@ -25,6 +25,9 @@
 #include <string>
 #include <vector>
 
+#include <taskflow/algorithm/for_each.hpp>
+#include <taskflow/taskflow.hpp>
+
 namespace dy {
 
 struct PrimitiveData {
@@ -292,6 +295,7 @@ constexpr u32 k_fb_emissive = 4u;
   gpu.emissive_factor[0] = mat.emissiveFactor[0];
   gpu.emissive_factor[1] = mat.emissiveFactor[1];
   gpu.emissive_factor[2] = mat.emissiveFactor[2];
+  gpu.emissive_factor[3] = mat.emissiveStrength;
 
   gpu.metallic_factor = pbr.metallicFactor;
   gpu.roughness_factor = pbr.roughnessFactor;
@@ -448,9 +452,6 @@ void flatten_nodes(const fastgltf::Asset &asset,
     stack.push_back({idx, -1});
   }
 
-  // We need to resolve root indices before processing — do a pre-pass
-  // to assign them correctly then process iteratively.
-  // Reset and redo cleanly with explicit index tracking:
   out.nodes.clear();
   out.root_node_indices.clear();
   stack.clear();
@@ -461,8 +462,6 @@ void flatten_nodes(const fastgltf::Asset &asset,
     stack.push_back({idx, -1});
   }
 
-  // The root indices above are wrong because nodes aren't emitted yet.
-  // Use a two-vector approach: emit during DFS, track parent by emitted index.
   out.nodes.clear();
   out.root_node_indices.clear();
   stack.clear();
@@ -511,11 +510,8 @@ void flatten_nodes(const fastgltf::Asset &asset,
       }
     }
 
-    info("Primitive count: {}", desc.primitives.size());
-
     out.nodes.push_back(std::move(desc));
 
-    // Push children in reverse so left-to-right DFS order is preserved
     for (auto it = node.children.rbegin(); it != node.children.rend(); ++it)
       dfs.push_back({*it, flat_idx, false});
   }
@@ -570,7 +566,7 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
   return renderer.register_gltf(std::move(result));
 }
 
-auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
+auto load_from_path_old(const VFSPath &path, SceneRenderer &renderer)
     -> std::expected<MeshHandle, std::string> {
   auto &pool = *renderer.geometry_pool;
 
@@ -655,7 +651,6 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
   result.submesh_aabbs.clear();
 
   for (auto &&[mi, mesh] : std::views::enumerate(asset.meshes)) {
-    // Pre-size the inner vector for this specific mesh's primitives
     auto as_usize = static_cast<usize>(mi);
     result.meshes[as_usize].reserve(mesh.primitives.size());
 
@@ -705,6 +700,182 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
        fs_path.filename().string(), asset.images.size(), asset.materials.size(),
        asset.meshes.size(), result.nodes.size());
   return renderer.register_gltf(std::move(result));
+}
+
+struct NanoProfiler {
+  std::string scope;
+  std::chrono::high_resolution_clock::time_point start;
+
+  // Use string_view to avoid unnecessary string allocations
+  explicit NanoProfiler(std::string_view name)
+      : scope(name), start(std::chrono::high_resolution_clock::now()) {}
+
+  ~NanoProfiler() {
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = end - start;
+    trace("[{}]: {}ms", scope, elapsed.count());
+  }
+};
+
+#define PROFILE_CONCAT_INNER(a, b) a##b
+#define PROFILE_CONCAT(a, b) PROFILE_CONCAT_INNER(a, b)
+#define PROFILE_SCOPE(name)                                                    \
+  NanoProfiler PROFILE_CONCAT(profiler_, __COUNTER__)(name)
+
+struct GeometryRequirements {
+  size_t total_vertices = 0;
+  size_t total_indices = 0;
+};
+static auto calculate_requirements(const auto &extracted_prims)
+    -> GeometryRequirements {
+  GeometryRequirements reqs;
+
+  for (const auto &res : extracted_prims) {
+    if (res) {
+      reqs.total_vertices += res->data.vertices.size();
+      reqs.total_indices += res->data.indices.size();
+    }
+  }
+
+  return reqs;
+}
+
+auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
+    -> std::expected<MeshHandle, std::string> {
+
+  auto &pool = *renderer.geometry_pool;
+  const auto fs_path = VFS::get().resolve(path);
+  if (!std::filesystem::exists(fs_path))
+    return std::unexpected("File not found");
+
+  const auto gltf_dir = fs_path.parent_path();
+  fastgltf::Parser parser;
+  auto data = fastgltf::GltfDataBuffer::FromPath(fs_path);
+  auto asset_result = parser.loadGltf(data.get(), gltf_dir,
+                                      fastgltf::Options::GenerateMeshIndices);
+  if (!asset_result)
+    return std::unexpected("Parse error");
+
+  auto &asset = asset_result.get();
+  MeshAsset output_result{
+      .mesh_aabb = AABB::create(),
+  };
+  auto result = std::make_shared<MeshAsset>(output_result);
+  result->mesh_aabb = AABB::create();
+  result->texture_handles.resize(asset.images.size());
+  result->material_slots.resize(asset.materials.size(), 0u);
+
+  const auto color_spaces = classify_images(asset);
+
+  static tf::Executor executor;
+  tf::Taskflow taskflow;
+
+  std::vector<std::expected<DecodedImage, std::string>> decoded_images(
+      asset.images.size());
+  [[maybe_unused]] auto image_group = taskflow.for_each_index(
+      usize(0), asset.images.size(), usize(1), [&](usize i) {
+        decoded_images[i] = load_image(asset, asset.images[i], gltf_dir);
+      });
+
+  struct PrimWork {
+    usize mesh_idx;
+    usize prim_idx;
+    const fastgltf::Primitive *ptr;
+  };
+  std::vector<PrimWork> prim_work_list;
+  for (auto &&[mi, m] : std::views::enumerate(asset.meshes)) {
+    for (auto &&[pi, p] : std::views::enumerate(m.primitives)) {
+      prim_work_list.push_back({(usize)mi, (usize)pi, &p});
+    }
+  }
+
+  std::vector<std::expected<PrimitiveResult, std::string>> extracted_prims(
+      prim_work_list.size(), std::unexpected<std::string>("Could not extract"));
+  [[maybe_unused]] auto mesh_group = taskflow.for_each_index(
+      usize(0), prim_work_list.size(), usize(1), [&](usize i) {
+        extracted_prims[i] = extract_primitive(asset, *prim_work_list[i].ptr);
+      });
+
+  {
+    PROFILE_SCOPE("Wait for threads");
+    executor.run(taskflow).wait();
+  }
+
+  {
+    PROFILE_SCOPE("Decode and upload textures");
+    for (usize i = 0; i < asset.images.size(); ++i) {
+      if (!decoded_images[i]) {
+        result->texture_handles[i] = renderer.dummy_texture_handle;
+        continue;
+      }
+      auto &img = *decoded_images[i];
+      const VkFormat fmt = (color_spaces[i] == ImageColorSpace::srgb)
+                               ? VK_FORMAT_R8G8B8A8_SRGB
+                               : VK_FORMAT_R8G8B8A8_UNORM;
+      result->texture_handles[i] = renderer.upload_texture(
+          img.pixels, "gltf_tex", img.width, img.height, fmt, true, false);
+    }
+  }
+
+  if (!asset.materials.empty()) {
+    PROFILE_SCOPE("Allocate materials");
+    std::vector<GPUMaterial> gpu_mats;
+    for (const auto &mat : asset.materials)
+      gpu_mats.push_back(
+          build_gpu_material(mat, asset, result->texture_handles));
+
+    auto mat_offset = pool.allocate_materials(gpu_mats);
+    result->material_base_slot = mat_offset.start_index;
+    for (usize i = 0; i < gpu_mats.size(); ++i)
+      result->material_slots[i] = result->material_base_slot + (u32)i;
+  }
+
+  {
+    PROFILE_SCOPE("Allocate geometry");
+
+    // 1. Pre-calculate & Safety
+    auto [total_v, total_i] = calculate_requirements(extracted_prims);
+    pool.reserve(total_v, total_i);
+
+    // 2. Start optimized batch
+    auto batch = pool.begin_transaction();
+
+    result->meshes.resize(asset.meshes.size());
+    result->vertex_base_offset = pool.vertex_offset;
+
+    for (usize i = 0; i < prim_work_list.size(); ++i) {
+      auto &res = extracted_prims[i];
+      if (!res)
+        continue;
+
+      auto &[data, aabb] = *res;
+
+      auto offsets = batch.allocate(data.vertices, data.indices);
+
+      result->meshes[prim_work_list[i].mesh_idx].push_back(Mesh{
+          .index_count = (u32)data.indices.size(),
+          .first_index = (u32)(offsets.index_offset / sizeof(u32)),
+          .vertex_offset = (i32)(offsets.vertex_offset / sizeof(Vertex)),
+      });
+    }
+
+    batch.commit();
+  }
+
+  const auto scene_roots =
+      asset.defaultScene.has_value()
+          ? asset.scenes[*asset.defaultScene].nodeIndices
+          : std::vector<unsigned long,
+                        std::pmr::polymorphic_allocator<unsigned long>>{};
+  if (!scene_roots.empty()) {
+    PROFILE_SCOPE("Iterate nodes");
+    flatten_nodes(asset, scene_roots, *result);
+  }
+
+  info("load_gltf: '{}' — {} image(s), {} material(s), {} mesh(es), {} node(s)",
+       fs_path.filename().string(), asset.images.size(), asset.materials.size(),
+       asset.meshes.size(), result->nodes.size());
+  return renderer.register_gltf(std::move(*result));
 }
 
 } // namespace mesh

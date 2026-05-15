@@ -22,6 +22,8 @@ struct GpuPushConstants {
   const DeviceAddress remap_buffer_ptr;                // 8 bytes
   const DeviceAddress frame_ubo;                       // 8 bytes
   const DeviceAddress material_ptr;                    // 8 bytes
+  u32 cascade_index;
+  u32 _pad[3];
 };
 
 struct CompositePushConstants {
@@ -66,6 +68,15 @@ struct InstanceData {
   u32 pad[3];
 };
 
+struct alignas(16) CascadeData {
+  glm::mat4 view_proj;
+  float split_depth; // view-space z of cascade far (negative, RH)
+  float _pad[3];
+};
+
+static constexpr auto shadow_map_cascade_count = 6;
+static constexpr u32 shadow_map_cascade_resolution = 2048;
+
 struct FrameUBO {
   glm::mat4 view;
   glm::mat4 projection;
@@ -74,6 +85,21 @@ struct FrameUBO {
   glm::mat4 inverse_view;
   glm::mat4 inverse_view_projection;
   glm::vec4 camera_position;
+  std::array<CascadeData, shadow_map_cascade_count> cascades{};
+  u32 shadow_array_index;
+  u32 shadow_sampler_index;
+};
+static_assert(sizeof(FrameUBO) % 16 == 0);
+
+struct CsmResources {
+  VkImage image = VK_NULL_HANDLE;
+  VmaAllocation allocation = VK_NULL_HANDLE;
+  VkImageView array_view = VK_NULL_HANDLE;
+  std::array<VkImageView, shadow_map_cascade_resolution> layer_views{};
+
+  TextureHandle bindless_handle;
+
+  void destroy(VkDevice device, VmaAllocator allocator);
 };
 
 auto create_main_pipeline_layout(VkDevice device,
@@ -118,11 +144,27 @@ struct SceneRenderer {
   VkPipelineLayout composite_pipeline_layout{VK_NULL_HANDLE};
   VkPipeline composite_pipeline{VK_NULL_HANDLE};
 
+  CsmResources csm{};
+  struct CsmFrameData {
+    std::array<CascadeData, shadow_map_cascade_count> cascades{};
+    u32 shadow_array_index = 0u;
+    u32 shadow_sampler_index = 0u;
+  } csm_frame_data;
+  VkSampler shadow_comparison_sampler_vk = VK_NULL_HANDLE;
+  u32 shadow_sampler_bindless_idx = 0u;
+
+  std::array<CascadeData, shadow_map_cascade_count> cascade_cpu_data{};
+  glm::vec3 sun_direction =
+      glm::normalize(glm::vec3{0, 0, 0} - glm::vec3{3, 7, 5});
+
+  PipelineHandle shadow_pipeline;
+
   // -----------------------------------------------------------------------
 
   explicit SceneRenderer(VulkanContext &c, SwapchainResources &sc);
 
   auto initialise_bindless(TextureHandle white) -> void;
+  void init_csm();
   auto upload_texture(std::span<const u32> data, std::string_view name, u32 w,
                       u32 h, VkFormat fmt, bool gen_mips, bool storage = true)
       -> TextureHandle;
@@ -130,21 +172,33 @@ struct SceneRenderer {
   auto resize() -> void;
   auto destroy() -> void;
 
+  void ensure_global_capacity(usize instance_count);
+
+  // Prepare should setup frame index.
+  void prepare(u64 frame_index, const glm::mat4 &view,
+               const glm::mat4 &projection);
+
   void submit(MeshHandle handle, const Components::Transform &t, u32 p_id = 0u,
               u32 m_id = 0u);
   void submit(const Mesh &mesh, const Components::Transform &t, u32 p_id,
               u32 m_id);
 
-  void ensure_global_capacity(usize instance_count);
-  void prepare(u64 frame_index, const glm::mat4 &view,
-               const glm::mat4 &projection);
-  void render_pass(VkCommandBuffer cmd, u64 frame_index, GeometryPool &pool,
-                   RenderPass &pass,
+  void update_csm(const glm::mat4 &view, const glm::mat4 &proj,
+                  float camera_near, float camera_far);
+  void render_shadow_cascade(VkCommandBuffer cmd, u32 cascade_idx);
+  void render_pass(VkCommandBuffer, RenderPass &,
                    VkPipeline override_pipeline = VK_NULL_HANDLE);
-  void composite_pass(VkCommandBuffer cmd);
+  void composite_pass(VkCommandBuffer);
 
   auto register_gltf(MeshAsset &&asset) -> MeshHandle;
+  auto register_external_view(VkImageView view, VkImageViewType type)
+      -> TextureHandle;
   auto get_mesh(MeshHandle handle) -> MeshAsset *;
+  auto get_mesh(MeshHandle handle) const -> const MeshAsset *;
+  [[nodiscard]] auto get_material_view(MeshHandle handle) const
+      -> ConstMaterialView;
+  [[nodiscard]] auto get_material_view_mut(MeshHandle handle)
+      -> MutableMaterialView;
 };
 
 } // namespace dy

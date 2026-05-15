@@ -3,6 +3,7 @@
 #include <volk.h>
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <format>

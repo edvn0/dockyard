@@ -1,10 +1,12 @@
 #pragma once
 
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string_view>
 #include <unordered_map>
+
 
 namespace dy {
 
@@ -18,6 +20,12 @@ using f32 = float;
 using f64 = double;
 
 inline constexpr u32 frames_in_flight = 3;
+
+constexpr usize next_power_of_two(usize n) {
+  if (n == 0)
+    return 1;
+  return std::bit_ceil(n);
+}
 
 namespace detail {
 struct string_hash {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dockyard/canvas_renderer.hpp"
 #include <dockforge/scene_outlier.hpp>
 #include <dockyard/app.hpp>
 #include <dockyard/scene.hpp>
@@ -34,6 +35,7 @@ struct Dockforge : App {
   VulkanContext *context{};
   std::unique_ptr<EditorCamera> editor_camera;
   std::unique_ptr<ImGuiRenderer> imgui_renderer;
+  std::unique_ptr<CanvasRenderer> canvas_renderer;
   std::unique_ptr<SceneRenderer> renderer;
   ViewportResources viewport_resources;
 
@@ -57,6 +59,8 @@ struct Dockforge : App {
   auto on_mouse_moved(const events::mouse_moved &e) -> void override;
   auto on_key_released(const events::key_released &e) -> void override;
   [[nodiscard]] auto resolve_camera() const -> std::pair<glm::mat4, glm::mat4>;
+  [[nodiscard]] auto resolve_camera_with_position() const
+      -> std::tuple<glm::mat4, glm::mat4, glm::vec3>;
   auto resize(u32 w, u32 h) -> void override;
   auto try_pick_entity(glm::vec2 mouse_screen) -> void;
   void refresh_entity_cache();

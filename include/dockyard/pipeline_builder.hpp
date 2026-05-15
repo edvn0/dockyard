@@ -67,9 +67,6 @@ struct BlendMode {
   }
 };
 
-// ── Depth state
-// ───────────────────────────────────────────────────────────────
-
 struct DepthState {
   bool test = false;
   bool write = false;
@@ -100,10 +97,11 @@ struct GraphicsPipelineDescription {
   VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
 
   DepthState depth{};
-  // One entry per colour attachment. Shorter vectors are padded with opaque().
   std::vector<BlendMode> blending{};
 
   std::vector<VkDynamicState> extra_dynamic_states{};
+
+  f32 line_width{1.0F};
 };
 
 struct ComputePipelineDescription {
@@ -163,7 +161,7 @@ struct PipelineRegistry {
 
   auto reload_all() -> void;
 
-  [[nodiscard]] auto get(PipelineHandle id) const -> decltype(auto) {
+  [[nodiscard]] auto get(PipelineHandle id) const -> const auto & {
     return entries[id.get()].pipeline;
   }
 

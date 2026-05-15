@@ -1,5 +1,6 @@
 import push_constant;
 import bindless;
+import include.csm;
 
 static const float PI = 3.14159265359f;
 
@@ -115,7 +116,7 @@ float4 fragmentMain(V2F input) : SV_Target
 
     // Emissive
     float3 emissive = sample_material_tex(mat.emissive_index, input.uv).rgb
-                    * mat.emissive_factor;
+                    * mat.emissive_factor.xyz * mat.emissive_factor.a;
 
     // Occlusion
     float occlusion = sample_material_tex(mat.occlusion_index, input.uv).r;
@@ -153,7 +154,10 @@ float4 fragmentMain(V2F input) : SV_Target
     float3 kd_ambient = (1.0f - f_ambient) * (1.0f - metallic);
     float3 ambient = (kd_ambient * albedo.rgb + f_ambient * f0) * ambient_color;
 
-    float3 final_color = (direct + ambient) * ao + emissive;
+    float view_depth = -1.0 / input.pos.w;
+    var shadow_result = compute_shadow(input.world_pos, n, sun_dir, view_depth, *pc.frame_ubo);
+
+    float3 final_color = shadow_result._0 * (direct + ambient) * ao + emissive;
 
     return float4(final_color, albedo.a);
 }

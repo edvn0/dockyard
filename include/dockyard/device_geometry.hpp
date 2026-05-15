@@ -32,23 +32,22 @@ static_assert(sizeof(PositionOnlyVertex) == 12);
 
 struct GPUMaterial {
   alignas(16) float albedo_factor[4];
-  alignas(16) float emissive_factor[3];
+  alignas(16) float emissive_factor[4];
   float metallic_factor;
 
   float roughness_factor;
   float normal_scale;
   float occlusion_strength;
-  uint32_t alpha_mode;
+  u32 alpha_mode;
 
   float alpha_cutoff;
-  uint32_t albedo_index;
-  uint32_t normal_index;
-  uint32_t metallic_roughness_index;
+  u32 albedo_index;
+  u32 normal_index;
+  u32 metallic_roughness_index;
 
-  uint32_t emissive_index;
-  uint32_t occlusion_index;
-  uint32_t pad0;
-  uint32_t pad1;
+  u32 emissive_index;
+  u32 occlusion_index;
+  u32 pad0;
 };
 static_assert(std::is_trivially_copyable_v<GPUMaterial>);
 static_assert(sizeof(GPUMaterial) % 16 == 0);
@@ -59,7 +58,7 @@ struct MaterialAsset {
   std::string name;
 
   float albedo_factor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-  float emissive_factor[3] = {0.0f, 0.0f, 0.0f};
+  float emissive_factor[4] = {0.0f, 0.0f, 0.0f, 0.0F};
   float metallic_factor = 1.0f;
   float roughness_factor = 1.0f;
 
@@ -88,6 +87,34 @@ struct MaterialOffset {
   u32 start_index;
 };
 
+namespace detail {
+
+template <typename T> struct BasicMaterialView {
+  std::span<T> materials;
+  u32 base_slot = 0;
+
+  auto empty() const -> bool { return materials.empty(); }
+  auto size() const -> u32 { return static_cast<u32>(materials.size()); }
+  auto operator[](u32 i) const -> T & { return materials[i]; }
+  auto slot(u32 i) const -> u32 { return base_slot + i; }
+};
+} // namespace detail
+
+using MutableMaterialView = detail::BasicMaterialView<GPUMaterial>;
+using ConstMaterialView = detail::BasicMaterialView<const GPUMaterial>;
+
+struct GeometryPool;
+struct GeometryTransaction {
+  GeometryPool &pool;
+  usize start_v, start_sv, start_i;
+  bool committed = false;
+
+  ~GeometryTransaction();
+  auto allocate(std::span<const Vertex> v, std::span<const u32> i)
+      -> AllocatedOffset;
+  void commit();
+};
+
 struct GeometryPool {
   VmaAllocator allocator{};
   std::unique_ptr<Buffer> vertex_buffer;
@@ -105,7 +132,25 @@ struct GeometryPool {
       -> std::unique_ptr<GeometryPool>;
   auto allocate(std::span<const Vertex> vertices, std::span<const u32> indices)
       -> AllocatedOffset;
+  auto allocate_without_flush(std::span<const Vertex> vertices,
+                              std::span<const u32> indices) -> AllocatedOffset;
   auto allocate_materials(std::span<const GPUMaterial>) -> MaterialOffset;
   auto allocate_materials(std::span<const MaterialAsset>) -> MaterialOffset;
+
+  void reserve(usize additional_vertices, usize additional_indices);
+  void reserve_materials(usize additional_mats);
+
+  [[nodiscard]] auto get_materials(u32 base_slot, u32 count) const
+      -> std::span<const GPUMaterial>;
+  [[nodiscard]] auto get_materials_mut(u32 base_slot, u32 count)
+      -> std::span<GPUMaterial>;
+  auto flush_material(u32 slot) -> void;
+  auto flush_materials(u32 base_slot, u32 count) -> void;
+
+  auto flush_range(usize v_off, usize v_size, usize sv_off, usize sv_size,
+                   usize i_off, usize i_size) -> void;
+  auto begin_transaction() -> GeometryTransaction {
+    return {*this, vertex_offset, shadow_vertex_offset, index_offset};
+  }
 };
 } // namespace dy

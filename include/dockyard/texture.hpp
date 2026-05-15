@@ -20,6 +20,7 @@ struct Texture {
   VkFormat format{};
   VkExtent2D extent{};
   u32 mip_levels{1};
+  bool owned{true};
 
   auto valid() const -> bool { return image != VK_NULL_HANDLE; }
   auto destroy(const VulkanContext &ctx) -> void;

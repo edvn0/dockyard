@@ -132,12 +132,6 @@ auto ImGuiRenderer::render(VkCommandBuffer cmd) -> void {
   render_draw_data(cmd, ImGui::GetDrawData(), main_pipeline);
 }
 
-constexpr usize next_power_of_two(usize n) {
-  if (n == 0)
-    return 1;
-  return std::bit_ceil(n);
-}
-
 auto ImGuiRenderer::render_draw_data(VkCommandBuffer cmd, ImDrawData *dd,
                                      const PipelineHandle &pipeline) -> void {
   if (!dd || dd->TotalIdxCount == 0) {
@@ -328,8 +322,8 @@ auto ImGuiRenderer::update_font(FontChoice f) -> void {
   cfg.RasterizerMultiply = 1.5f;
   cfg.SizePixels = std::ceilf(f.size);
   cfg.PixelSnapH = true;
-  cfg.OversampleH = 2;
-  cfg.OversampleV = 1;
+  cfg.OversampleH = 4;
+  cfg.OversampleV = 4;
   cfg.FontLoaderFlags = ImGuiFreeTypeLoaderFlags_ForceAutoHint |
                         ImGuiFreeTypeLoaderFlags_LightHinting;
 

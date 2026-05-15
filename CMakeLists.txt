@@ -85,6 +85,19 @@ CPMAddPackage(
   GIT_SHALLOW YES
   DOWNLOAD_ONLY YES
 )
+set(TF_BUILD_CUDA CACHE FORCE "Build CUDA" OFF)
+set(TF_BUILD_TESTS CACHE FORCE "" OFF)
+set(TF_BUILD_EXAMPLES CACHE FORCE "" OFF)
+CPMAddPackage(
+  NAME taskflow
+  GITHUB_REPOSITORY taskflow/taskflow
+  GIT_TAG master
+  GIT_SHALLOW YES
+  OPTIONS
+    "TF_BUILD_CUDA OFF"
+    "TF_BUILD_TESTS OFF"
+    "TF_BUILD_EXAMPLES OFF"
+)
 CPMAddPackage(
   NAME ImPlot
   GITHUB_REPOSITORY epezent/implot
@@ -155,6 +168,9 @@ set(DOCKYARD_SUPPRESSED_WARNINGS
   -Wno-c2y-extensions
   -Wno-free-nonheap-object
   -Wno-missing-designated-field-initializers
+  -Wno-sign-conversion
+  -Wno-implicit-int-float-conversion
+  -Wno-shorten-64-to-32
 )
 
 if(ImGui_SOURCE_DIR AND ImPlot_SOURCE_DIR AND ImGuizmo_SOURCE_DIR)
@@ -244,8 +260,8 @@ get_filename_component(ASSETS_ROOT_ABS "${ASSETS_ROOT}" ABSOLUTE)
 add_library(dockyard STATIC
   src/dockyard/context.cpp
   src/dockyard/app.cpp
-        src/dockyard/log.cpp
-        src/dockyard/buffer.cpp
+  src/dockyard/log.cpp
+  src/dockyard/buffer.cpp
   src/dockyard/event_callbacks.cpp
   src/dockyard/vfs.cpp
   src/dockyard/renderdoc.cpp
@@ -257,6 +273,7 @@ add_library(dockyard STATIC
   src/dockyard/pipeline_builder.cpp
   src/dockyard/mesh_loader.cpp
   src/dockyard/scene.cpp
+  src/dockyard/canvas_renderer.cpp
 )
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
 target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -280,6 +297,7 @@ target_link_libraries(dockyard
     glm::glm
     ThirdPartySTB
     fastgltf::fastgltf
+    Taskflow::Taskflow
     ${CMAKE_DL_LIBS}
   PRIVATE
     spdlog::spdlog

@@ -217,6 +217,7 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   features.multiDrawIndirect = VK_TRUE;
   features.samplerAnisotropy = VK_TRUE;
   features.textureCompressionBC = VK_TRUE;
+  features.wideLines = VK_TRUE;
 
   VkPhysicalDeviceVulkan11Features features_11{};
   features_11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
@@ -255,6 +256,8 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   features_14.maintenance5 = VK_TRUE;
   features_14.maintenance6 = VK_TRUE;
   features_14.pushDescriptor = VK_TRUE;
+  features_14.smoothLines = VK_TRUE;
+  features_14.stippledSmoothLines = VK_TRUE;
 
   VkPhysicalDevicePresentIdFeaturesKHR present_id_features{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
@@ -419,6 +422,92 @@ auto CommandBuffer::create(const VulkanContext &ctx) -> CommandBuffer {
     std::abort();
   }
   return cb;
+}
+
+auto VulkanContext::transition_to_general(VkImage image) const -> void {
+  one_time_submit([img = image](VkCommandBuffer cmd) {
+    const VkImageMemoryBarrier2 barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+        .srcAccessMask = VK_ACCESS_2_NONE,
+        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+        .dstAccessMask =
+            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = img,
+        .subresourceRange =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = shadow_map_cascade_count,
+            },
+    };
+
+    const VkDependencyInfo dep_info{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &barrier,
+    };
+
+    vkCmdPipelineBarrier2(cmd, &dep_info);
+  });
+}
+
+auto VulkanContext::one_time_submit(
+    std::function<void(VkCommandBuffer)> &&func) const -> void {
+  VkCommandPoolCreateInfo pool_info{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+      .queueFamilyIndex = graphics_queue_index,
+  };
+  VkCommandPool pool;
+  vkCreateCommandPool(device, &pool_info, nullptr, &pool);
+
+  VkCommandBufferAllocateInfo alloc_info{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+  };
+  VkCommandBuffer cmd;
+  vkAllocateCommandBuffers(device, &alloc_info, &cmd);
+
+  VkCommandBufferBeginInfo begin_info{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+  };
+  vkBeginCommandBuffer(cmd, &begin_info);
+
+  func(cmd);
+
+  vkEndCommandBuffer(cmd);
+
+  VkSubmitInfo2 submit_info{
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+      .commandBufferInfoCount = 1,
+      .pCommandBufferInfos =
+          new VkCommandBufferSubmitInfo{
+              .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+              .commandBuffer = cmd,
+          },
+  };
+
+  /* VkFence fence;
+   vkCreateFence(device, &fence_info, nullptr, &fence);
+   vkQueueSubmit2(graphics_queue(), 1, &submit_info, fence);
+   vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+   vkDestroyFence(device, fence, nullptr); */
+
+  vkQueueSubmit2(graphics_queue(), 1, &submit_info, VK_NULL_HANDLE);
+  vkQueueWaitIdle(graphics_queue()); // Wait here
+
+  delete submit_info.pCommandBufferInfos;
+  vkDestroyCommandPool(device, pool, nullptr);
 }
 
 } // namespace dy

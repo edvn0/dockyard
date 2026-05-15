@@ -27,6 +27,11 @@ struct VulkanContext {
   auto graphics_queue() const -> VkQueue;
   auto present_queue() const -> VkQueue;
   auto destroy() -> void;
+
+  auto one_time_submit(std::function<void(VkCommandBuffer)> &&func) const
+      -> void;
+  auto transition_to_general(VkImage) const -> void;
+
   static auto create(vkb::Instance &&inst, VkSurfaceKHR &&s) -> VulkanContext;
 };
 struct FrameSync {

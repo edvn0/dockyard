@@ -3,6 +3,7 @@
 #include <dockyard/log.hpp>
 
 #include <ranges>
+#include <vulkan/vulkan_core.h>
 
 namespace dy {
 
@@ -154,6 +155,18 @@ auto build_graphics_pipeline(VkDevice device,
   const VkPipelineVertexInputStateCreateInfo vertex_input{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
   };
+  VkPipelineRasterizationLineStateCreateInfoKHR line_smoothness{};
+  line_smoothness.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO;
+  line_smoothness.stippledLineEnable =
+      desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
+      desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+  line_smoothness.lineRasterizationMode =
+      VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH;
+  line_smoothness.stippledLineEnable = VK_FALSE;
+  line_smoothness.lineStipplePattern = 0xCC;
+  line_smoothness.lineStippleFactor = 1;
+
   const VkPipelineInputAssemblyStateCreateInfo input_assembly{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
       .topology = desc.topology,
@@ -165,10 +178,14 @@ auto build_graphics_pipeline(VkDevice device,
   };
   const VkPipelineRasterizationStateCreateInfo rasterizer{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
+      .pNext = desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
+                       desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
+                   ? &line_smoothness
+                   : nullptr,
       .polygonMode = desc.polygon_mode,
       .cullMode = desc.cull_mode,
       .frontFace = desc.front_face,
-      .lineWidth = 1.0f,
+      .lineWidth = desc.line_width,
   };
   const VkPipelineMultisampleStateCreateInfo multisampling{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
