@@ -9,8 +9,7 @@
 
 #include <entt/entt.hpp>
 
-namespace dy {
-namespace Components {
+namespace dy::Components {
 
 struct MeshRequest {
   VFSPath path;
@@ -90,5 +89,4 @@ struct Transform {
   }
 };
 
-} // namespace Components
-} // namespace dy
+} // namespace dy::Components

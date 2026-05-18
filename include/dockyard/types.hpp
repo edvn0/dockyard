@@ -28,7 +28,7 @@ constexpr usize next_power_of_two(usize n) {
 }
 
 namespace detail {
-struct string_hash {
+struct StringHash {
   using is_transparent = void;
 
   constexpr auto operator()(std::string_view sv) const {
@@ -36,7 +36,7 @@ struct string_hash {
   }
 };
 
-struct string_equal {
+struct StringEqual {
   using is_transparent = void;
 
   constexpr auto operator()(std::string_view lhs, std::string_view rhs) const {
@@ -44,7 +44,7 @@ struct string_equal {
   }
 };
 
-struct string_compare {
+struct StringCompare {
   using is_transparent = void;
 
   auto operator()(std::string_view lhs, std::string_view rhs) const {
@@ -54,10 +54,10 @@ struct string_compare {
 } // namespace detail
 
 template <typename T>
-using StringMap = std::unordered_map<std::string, T, detail::string_hash,
-                                     detail::string_equal>;
+using StringMap =
+    std::unordered_map<std::string, T, detail::StringHash, detail::StringEqual>;
 template <typename T>
-using OrderedStringMap = std::map<std::string, T, detail::string_compare>;
+using OrderedStringMap = std::map<std::string, T, detail::StringCompare>;
 
 #define MAKE_BITFIELD(T)                                                       \
   inline constexpr T operator|(T lhs, T rhs) {                                 \

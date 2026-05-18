@@ -2,6 +2,7 @@
 
 #include <dockyard/app.hpp>
 #include <dockyard/device_geometry.hpp>
+#include <dockyard/mesh.hpp>
 #include <dockyard/vfs_path.hpp>
 
 #include <glm/glm.hpp>
@@ -32,7 +33,7 @@ struct MeshAsset {
   std::vector<std::vector<Mesh>> meshes;
 
   AABB mesh_aabb;
-  std::vector<AABB> submesh_aabbs{};
+  std::vector<AABB> submesh_aabbs;
 
   usize vertex_base_offset{};
   usize shadow_vertex_base_offset{};

@@ -1,9 +1,9 @@
-#include <atomic>
 #include <dockyard/scene_renderer.hpp>
 
+#include <atomic>
 #include <dockyard/device_geometry.hpp>
+#include <dockyard/mesh.hpp>
 #include <limits>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
 
@@ -12,7 +12,7 @@ auto create_main_pipeline_layout(VkDevice device,
     -> VkPipelineLayout {
   const VkPushConstantRange push_range{
       .stageFlags = VK_SHADER_STAGE_ALL,
-      .offset = 0u,
+      .offset = 0U,
       .size = sizeof(GpuPushConstants),
   };
 
@@ -238,18 +238,15 @@ auto SceneRenderer::upload_texture(std::span<const u32> data,
                                    std::string_view name, u32 w, u32 h,
                                    VkFormat fmt, bool gen_mips, bool storage)
     -> TextureHandle {
-  auto tex =
-      Texture::from_bytes(ctx, name,
-                          {
-                              .bytes = data,
-                              .width = w,
-                              .height = h,
-                              .format = fmt,
-                              .generate_mips = gen_mips,
-                              .storage_view = storage,
-                              .upload_queue = ctx.graphics_queue(),
-                              .upload_queue_family = ctx.graphics_queue_index,
-                          });
+  auto tex = Texture::from_bytes(ctx, name,
+                                 {
+                                     .bytes = data,
+                                     .width = w,
+                                     .height = h,
+                                     .format = fmt,
+                                     .generate_mips = gen_mips,
+                                     .storage_view = storage,
+                                 });
 
   bindless.need_repopulate = true;
   return textures.create(TextureEntry{
@@ -462,7 +459,7 @@ void RenderPass::bake(const std::vector<PendingDraw> &scene_draws) {
   std::vector<DrawRef> sorted_refs;
   sorted_refs.reserve(scene_draws.size());
   for (u32 i = 0u; i < scene_draws.size(); ++i)
-    sorted_refs.push_back({i, &scene_draws[i]});
+    sorted_refs.push_back({.global_idx = i, .data = &scene_draws[i]});
 
   std::ranges::sort(sorted_refs, [this](const auto &a, const auto &b) {
     return a.data->get_key(type) < b.data->get_key(type);
@@ -485,10 +482,10 @@ void RenderPass::bake(const std::vector<PendingDraw> &scene_draws) {
       const u32 count_idx = static_cast<u32>(draw_counts.size());
       draw_counts.push_back(0u);
       batches.push_back({
-          data->pipeline_id,
-          0u,
-          static_cast<u32>(commands.size()),
-          count_idx * static_cast<u32>(sizeof(u32)),
+          .pipeline_id = data->pipeline_id,
+          .max_command_count = 0U,
+          .first_command_index = static_cast<u32>(commands.size()),
+          .count_buffer_offset = count_idx * static_cast<u32>(sizeof(u32)),
       });
     }
 
@@ -525,7 +522,7 @@ void RenderPass::bake(const std::vector<PendingDraw> &scene_draws) {
 void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
                                           u32 cascade_idx) {
   auto &pass = depth_prepass;
-  auto pipeline = pipeline_registry->get(shadow_pipeline);
+  const auto &pipeline = pipeline_registry->get(shadow_pipeline);
   if (pass.batches.empty())
     return;
 
@@ -566,104 +563,121 @@ void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
   }
 }
 
-auto compute_cascade_splits(float near, float far, float lambda = 0.85f) {
+static auto compute_cascade_splits(float near_z, float far_z,
+                                   float lambda = 0.85f)
+    -> std::array<float, shadow_map_cascade_count> {
   std::array<float, shadow_map_cascade_count> splits{};
-  float range = far - near;
-  float ratio = far / near;
+  const float range = far_z - near_z;
+  const float ratio = far_z / near_z;
 
   for (u32 i = 0; i < shadow_map_cascade_count; ++i) {
-    float p = static_cast<float>(i + 1) /
-              static_cast<float>(shadow_map_cascade_count);
-    float log_split = near * std::pow(ratio, p);
-    float uni_split = near + range * p;
+    const float p = static_cast<float>(i + 1) /
+                    static_cast<float>(shadow_map_cascade_count);
+    const float log_split = near_z * std::pow(ratio, p);
+    const float uni_split = near_z + range * p;
     splits[i] = lambda * log_split + (1.0f - lambda) * uni_split;
   }
   return splits;
 }
 
-std::array<glm::vec3, 8> frustum_corners_world(const glm::mat4 &inv_view_proj,
-                                               float z_start, float z_end) {
+// Generic — works for both standard and reverse-Z projections.
+// Reverse-Z: near_z -> 1.0, far_z -> 0.0.
+static auto split_to_ndc_z(const glm::mat4 &proj, float view_z) -> float {
+  const glm::vec4 clip = proj * glm::vec4(0.0f, 0.0f, view_z, 1.0f);
+  return clip.z / clip.w;
+}
+
+// z_near_ndc / z_far_ndc are in the camera's NDC convention.
+// Reverse-Z: pass z_near_ndc=1.0, z_far_ndc<1.0 for each cascade.
+static auto frustum_corners_world(const glm::mat4 &inv_view_proj,
+                                  float z_near_ndc, float z_far_ndc)
+    -> std::array<glm::vec3, 8> {
+  const glm::vec4 ndc[8] = {
+      {-1.0f, 1.0f, z_near_ndc, 1.0f}, {1.0f, 1.0f, z_near_ndc, 1.0f},
+      {1.0f, -1.0f, z_near_ndc, 1.0f}, {-1.0f, -1.0f, z_near_ndc, 1.0f},
+      {-1.0f, 1.0f, z_far_ndc, 1.0f},  {1.0f, 1.0f, z_far_ndc, 1.0f},
+      {1.0f, -1.0f, z_far_ndc, 1.0f},  {-1.0f, -1.0f, z_far_ndc, 1.0f},
+  };
+
   std::array<glm::vec3, 8> corners;
-
-  // NDC corners in LH: -1 to 1 for X/Y
-  // Z is whatever you pass in (for Rev-Z: Near=1, Far=0)
-  glm::vec4 ndc[8] = {{-1, 1, z_start, 1}, {1, 1, z_start, 1},
-                      {1, -1, z_start, 1}, {-1, -1, z_start, 1},
-                      {-1, 1, z_end, 1},   {1, 1, z_end, 1},
-                      {1, -1, z_end, 1},   {-1, -1, z_end, 1}};
-
   for (u32 i = 0; i < 8; ++i) {
-    glm::vec4 world = inv_view_proj * ndc[i];
-    // Critical: Check for w=0 to avoid NaN if splits are at infinity
-    float w = std::abs(world.w) > 0.00001f ? world.w : 1.0f;
+    const glm::vec4 world = inv_view_proj * ndc[i];
+    const float w = std::abs(world.w) > 1e-5f ? world.w : 1.0f;
     corners[i] = glm::vec3(world) / w;
   }
   return corners;
 }
 
-CascadeData compute_cascade(const glm::mat4 &camera_view,
+// light_toward_sun: unit vector pointing *toward* the sun.
+// This is the L vector used in dot(N, L) diffuse lighting — i.e. (0, 1, 0)
+// for a sun directly overhead.
+//
+// Shadow maps use standard (non-reversed) Z.  Ortho projections do not have
+// the precision cliffs that motivate reverse-Z, and standard Z keeps the
+// sampler comparison op straightforward (VK_COMPARE_OP_LESS_OR_EQUAL).
+static auto compute_cascade(const glm::mat4 &camera_view,
                             const glm::mat4 &camera_proj, float prev_split_ndc,
                             float curr_split_ndc, float curr_split_view,
-                            const glm::vec3 &light_dir) {
-  glm::mat4 inv_view_proj = glm::inverse(camera_proj * camera_view);
-  auto corners =
+                            const glm::vec3 &light_toward_sun) -> CascadeData {
+  const glm::mat4 inv_view_proj = glm::inverse(camera_proj * camera_view);
+  const auto corners =
       frustum_corners_world(inv_view_proj, prev_split_ndc, curr_split_ndc);
 
-  // 1. Calculate center
+  // --- 1. Minimum bounding sphere ---
   glm::vec3 center(0.0f);
   for (const auto &c : corners)
     center += c;
   center /= 8.0f;
 
-  // 2. Calculate radius of the bounding sphere
   float radius = 0.0f;
-  for (const auto &c : corners) {
+  for (const auto &c : corners)
     radius = std::max(radius, glm::distance(c, center));
-  }
-  // Round up the radius slightly to prevent edge flickering
+
+  // Snap radius to texel grid to prevent cascade size shimmer.
   radius = std::ceil(radius * 16.0f) / 16.0f;
 
-  // 3. Create stable light view
-  glm::vec3 up =
-      std::abs(light_dir.y) > 0.99f ? glm::vec3(0, 0, 1) : glm::vec3(0, 1, 0);
-  // Pull back far enough to see the whole sphere
-  float pull_back_distance = radius + 1000.0f;
-  glm::mat4 light_view =
-      glm::lookAtLH(center - (light_dir * pull_back_distance), center, up);
+  // --- 2. Light-view matrix ---
+  // Eye is placed behind the scene *in the direction of the sun*, so the
+  // camera looks from the sun's side toward the scene (correct orientation).
+  //
+  // z_extent is how far the eye is from center in light-view space.
+  // The 500-unit margin buys depth for shadow casters behind the view frustum.
+  const glm::vec3 up = std::abs(light_toward_sun.y) > 0.99f
+                           ? glm::vec3(0.0f, 0.0f, 1.0f)
+                           : glm::vec3(0.0f, 1.0f, 0.0f);
+  const float z_extent = radius + 500.0f;
+  const glm::vec3 eye = center + light_toward_sun * z_extent;
+  glm::mat4 light_view = glm::lookAtLH(eye, center, up);
 
-  // 4. Determine Ortho bounds based on Radius
-  // Since we are looking at 'center', the center in light-space is (0,0,Z)
-  // We want our ortho box to be [-radius, radius]
-  float texels_per_unit =
+  // --- 3. Texel snapping ---
+  // Transform the world origin into light-view "texel" space, round it, and
+  // apply the residual as a translation correction.  This keeps the shadow
+  // texel grid stationary as the camera moves, eliminating edge crawl.
+  const float texels_per_unit =
       static_cast<float>(shadow_map_cascade_resolution) / (radius * 2.0f);
-
-  // 5. Texel Snapping
-  // We snap the light-space origin so that texels move in discrete increments
-  glm::mat4 shadow_matrix = light_view;
-  glm::vec4 shadow_origin = shadow_matrix * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+  glm::vec4 shadow_origin = light_view * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
   shadow_origin *= texels_per_unit;
 
-  glm::vec4 rounded_origin = glm::round(shadow_origin);
-  glm::vec4 round_offset = rounded_origin - shadow_origin;
-  round_offset /= texels_per_unit;
-  round_offset.z = 0.0f;
-  round_offset.w = 0.0f;
+  const glm::vec4 rounded = glm::round(shadow_origin);
+  glm::vec4 offset = (rounded - shadow_origin) / texels_per_unit;
+  offset.z = 0.0f; // never shift depth — that would break near/far
+  offset.w = 0.0f;
+  light_view[3] += offset;
 
-  // Apply snapping offset to the light view matrix
-  light_view[3] += round_offset;
+  // --- 4. Orthographic projection ---
+  // In light-view space the eye is at the origin.  The bounding sphere center
+  // is at Z = z_extent (along +Z, since lookAtLH makes +Z point toward center).
+  // The sphere occupies [z_extent - radius, z_extent + radius] on the Z axis.
+  //
+  // We extend near/far by caster_margin to capture shadow casters that lie
+  // outside the camera frustum but still cast into it.
+  const float caster_margin = 500.0f;
+  const float ortho_near = z_extent - radius - caster_margin;
+  const float ortho_far = z_extent + radius + caster_margin;
 
-  // 6. Final Ortho Projection
-  // Use radius for X and Y to keep the box size constant
-  float l = -radius;
-  float r = radius;
-  float b = -radius;
-  float t = radius;
-
-  // Z range: should cover the entire sphere volume + pancake
-  float n = -radius - 1000.0f;
-  float f = radius + 1000.0f;
-
-  const auto light_proj = glm::orthoLH_ZO(l, r, b, t, n, f);
+  const glm::mat4 light_proj = glm::orthoLH_ZO(-radius, radius, // left, right
+                                               -radius, radius, // bottom, top
+                                               ortho_near, ortho_far);
 
   return {
       .view_proj = light_proj * light_view,
@@ -671,29 +685,21 @@ CascadeData compute_cascade(const glm::mat4 &camera_view,
   };
 }
 
-constexpr float split_to_ndc_z(const glm::mat4 &proj, float view_z) {
-  // proj * (0,0,view_z,1), take z/w
-  glm::vec4 clip = proj * glm::vec4(0.0f, 0.0f, view_z, 1.0f);
-  return clip.z / clip.w;
-}
-
 void SceneRenderer::update_csm(const glm::mat4 &view, const glm::mat4 &proj,
                                float camera_near, float camera_far) {
-  auto splits = compute_cascade_splits(camera_near, camera_far);
+  const auto splits = compute_cascade_splits(camera_near, camera_far);
 
-  // In Reversed-Z LH:
-  // Near plane (camera_near) -> NDC 1.0
-  // Far plane (camera_far)   -> NDC 0.0
+  // Reverse-Z: the camera near plane sits at NDC Z = 1.0.
+  // We walk outward cascade by cascade; each split's NDC is < the previous.
   float prev_ndc = 1.0f;
 
   for (u32 i = 0u; i < shadow_map_cascade_count; ++i) {
-    float view_z = splits[i]; // Positive Z for LH
-    float curr_ndc = split_to_ndc_z(proj, view_z);
+    const float view_z = splits[i];
+    const float curr_ndc = split_to_ndc_z(proj, view_z);
 
-    // We pass (Near, Far) to compute_cascade
-    // For cascade 0: prev_ndc is 1.0, curr_ndc might be 0.8
-    csm_frame_data.cascades[i] =
-        compute_cascade(view, proj, prev_ndc, curr_ndc, view_z, sun_direction);
+    csm_frame_data.cascades[i] = compute_cascade(
+        view, proj, prev_ndc, curr_ndc, view_z,
+        sun_direction); // sun_direction == toward-sun (L vector)
 
     prev_ndc = curr_ndc;
   }
@@ -704,9 +710,8 @@ void SceneRenderer::update_csm(const glm::mat4 &view, const glm::mat4 &proj,
 
 auto CsmResources::destroy(VkDevice device, VmaAllocator allocator) -> void {
   vmaDestroyImage(allocator, image, allocation);
-  for (auto &v : layer_views) {
+  for (auto &v : layer_views)
     vkDestroyImageView(device, v, nullptr);
-  }
   vkDestroyImageView(device, array_view, nullptr);
 }
 
@@ -717,9 +722,9 @@ void SceneRenderer::init_csm() {
       .format = VK_FORMAT_D32_SFLOAT,
       .extent =
           {
-              shadow_map_cascade_resolution,
-              shadow_map_cascade_resolution,
-              1u,
+              .width = shadow_map_cascade_resolution,
+              .height = shadow_map_cascade_resolution,
+              .depth = 1u,
           },
       .mipLevels = 1u,
       .arrayLayers = shadow_map_cascade_count,

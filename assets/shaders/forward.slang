@@ -154,7 +154,7 @@ float4 fragmentMain(V2F input) : SV_Target
     float3 kd_ambient = (1.0f - f_ambient) * (1.0f - metallic);
     float3 ambient = (kd_ambient * albedo.rgb + f_ambient * f0) * ambient_color;
 
-    float view_depth = -1.0 / input.pos.w;
+    float view_depth = 1.0 / input.pos.w;
     var shadow_result = compute_shadow(input.world_pos, n, sun_dir, view_depth, *pc.frame_ubo);
 
     float3 final_color = shadow_result._0 * (direct + ambient) * ao + emissive;

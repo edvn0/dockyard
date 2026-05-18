@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dockyard/thread_safe_memory_cache.hpp"
 #include <deque>
 #include <dockyard/app.hpp>
 #include <dockyard/buffer.hpp>
@@ -155,9 +156,11 @@ struct SceneRenderer {
 
   std::array<CascadeData, shadow_map_cascade_count> cascade_cpu_data{};
   glm::vec3 sun_direction =
-      glm::normalize(glm::vec3{0, 0, 0} - glm::vec3{3, 7, 5});
+      glm::normalize(glm::vec3{0, 0, 0} - glm::vec3{3, -7, 5});
 
   PipelineHandle shadow_pipeline;
+
+  Cache<StringMap<TextureHandle>> texture_cache{};
 
   // -----------------------------------------------------------------------
 

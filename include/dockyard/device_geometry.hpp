@@ -1,6 +1,5 @@
 #pragma once
 
-#include "dockyard/mesh.hpp"
 #include <dockyard/bindless_descriptor.hpp>
 #include <dockyard/types.hpp>
 

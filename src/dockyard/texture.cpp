@@ -309,7 +309,7 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
       .format = ci.format,
-      .extent = {ci.width, ci.height, 1},
+      .extent = {.width = ci.width, .height = ci.height, .depth = 1},
       .mipLevels = mips,
       .arrayLayers = 1,
       .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -324,7 +324,7 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
 
   Texture tex{};
   tex.format = ci.format;
-  tex.extent = {ci.width, ci.height};
+  tex.extent = {.width = ci.width, .height = ci.height};
   tex.mip_levels = mips;
 
   vk::check(vmaCreateImage(ctx.allocator, &image_ci, &image_alloc_ci,
@@ -337,76 +337,75 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
   name_info.objectHandle = std::bit_cast<u64>(tex.image);
   vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info);
 
-  auto scratch = ScratchCmd::begin(ctx, ci.upload_queue_family);
-  const VkCommandBuffer cmd = scratch.cmd;
-
-  // Whole image: UNDEFINED -> TRANSFER_DST
-  image_barrier(cmd, tex.image, VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
-                VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                VK_ACCESS_2_TRANSFER_WRITE_BIT);
-
-  // Copy buffer -> mip 0
-  const VkBufferImageCopy2 copy{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
-      .bufferOffset = 0,
-      .bufferRowLength = 0,
-      .bufferImageHeight = 0,
-      .imageSubresource =
-          {
-              .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-              .mipLevel = 0,
-              .baseArrayLayer = 0,
-              .layerCount = 1,
-          },
-      .imageOffset = {0, 0, 0},
-      .imageExtent = {ci.width, ci.height, 1},
-  };
-  const VkCopyBufferToImageInfo2 copy_info{
-      .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2,
-      .srcBuffer = staging_buf,
-      .dstImage = tex.image,
-      .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-      .regionCount = 1,
-      .pRegions = &copy,
-  };
-  vkCmdCopyBufferToImage2(cmd, &copy_info);
-
-  if (ci.generate_mips && mips > 1) {
-    VkExtent2D src_extent{ci.width, ci.height};
-    for (u32 m = 0; m < mips - 1; ++m) {
-      src_extent = blit_mip(cmd, tex.image, src_extent, m);
-    }
-    // Transition all src mips (0..mips-2: TRANSFER_SRC) + last mip
-    // (TRANSFER_DST)
-    // -> SHADER_READ_ONLY in one barrier each group.
-    image_barrier(
-        cmd, tex.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 0, mips - 1);
-
-    image_barrier(
-        cmd, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, mips - 1, 1);
-  } else {
-    // No mips: single barrier for mip 0
-    image_barrier(cmd, tex.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+  ctx.one_time_submit([&t = tex, &ci, &staging_buf, mips](const auto &cmd) {
+    // Whole image: UNDEFINED -> TRANSFER_DST
+    image_barrier(cmd, t.image, VK_IMAGE_LAYOUT_UNDEFINED,
+                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                  VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
                   VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                  VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                  VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
-                      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-                  VK_ACCESS_2_SHADER_READ_BIT);
-  }
+                  VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
-  scratch.submit_and_wait(ctx, ci.upload_queue);
+    // Copy buffer -> mip 0
+    const VkBufferImageCopy2 copy{
+        .sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
+        .bufferOffset = 0,
+        .bufferRowLength = 0,
+        .bufferImageHeight = 0,
+        .imageSubresource =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .mipLevel = 0,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+        .imageOffset = {.x = 0, .y = 0, .z = 0},
+        .imageExtent = {.width = ci.width, .height = ci.height, .depth = 1},
+    };
+    const VkCopyBufferToImageInfo2 copy_info{
+        .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2,
+        .srcBuffer = staging_buf,
+        .dstImage = t.image,
+        .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .regionCount = 1,
+        .pRegions = &copy,
+    };
+    vkCmdCopyBufferToImage2(cmd, &copy_info);
+
+    if (ci.generate_mips && mips > 1) {
+      VkExtent2D src_extent{.width = ci.width, .height = ci.height};
+      for (u32 m = 0; m < mips - 1; ++m) {
+        src_extent = blit_mip(cmd, t.image, src_extent, m);
+      }
+      // Transition all src mips (0..mips-2: TRANSFER_SRC) + last mip
+      // (TRANSFER_DST)
+      // -> SHADER_READ_ONLY in one barrier each group.
+      image_barrier(
+          cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 0, mips - 1);
+
+      image_barrier(
+          cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+          VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, mips - 1, 1);
+    } else {
+      // No mips: single barrier for mip 0
+      image_barrier(cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_READ_BIT);
+    }
+  });
+
   vmaDestroyBuffer(ctx.allocator, staging_buf, staging_alloc);
 
   // ------------------------------------------------------------------

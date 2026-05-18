@@ -36,8 +36,6 @@ struct Texture {
     VkFormat format{VK_FORMAT_R8G8B8A8_SRGB};
     bool generate_mips{false};
     bool storage_view{false};
-    VkQueue upload_queue{};
-    u32 upload_queue_family{};
   };
 
   static auto from_bytes(const VulkanContext &ctx, std::string_view name,

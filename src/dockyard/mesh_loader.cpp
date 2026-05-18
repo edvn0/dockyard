@@ -1,6 +1,7 @@
+#include <dockyard/mesh_loader.hpp>
+
 #include <dockyard/log.hpp>
 #include <dockyard/mesh.hpp>
-#include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/types.hpp>
 #include <dockyard/vfs.hpp>
@@ -71,7 +72,7 @@ static void mikk_get_position(const SMikkTSpaceContext *ctx, float out[],
 static void mikk_get_normal(const SMikkTSpaceContext *ctx, float out[],
                             int face, int vert) {
   auto *c = static_cast<MikkContext *>(ctx->m_pUserData);
-  dy::u32 idx = c->prim->indices[static_cast<dy::u32>(face * 3 + vert)];
+  dy::u32 idx = c->prim->indices[static_cast<dy::u32>((face * 3) + vert)];
   auto &n = c->normals[idx];
   out[0] = n.x;
   out[1] = n.y;
@@ -81,7 +82,7 @@ static void mikk_get_normal(const SMikkTSpaceContext *ctx, float out[],
 static void mikk_get_uv(const SMikkTSpaceContext *ctx, float out[], int face,
                         int vert) {
   auto *c = static_cast<MikkContext *>(ctx->m_pUserData);
-  dy::u32 idx = c->prim->indices[static_cast<dy::u32>(face * 3 + vert)];
+  dy::u32 idx = c->prim->indices[static_cast<dy::u32>((face * 3) + vert)];
   auto &uv = c->uvs[idx];
   out[0] = uv.x;
   out[1] = uv.y;
@@ -151,7 +152,9 @@ struct DecodedImage {
 [[nodiscard]] auto decode_stbi(const stbi_uc *data, int len,
                                std::string_view debug_name)
     -> std::expected<DecodedImage, std::string> {
-  int w{}, h{}, ch{};
+  int w{};
+  int h{};
+  int ch{};
   stbi_uc *raw = stbi_load_from_memory(data, len, &w, &h, &ch, STBI_rgb_alpha);
   if (!raw)
     return std::unexpected(
@@ -177,7 +180,9 @@ struct DecodedImage {
           [&](const fastgltf::sources::URI &uri)
               -> std::expected<DecodedImage, std::string> {
             const auto full = gltf_dir / uri.uri.fspath();
-            int w{}, h{}, ch{};
+            int w{};
+            int h{};
+            int ch{};
             stbi_uc *raw =
                 stbi_load(full.string().c_str(), &w, &h, &ch, STBI_rgb_alpha);
             if (!raw)
@@ -299,9 +304,9 @@ constexpr u32 k_fb_emissive = 4u;
 
   gpu.metallic_factor = pbr.metallicFactor;
   gpu.roughness_factor = pbr.roughnessFactor;
-  gpu.normal_scale = mat.normalTexture ? mat.normalTexture->scale : 1.0f;
+  gpu.normal_scale = mat.normalTexture ? mat.normalTexture->scale : 1.0F;
   gpu.occlusion_strength =
-      mat.occlusionTexture ? mat.occlusionTexture->strength : 1.0f;
+      mat.occlusionTexture ? mat.occlusionTexture->strength : 1.0F;
   gpu.alpha_cutoff = mat.alphaCutoff;
   gpu.alpha_mode = static_cast<u32>(mat.alphaMode);
 
@@ -401,8 +406,8 @@ constexpr u32 k_fb_emissive = 4u;
   }
 
   return PrimitiveResult{
-      std::move(out),
-      std::move(aabb),
+      .data = std::move(out),
+      .aabb = std::move(aabb),
   };
 }
 
@@ -520,6 +525,14 @@ void flatten_nodes(const fastgltf::Asset &asset,
 } // namespace
 
 namespace mesh {
+
+[[nodiscard]] static auto hash_bytes(const void *data, usize len) -> u64 {
+  const auto *p = static_cast<const u8 *>(data);
+  u64 h = 14695981039346656037ULL;
+  for (usize i = 0; i < len; ++i)
+    h = (h ^ p[i]) * 1099511628211ULL;
+  return h;
+}
 
 auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
                       std::span<const u32> indices)
@@ -761,7 +774,6 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
       .mesh_aabb = AABB::create(),
   };
   auto result = std::make_shared<MeshAsset>(output_result);
-  result->mesh_aabb = AABB::create();
   result->texture_handles.resize(asset.images.size());
   result->material_slots.resize(asset.materials.size(), 0u);
 
@@ -772,11 +784,13 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
 
   std::vector<std::expected<DecodedImage, std::string>> decoded_images(
       asset.images.size());
-  [[maybe_unused]] auto image_group = taskflow.for_each_index(
-      usize(0), asset.images.size(), usize(1), [&](usize i) {
-        decoded_images[i] = load_image(asset, asset.images[i], gltf_dir);
-      });
-
+  {
+    PROFILE_SCOPE("Decode images");
+    [[maybe_unused]] auto image_group = taskflow.for_each_index(
+        static_cast<usize>(0), asset.images.size(), usize(1), [&](usize i) {
+          decoded_images[i] = load_image(asset, asset.images[i], gltf_dir);
+        });
+  }
   struct PrimWork {
     usize mesh_idx;
     usize prim_idx;
@@ -785,16 +799,24 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
   std::vector<PrimWork> prim_work_list;
   for (auto &&[mi, m] : std::views::enumerate(asset.meshes)) {
     for (auto &&[pi, p] : std::views::enumerate(m.primitives)) {
-      prim_work_list.push_back({(usize)mi, (usize)pi, &p});
+      prim_work_list.push_back({
+          .mesh_idx = static_cast<usize>(mi),
+          .prim_idx = static_cast<usize>(pi),
+          .ptr = &p,
+      });
     }
   }
 
   std::vector<std::expected<PrimitiveResult, std::string>> extracted_prims(
       prim_work_list.size(), std::unexpected<std::string>("Could not extract"));
-  [[maybe_unused]] auto mesh_group = taskflow.for_each_index(
-      usize(0), prim_work_list.size(), usize(1), [&](usize i) {
-        extracted_prims[i] = extract_primitive(asset, *prim_work_list[i].ptr);
-      });
+  {
+    PROFILE_SCOPE("Extract primitives");
+    [[maybe_unused]] auto mesh_group = taskflow.for_each_index(
+        static_cast<usize>(0), prim_work_list.size(), static_cast<usize>(1),
+        [&](usize i) {
+          extracted_prims[i] = extract_primitive(asset, *prim_work_list[i].ptr);
+        });
+  }
 
   {
     PROFILE_SCOPE("Wait for threads");
@@ -808,24 +830,53 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
         result->texture_handles[i] = renderer.dummy_texture_handle;
         continue;
       }
+
       auto &img = *decoded_images[i];
       const VkFormat fmt = (color_spaces[i] == ImageColorSpace::srgb)
                                ? VK_FORMAT_R8G8B8A8_SRGB
                                : VK_FORMAT_R8G8B8A8_UNORM;
-      result->texture_handles[i] = renderer.upload_texture(
-          img.pixels, "gltf_tex", img.width, img.height, fmt, true, false);
+      const std::string fmt_suffix =
+          (fmt == VK_FORMAT_R8G8B8A8_SRGB) ? ":srgb" : ":linear";
+
+      std::string cache_key;
+      if (const auto *uri_src =
+              std::get_if<fastgltf::sources::URI>(&asset.images[i].data)) {
+        cache_key = (gltf_dir / uri_src->uri.fspath()).string() + fmt_suffix;
+      } else {
+        const u64 h =
+            hash_bytes(img.pixels.data(), img.pixels.size() * sizeof(u32));
+        cache_key = std::format("hash:{:016x}{}", h, fmt_suffix);
+      }
+
+      if (auto cached = renderer.texture_cache.get(cache_key)) {
+        result->texture_handles[i] = *cached;
+        continue;
+      }
+
+      const std::string debug_name =
+          asset.images[i].name.empty()
+              ? std::format("{}#img{}", fs_path.filename().string(), i)
+              : std::string(asset.images[i].name);
+
+      auto handle = renderer.upload_texture(img.pixels, debug_name, img.width,
+                                            img.height, fmt, true, false);
+
+      renderer.texture_cache.insert(cache_key, handle);
+      result->texture_handles[i] = handle;
     }
   }
 
   if (!asset.materials.empty()) {
     PROFILE_SCOPE("Allocate materials");
     std::vector<GPUMaterial> gpu_mats;
+    gpu_mats.reserve(asset.materials.size());
     for (const auto &mat : asset.materials)
       gpu_mats.push_back(
           build_gpu_material(mat, asset, result->texture_handles));
 
     auto mat_offset = pool.allocate_materials(gpu_mats);
     result->material_base_slot = mat_offset.start_index;
+    result->material_count = static_cast<u32>(gpu_mats.size()); // ← was missing
     for (usize i = 0; i < gpu_mats.size(); ++i)
       result->material_slots[i] = result->material_base_slot + (u32)i;
   }
@@ -842,20 +893,26 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
 
     result->meshes.resize(asset.meshes.size());
     result->vertex_base_offset = pool.vertex_offset;
+    result->submesh_aabbs.clear();
 
     for (usize i = 0; i < prim_work_list.size(); ++i) {
       auto &res = extracted_prims[i];
-      if (!res)
+      if (!res) {
+        result->submesh_aabbs.push_back(
+            AABB::create()); // ← keep indices aligned
         continue;
+      }
 
       auto &[data, aabb] = *res;
 
       auto offsets = batch.allocate(data.vertices, data.indices);
-
+      result->submesh_aabbs.push_back(aabb); // ← per-submesh
+      result->mesh_aabb.merge(aabb);         // ← accumulate overall
       result->meshes[prim_work_list[i].mesh_idx].push_back(Mesh{
-          .index_count = (u32)data.indices.size(),
-          .first_index = (u32)(offsets.index_offset / sizeof(u32)),
-          .vertex_offset = (i32)(offsets.vertex_offset / sizeof(Vertex)),
+          .index_count = static_cast<u32>(data.indices.size()),
+          .first_index = static_cast<u32>(offsets.index_offset / sizeof(u32)),
+          .vertex_offset =
+              static_cast<i32>(offsets.vertex_offset / sizeof(Vertex)),
       });
     }
 

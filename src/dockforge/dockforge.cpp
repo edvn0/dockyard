@@ -164,26 +164,20 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
   auto loaded = mesh::load_from_path(
       VFSPath::create("meshes://DamagedHelmet.glb"), *renderer);
-  if (!loaded) {
-    error("Could not load {}", "meshes://DamagedHelmet.glb");
-    std::abort();
+  if (loaded) {
+    auto entity = active_scene->make("Helmet");
+    entity.emplace<Components::Mesh>(*loaded);
+    entity.get<Components::Transform>().position = {-5, 3, 9};
   }
 
-  auto loaded_sponza = mesh::load_from_path(
-      VFSPath::create("meshes://main_sponza.glb"), *renderer);
-  if (!loaded_sponza) {
-    error("Could not load {}", "meshes://main_sponza.glb");
-    std::abort();
+  if (auto loaded_sponza = mesh::load_from_path(
+          VFSPath::create("meshes://main_sponza.glb"), *renderer)) {
+    auto sponza = active_scene->make("Sponza");
+    sponza.emplace<Components::Mesh>(*loaded_sponza);
+    sponza.get<Components::Transform>().position = {-10, 3, 9};
   }
 
   // Does not exist
-  auto entity = active_scene->make("Helmet");
-  entity.emplace<Components::Mesh>(*loaded);
-  entity.get<Components::Transform>().position = {-5, 3, 9};
-
-  auto sponza = active_scene->make("Sponza");
-  sponza.emplace<Components::Mesh>(*loaded_sponza);
-  sponza.get<Components::Transform>().position = {-10, 3, 9};
 }
 auto Dockforge::on_mouse_moved(const events::mouse_moved &e) -> void {
   if (glfwGetMouseButton(get_window(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
@@ -238,7 +232,7 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
   float best_t = std::numeric_limits<float>::max();
 
   for (auto &&[e, xt, m] :
-       active_scene->group<Components::Transform, Components::Mesh>().each()) {
+       active_scene->view<Components::Transform, Components::Mesh>().each()) {
     const MeshAsset *asset = renderer->get_mesh(m);
     if (!asset || !asset->mesh_aabb.is_valid())
       continue;
@@ -246,7 +240,7 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
     const AABB world_aabb = asset->mesh_aabb.transform(xt.matrix());
     const float t = ray_aabb(ray, world_aabb.get_min(), world_aabb.get_max());
 
-    if (t >= 0.0f && t < best_t) {
+    if (t >= 0.0F && t < best_t) {
       best_t = t;
       best = e;
     }
@@ -295,11 +289,11 @@ void Dockforge::draw_scene_outliner() {
       auto *tag = entity.try_get<Components::Tag>();
       auto *mesh = entity.try_get<Components::Mesh>();
 
-      if (!tag)
+      if (tag == nullptr)
         continue;
 
       const std::string_view label = tag->tag;
-      if (!filter.PassFilter(label.data()))
+      if (!filter.PassFilter(label.data(), std::cend(label)))
         continue;
 
       // Build a display string without allocating when possible
@@ -433,10 +427,10 @@ auto Dockforge::build_ui() -> void {
 
   if (panel_w > 0 && panel_h > 0) {
     if (panel_w != last_ui_size.width || panel_h != last_ui_size.height) {
-      last_ui_size = {panel_w, panel_h};
+      last_ui_size = {.width = panel_w, .height = panel_h};
       last_ui_offset = {
-          static_cast<u32>(ImGui::GetCursorScreenPos().x),
-          static_cast<u32>(ImGui::GetCursorScreenPos().y),
+          .width = static_cast<u32>(ImGui::GetCursorScreenPos().x),
+          .height = static_cast<u32>(ImGui::GetCursorScreenPos().y),
       };
       last_resize_change_time = glfwGetTime();
     }
@@ -503,21 +497,23 @@ auto Dockforge::build_ui() -> void {
 
   if (state.selected != entt::null) {
     Entity entity{*active_scene, state.selected};
-    auto &xt = entity.get<Components::Transform>();
-    glm::mat4 model = xt.matrix();
+    auto &transform = entity.get<Components::Transform>();
+    glm::mat4 model = transform.matrix();
     auto &&[view, proj] = resolve_camera();
 
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj), gizmo_op,
                          ImGuizmo::LOCAL, glm::value_ptr(model));
 
     if (ImGuizmo::IsUsing()) {
-      glm::vec3 translation, scale, skew;
+      glm::vec3 translation;
+      glm::vec3 scale;
+      glm::vec3 skew;
       glm::vec4 perspective;
       glm::quat rotation;
       glm::decompose(model, scale, rotation, translation, skew, perspective);
-      xt.position = translation;
-      xt.rotation = glm::normalize(rotation);
-      xt.scale = scale;
+      transform.position = translation;
+      transform.rotation = glm::normalize(rotation);
+      transform.scale = scale;
     }
 
     if (auto *mesh = entity.try_get<Components::Mesh>()) {
@@ -560,14 +556,14 @@ auto Dockforge::build_ui() -> void {
     ImGui::End();
   }
 
-  const glm::vec3 dummy_pos = glm::vec3{5.0f, 5.0f, -10.0f};
+  const glm::vec3 dummy_pos = glm::vec3{5.0f, -5.0f, -10.0f};
   const glm::vec3 target = glm::vec3{0.0f, 0.0f, 0.0f};
   const glm::vec3 up = glm::vec3{0.0f, 1.0f, 0.0f};
 
   const glm::mat4 dummy_view = glm::lookAtLH(dummy_pos, target, up);
 
-  const float fov = glm::radians(60.0f);
-  const float aspect = 1.77f;
+  const float fov = glm::radians(60.0F);
+  const float aspect = 1.77F;
   const float zNear = 0.1f;
   const float zFar = 30.0f;
 
@@ -613,7 +609,7 @@ auto Dockforge::destroy() -> void {
 }
 
 auto Dockforge::update(float ts) -> void {
-  if (!active_scene->primary_camera())
+  if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
 }
 
@@ -622,8 +618,7 @@ void emit_barrier(VkCommandBuffer cmd,
   const VkDependencyInfo dependency_info{
       .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .pNext = nullptr,
-      .dependencyFlags = 0, // Usually 0, or VK_DEPENDENCY_BY_REGION_BIT for
-                            // subpass-like behavior
+      .dependencyFlags = 0,
       .memoryBarrierCount = 0,
       .pMemoryBarriers = nullptr,
       .bufferMemoryBarrierCount = 0,
@@ -689,14 +684,21 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
                                             .layerCount = 1u};
   const VkExtent2D vp_extent = viewport_resources.extent();
   const VkViewport viewport{
-      0.0f,
-      static_cast<float>(vp_extent.height),
-      static_cast<float>(vp_extent.width),
-      -static_cast<float>(vp_extent.height),
-      0.0f,
-      1.0f,
+      .x = 0.0f,
+      .y = static_cast<float>(vp_extent.height),
+      .width = static_cast<float>(vp_extent.width),
+      .height = -static_cast<float>(vp_extent.height),
+      .minDepth = 0.0f,
+      .maxDepth = 1.0f,
   };
-  const VkRect2D scissor{{0, 0}, vp_extent};
+  const VkRect2D scissor{
+      .offset =
+          {
+              .x = 0,
+              .y = 0,
+          },
+      .extent = vp_extent,
+  };
 
   const auto &forward_texture =
       renderer->textures.get(renderer->forward_target_handle)->texture;
@@ -746,26 +748,35 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         .image = renderer->csm.image,
         .subresourceRange =
             {
-                VK_IMAGE_ASPECT_DEPTH_BIT,
-                0,
-                1,
-                0,
-                shadow_map_cascade_count,
+                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = shadow_map_cascade_count,
             },
     };
     emit_barrier(ctx.main_cb, csm_to_attachment);
 
-    const VkExtent2D shadow_extent{shadow_map_cascade_resolution,
-                                   shadow_map_cascade_resolution};
-    const VkViewport shadow_viewport{
-        0.0f,
-        0.0f,
-        static_cast<float>(shadow_map_cascade_resolution),
-        static_cast<float>(shadow_map_cascade_resolution),
-        0.0f,
-        1.0f, // conventional depth, NOT flipped
+    const VkExtent2D shadow_extent{
+        .width = shadow_map_cascade_resolution,
+        .height = shadow_map_cascade_resolution,
     };
-    const VkRect2D shadow_scissor{{0, 0}, shadow_extent};
+    const VkViewport shadow_viewport{
+        .x = 0.0f,
+        .y = 0.0f,
+        .width = static_cast<float>(shadow_map_cascade_resolution),
+        .height = static_cast<float>(shadow_map_cascade_resolution),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    const VkRect2D shadow_scissor{
+        .offset =
+            {
+                .x = 0,
+                .y = 0,
+            },
+        .extent = shadow_extent,
+    };
 
     for (u32 cascade_idx = 0u; cascade_idx < shadow_map_cascade_count;
          ++cascade_idx) {
@@ -775,7 +786,10 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
           .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
           .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-          .clearValue = {.depthStencil = {1.0f, 0u}}, // conventional: 1=far
+          .clearValue =
+              {
+                  .depthStencil = {.depth = 1.0F, .stencil = 0u},
+              }, // conventional: 1=far
       };
       const VkRenderingInfo ri{
           .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
@@ -787,7 +801,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       vkCmdBeginRendering(ctx.main_cb, &ri);
       vkCmdSetViewport(ctx.main_cb, 0u, 1u, &shadow_viewport);
       vkCmdSetScissor(ctx.main_cb, 0u, 1u, &shadow_scissor);
-      vkCmdSetCullMode(ctx.main_cb, VK_CULL_MODE_BACK_BIT);
+      vkCmdSetCullMode(ctx.main_cb, VK_CULL_MODE_FRONT_BIT);
       vkCmdSetDepthBias(ctx.main_cb, 1.25f, 0.0f, 1.75f);
 
       renderer->render_shadow_cascade(ctx.main_cb, cascade_idx);
@@ -1030,9 +1044,11 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         .image = ctx.swapchain_image.image,
         .subresourceRange = color_range,
     };
-    const VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                               .imageMemoryBarrierCount = 1u,
-                               .pImageMemoryBarriers = &present_barrier};
+    const VkDependencyInfo dep{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1U,
+        .pImageMemoryBarriers = &present_barrier,
+    };
     vkCmdPipelineBarrier2(ctx.main_cb, &dep);
   }
 

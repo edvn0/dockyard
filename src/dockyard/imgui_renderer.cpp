@@ -337,7 +337,8 @@ auto ImGuiRenderer::update_font(FontChoice f) -> void {
   io.Fonts->Flags |= ImFontAtlasFlags_NoPowerOfTwoHeight;
 
   unsigned char *pixels;
-  int width, height;
+  int width;
+  int height;
   io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
 
   auto *as_u32 = std::bit_cast<u32 *>(pixels);
@@ -351,11 +352,9 @@ auto ImGuiRenderer::update_font(FontChoice f) -> void {
           .format = VK_FORMAT_R8G8B8A8_UNORM,
           .generate_mips = true,
           .storage_view = true,
-          .upload_queue = renderer.ctx.graphics_queue(),
-          .upload_queue_family = renderer.ctx.graphics_queue_index,
       });
-  font_texture =
-      renderer.textures.create({std::move(tex), VK_IMAGE_VIEW_TYPE_2D});
+  font_texture = renderer.textures.create(
+      {.texture = tex, .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D});
 
   io.Fonts->TexID = font_texture.index();
   io.FontDefault = font;
