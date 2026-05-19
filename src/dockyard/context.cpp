@@ -95,8 +95,8 @@ auto SwapchainResources::rebuild(const VulkanContext &ctx, VkSurfaceKHR surface,
   for (auto &is : image_sync)
     is = ImageSync::create(ctx);
 
-  info("Swapchain rebuilt: {}x{}, image count: {}", width, height,
-       swapchain.image_count);
+  trace("Swapchain rebuilt: {}x{}, image count: {}", width, height,
+        swapchain.image_count);
 }
 
 auto SwapchainResources::destroy(const VulkanContext &ctx) -> void {
@@ -170,7 +170,7 @@ auto ViewportResources::resize(const VulkanContext &ctx,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT);
     display_target = renderer.textures.create(TextureEntry{
-        .texture = std::move(tex),
+        .texture = tex,
         .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
     });
   }
@@ -209,8 +209,8 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
     -> VulkanContext {
   VulkanContext ctx{};
 
-  ctx.surface = std::move(s);
-  ctx.instance = std::move(inst);
+  ctx.surface = s;
+  ctx.instance = inst;
   volkLoadInstance(ctx.instance.instance);
 
   VkPhysicalDeviceFeatures features{};
@@ -262,12 +262,14 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   VkPhysicalDevicePresentIdFeaturesKHR present_id_features{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
       .pNext = nullptr,
-      .presentId = VK_TRUE};
+      .presentId = VK_TRUE,
+  };
 
   VkPhysicalDevicePresentWaitFeaturesKHR present_wait_features{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
       .pNext = nullptr,
-      .presentWait = VK_TRUE};
+      .presentWait = VK_TRUE,
+  };
 
   auto phys_ret = vkb::PhysicalDeviceSelector{ctx.instance}
                       .set_surface(ctx.surface)

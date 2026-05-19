@@ -92,10 +92,21 @@ template <typename T> struct BasicMaterialView {
   std::span<T> materials;
   u32 base_slot = 0;
 
-  auto empty() const -> bool { return materials.empty(); }
-  auto size() const -> u32 { return static_cast<u32>(materials.size()); }
-  auto operator[](u32 i) const -> T & { return materials[i]; }
-  auto slot(u32 i) const -> u32 { return base_slot + i; }
+  [[nodiscard]] auto first() const -> const T & {
+    assert(!materials.empty());
+    return materials[0];
+  }
+  [[nodiscard]] auto first_mut() -> T & {
+    assert(!materials.empty());
+    return materials[0];
+  }
+
+  [[nodiscard]] auto empty() const -> bool { return materials.empty(); }
+  [[nodiscard]] auto size() const -> u32 {
+    return static_cast<u32>(materials.size());
+  }
+  [[nodiscard]] auto operator[](u32 i) const -> T & { return materials[i]; }
+  [[nodiscard]] auto slot(u32 i) const -> u32 { return base_slot + i; }
 };
 } // namespace detail
 
@@ -146,10 +157,30 @@ struct GeometryPool {
   auto flush_material(u32 slot) -> void;
   auto flush_materials(u32 base_slot, u32 count) -> void;
 
+  struct FlushRange {
+    usize vertex_offset;
+    usize vertex_size;
+    usize shadow_vertex_offset;
+    usize shadow_vertex_size;
+    usize index_offset;
+    usize index_size;
+  };
+  auto flush_range(const FlushRange &range) -> void {
+    flush_range(range.vertex_offset, range.vertex_size,
+                range.shadow_vertex_offset, range.shadow_vertex_size,
+                range.index_offset, range.index_size);
+  }
+  auto begin_transaction() -> GeometryTransaction {
+    return {
+        .pool = *this,
+        .start_v = vertex_offset,
+        .start_sv = shadow_vertex_offset,
+        .start_i = index_offset,
+    };
+  }
+
+private:
   auto flush_range(usize v_off, usize v_size, usize sv_off, usize sv_size,
                    usize i_off, usize i_size) -> void;
-  auto begin_transaction() -> GeometryTransaction {
-    return {*this, vertex_offset, shadow_vertex_offset, index_offset};
-  }
 };
 } // namespace dy

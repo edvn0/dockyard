@@ -3,6 +3,7 @@
 #include "dockyard/canvas_renderer.hpp"
 #include <dockforge/scene_outlier.hpp>
 #include <dockyard/app.hpp>
+#include <dockyard/freelist_pool.hpp>
 #include <dockyard/scene.hpp>
 
 #include <memory>
@@ -39,7 +40,8 @@ struct Dockforge : App {
   std::unique_ptr<SceneRenderer> renderer;
   ViewportResources viewport_resources;
 
-  std::optional<glm::vec2> pending_pick{};
+  std::optional<glm::vec2> pending_pick;
+  std::optional<glm::mat4> gizmo_prev_model;
   ImGuizmo::OPERATION gizmo_op = ImGuizmo::TRANSLATE;
   VkExtent2D viewport_panel_extent{};
   VkExtent2D viewport_panel_offset{};
@@ -48,6 +50,9 @@ struct Dockforge : App {
   std::optional<VkExtent2D> pending_viewport_resize{std::nullopt};
   std::optional<VkExtent2D> candidate_viewport_resize{std::nullopt};
   SceneOutlinerState state;
+
+  using MaterialOverridePool = FreeListPool;
+  MaterialOverridePool override_pool;
 
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
@@ -62,10 +67,15 @@ struct Dockforge : App {
   [[nodiscard]] auto resolve_camera_with_position() const
       -> std::tuple<glm::mat4, glm::mat4, glm::vec3>;
   auto resize(u32 w, u32 h) -> void override;
+
   auto try_pick_entity(glm::vec2 mouse_screen) -> void;
   void refresh_entity_cache();
   void draw_scene_outliner();
   auto build_ui() -> void;
+  auto draw_debug_shapes() -> void;
+  auto remove_override(Entity) -> void;
+  [[nodiscard]] auto resolve_material_slot(Entity) -> u32;
+
   auto destroy() -> void override;
   auto update(float ts) -> void override;
   auto render(RenderContext &ctx) -> u64 override;

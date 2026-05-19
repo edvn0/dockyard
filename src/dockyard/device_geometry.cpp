@@ -109,6 +109,14 @@ auto GeometryPool::allocate(std::span<const Vertex> vertices,
   return offsets;
 }
 
+void GeometryPool::reserve_materials(usize additional_mats) {
+  const usize required_bytes =
+      (material_offset + additional_mats) * sizeof(GPUMaterial);
+
+  if (required_bytes > material_buffer->size())
+    resize_buffer(allocator, material_buffer, required_bytes);
+}
+
 void GeometryPool::reserve(usize additional_vertices,
                            usize additional_indices) {
   const usize v_bytes = additional_vertices * sizeof(Vertex);
@@ -230,10 +238,18 @@ auto GeometryPool::allocate_without_flush(std::span<const Vertex> vertices,
 GeometryTransaction::~GeometryTransaction() {
   if (!committed)
     return;
-  pool.flush_range(start_v, pool.vertex_offset - start_v, start_sv,
-                   pool.shadow_vertex_offset - start_sv, start_i,
-                   pool.index_offset - start_i);
+
+  GeometryPool::FlushRange range{
+      .vertex_offset = start_v,
+      .vertex_size = pool.vertex_offset - start_v,
+      .shadow_vertex_offset = start_sv,
+      .shadow_vertex_size = pool.shadow_vertex_offset - start_sv,
+      .index_offset = start_i,
+      .index_size = pool.index_offset - start_i,
+  };
+  pool.flush_range(range);
 }
+
 auto GeometryTransaction::allocate(std::span<const Vertex> v,
                                    std::span<const u32> i) -> AllocatedOffset {
   return pool.allocate_without_flush(v, i);

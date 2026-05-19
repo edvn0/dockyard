@@ -167,9 +167,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   auto ctx = VulkanContext::create(std::move(instance), std::move(surface));
   DEFER(ctx.destroy());
 
-  u64 frame_index = 0;
   u64 frame_id = 1;
-
   auto sc = SwapchainResources::create(ctx, surface, static_cast<u32>(width),
                                        static_cast<u32>(height));
   auto frames = FrameResources::create(ctx);
@@ -178,7 +176,14 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   std::vector<u64> image_last_frame_id(sc.images.size(), 0);
 
   RendererListener render_listener{
-      ctx, sc, surface, frames, frame_index, image_last_frame_id, dispatcher};
+      .ctx = ctx,
+      .sc = sc,
+      .surface = surface,
+      .frames = frames,
+      .frame_index = frame_index,
+      .frame_ids = image_last_frame_id,
+      .dispatch = dispatcher,
+  };
   dispatcher.sink<events::window_minimized>()
       .connect<&RendererListener::on_window_minimized>(render_listener);
   dispatcher.sink<events::swapchain_invalidated>()

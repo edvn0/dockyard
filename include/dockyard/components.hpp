@@ -1,5 +1,6 @@
 #pragma once
 
+#include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
 #include <dockyard/vfs_path.hpp>
 
@@ -22,14 +23,14 @@ struct Mesh {
 };
 
 struct Camera {
-  float fov_degrees = 70.0f;
+  float fov_degrees = 70.0F;
   float near_plane = 0.7F;
-  float far_plane = 1000.0f;
-  float aspect = 16.0f / 9.0f;
+  float far_plane = 1000.0F;
+  float aspect = 16.0F / 9.0F;
 
-  glm::vec3 position{0.0f};
-  float yaw = 0.0f;
-  float pitch = 0.0f;
+  glm::vec3 position{0.0F};
+  float yaw = 0.0F;
+  float pitch = 0.0F;
 
   std::optional<glm::vec3> forward_override = std::nullopt;
 
@@ -45,12 +46,12 @@ struct Camera {
   }
 
   [[nodiscard]] auto right() const -> glm::vec3 {
-    return glm::normalize(glm::cross(glm::vec3{0.0f, 1.0f, 0.0f}, forward()));
+    return glm::normalize(glm::cross(glm::vec3{0.0F, 1.0F, 0.0F}, forward()));
   }
 
   [[nodiscard]] auto view() const -> glm::mat4 {
     return glm::lookAtLH(position, position + forward(),
-                         glm::vec3{0.0f, 1.0f, 0.0f});
+                         glm::vec3{0.0F, 1.0F, 0.0F});
   }
 
   [[nodiscard]] auto projection() const -> glm::mat4 {
@@ -58,14 +59,14 @@ struct Camera {
                                  near_plane);
   }
 
-  auto set_aspect(u32 w, u32 h) -> void {
-    aspect = static_cast<float>(w) / static_cast<float>(h);
+  auto set_aspect(u32 width, u32 height) -> void {
+    aspect = static_cast<float>(width) / static_cast<float>(height);
   }
 
-  static auto facing_toward(glm::vec3 from, glm::vec3 to)
+  static auto facing_toward(const auto &from, const auto &vec_to)
       -> std::pair<float, float> {
-    auto dir = glm::normalize(to - from);
-    float p = glm::asin(glm::clamp(dir.y, -1.0f, 1.0f));
+    auto dir = glm::normalize(vec_to - from);
+    float p = glm::asin(glm::clamp(dir.y, -1.0F, 1.0F));
     float y = glm::atan(dir.x, dir.z);
     return {y, p};
   }
@@ -82,11 +83,45 @@ struct Transform {
   glm::vec3 scale{1};
 
   [[nodiscard]] auto matrix() const -> glm::mat4 {
-    glm::mat4 res = glm::translate(glm::mat4(1.0f), position);
+    glm::mat4 res = glm::translate(glm::mat4(1.0F), position);
     res *= glm::mat4_cast(rotation);
     res = glm::scale(res, scale);
     return res;
   }
+};
+
+struct MaterialOverride {
+  GPUMaterial material{};
+  u32 gpu_slot = ~0U;
+  bool dirty = true;
+};
+
+struct DebugLine {
+  glm::vec3 p1{};
+  glm::vec3 p2{};
+  glm::vec4 color{1.0F, 1.0F, 1.0F, 1.0F};
+};
+
+struct DebugBox {
+  glm::vec3 size{1.0F, 1.0F, 1.0F};
+  glm::vec4 color{1.0F, 1.0F, 1.0F, 1.0F};
+};
+
+struct DebugPlane {
+  glm::vec3 v1{1.0F, 0.0F, 0.0F};
+  glm::vec3 v2{0.0F, 0.0F, 1.0F};
+  int n1 = 10;
+  int n2 = 10;
+  float s1 = 10.0F;
+  float s2 = 10.0F;
+  glm::vec4 color{0.4F, 0.4F, 0.4F, 0.5F};
+  glm::vec4 outline{0.8F, 0.8F, 0.8F, 1.0F};
+};
+
+struct DebugFrustum {
+  glm::mat4 view{1.0F};
+  glm::mat4 proj{1.0F};
+  glm::vec4 color{1.0F, 1.0F, 0.0F, 1.0F};
 };
 
 } // namespace dy::Components

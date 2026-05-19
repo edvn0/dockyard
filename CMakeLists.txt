@@ -325,7 +325,8 @@ add_executable(dockforge src/dockforge/main.cpp
   src/dockforge/free_camera_controller.cpp
   src/dockforge/path_camera_controller.cpp
   src/dockforge/editor_camera.cpp
-  src/dockforge/editor_utils.cpp)
+  src/dockforge/editor_utils.cpp
+  src/dockforge/matrix_cache.cpp)
 target_link_libraries(dockforge PRIVATE dockyard imgui)
 target_set_warnings(dockforge)
 set_target_properties(dockforge PROPERTIES FOLDER apps)

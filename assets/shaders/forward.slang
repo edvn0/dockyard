@@ -129,7 +129,7 @@ float4 fragmentMain(V2F input) : SV_Target
     float3 f0 = lerp(float3(0.04f), albedo.rgb, metallic);
 
     // ── Directional sun light ────────────────────────────────────────────────
-    const float3 sun_dir = normalize(float3(0.5f, 1.0f, -0.3f));
+    const float3 sun_dir = normalize(float3(0, 0, 0) - float3(3, -7, 5));
     const float3 sun_color = float3(1.0f, 0.95f, 0.8f);
 
     float3 h = normalize(v + sun_dir);

@@ -13,6 +13,7 @@
 #include <dockyard/scene.hpp>
 
 #include <glm/glm.hpp>
+#include <type_traits>
 
 namespace dy {
 
@@ -181,10 +182,10 @@ struct SceneRenderer {
   void prepare(u64 frame_index, const glm::mat4 &view,
                const glm::mat4 &projection);
 
-  void submit(MeshHandle handle, const Components::Transform &t, u32 p_id = 0u,
-              u32 m_id = 0u);
-  void submit(const Mesh &mesh, const Components::Transform &t, u32 p_id,
-              u32 m_id);
+  void submit(MeshHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
+              u32 material_id = 0U);
+  void submit(const Mesh &mesh, const glm::mat4 &, u32 pipeline_id = 0U,
+              u32 material_id = 0U);
 
   void update_csm(const glm::mat4 &view, const glm::mat4 &proj,
                   float camera_near, float camera_far);
@@ -202,6 +203,19 @@ struct SceneRenderer {
       -> ConstMaterialView;
   [[nodiscard]] auto get_material_view_mut(MeshHandle handle)
       -> MutableMaterialView;
+
+  template <typename Handle>
+  auto resolve(Handle handle) const -> decltype(auto) {
+    if constexpr (std::is_same_v<Handle, TextureHandle>) {
+      return textures.get(handle)->texture;
+    } else if constexpr (std::is_same_v<Handle, SamplerHandle>) {
+      return samplers.get(handle)->sampler;
+    } else if constexpr (std::is_same_v<Handle, ComparisonSamplerHandle>) {
+      return comparison_samplers.get(handle)->sampler;
+    } else {
+      static_assert(false, "Unsupported handle type"); // Valid in C++26!
+    }
+  }
 };
 
 } // namespace dy

@@ -66,10 +66,15 @@ public:
   virtual auto on_mouse_scrolled(const events::mouse_scrolled &) -> void {}
 
 protected:
-  auto get_window() const { return window; }
+  [[nodiscard]] auto get_window() const { return window; }
+  [[nodiscard]] auto get_frame_index() const -> const auto & {
+    return frame_index;
+  }
+  [[nodiscard]] auto get_frame_index_mut() -> auto & { return frame_index; }
 
 private:
   GLFWwindow *window;
+  u64 frame_index = 0;
 
   auto recreate_swapchain_manually(GLFWwindow *, const RendererListener &)
       -> void;

@@ -35,6 +35,7 @@ public:
     return reg.get<T>(entity);
   }
   template <typename T> auto try_get() -> T * { return reg.try_get<T>(entity); }
+  template <typename T> auto remove() -> void { reg.remove<T>(entity); }
 };
 
 class Scene {

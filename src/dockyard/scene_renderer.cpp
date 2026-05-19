@@ -295,25 +295,26 @@ auto SceneRenderer::destroy() -> void {
     vkDestroyPipelineLayout(ctx.device, pipeline_layout, nullptr);
 }
 
-void SceneRenderer::submit(MeshHandle handle, const Components::Transform &t,
-                           u32 p_id, u32 m_id) {
+void SceneRenderer::submit(MeshHandle handle, const glm::mat4 &t,
+                           u32 pipeline_id, u32 material_id) {
   auto *asset = get_mesh(handle);
-  if (!asset)
+  if (asset == nullptr)
     return;
 
   for (const auto &node : asset->nodes) {
-    glm::mat4 node_transform = t.matrix() * node.local_transform;
+    glm::mat4 node_transform = t * node.local_transform;
 
     for (const auto &prim : node.primitives) {
       submission_queue.emplace_back(
-          prim.mesh, p_id, m_id != 0 ? m_id : prim.material_id, node_transform);
+          prim.mesh, pipeline_id,
+          material_id != 0 ? material_id : prim.material_id, node_transform);
     }
   }
 }
 
-void SceneRenderer::submit(const Mesh &mesh, const Components::Transform &t,
-                           u32 p_id, u32 m_id) {
-  submission_queue.emplace_back(mesh, p_id, m_id, t.matrix());
+void SceneRenderer::submit(const Mesh &mesh, const glm::mat4 &t,
+                           u32 pipeline_id, u32 material_id) {
+  submission_queue.emplace_back(mesh, pipeline_id, material_id, t);
 }
 
 void SceneRenderer::ensure_global_capacity(usize instance_count) {

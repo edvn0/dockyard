@@ -2,8 +2,13 @@
 
 #include <dockforge/editor_camera.hpp>
 #include <dockforge/editor_utils.hpp>
+#include <dockforge/matrix_cache.hpp>
 
+#include <dockyard/buffer.hpp>
+#include <dockyard/components.hpp>
 #include <dockyard/imgui_renderer.hpp>
+#include <dockyard/mesh_loader.hpp>
+#include <dockyard/scene.hpp>
 #include <dockyard/scene_renderer.hpp>
 
 #include <GLFW/glfw3.h>
@@ -15,9 +20,21 @@
 #include <ImGuizmo.h>
 
 #include "./cube_vertices.inl"
-#include "dockyard/buffer.hpp"
-#include "dockyard/components.hpp"
-#include "dockyard/mesh_loader.hpp"
+
+namespace {
+auto make_default_override_materials(u32 count) -> std::vector<GPUMaterial> {
+  std::vector<GPUMaterial> output(count);
+  for (auto &material : output) {
+    material.albedo_factor[0] = material.albedo_factor[1] =
+        material.albedo_factor[2] = material.albedo_factor[3] = 1.0F;
+    material.roughness_factor = 1.0F;
+    material.normal_scale = 1.0F;
+    material.occlusion_strength = 1.0F;
+    material.albedo_index = 0U; // white fallback
+  }
+  return output;
+}
+} // namespace
 
 auto make_app() -> std::unique_ptr<Dockforge> {
   return std::make_unique<Dockforge>();
@@ -72,7 +89,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
         get_window(), 16, *renderer,
         FontChoice{
             .font_path = VFSPath::create("fonts://RobotoMono-Regular.ttf"),
-            .size = 15.0f,
+            .size = 15.0F,
         });
     imgui_renderer->set_app_name("Dockforge");
 
@@ -82,6 +99,15 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     renderer->update_output_texture(viewport_resources.forward_target);
     renderer->bindless.need_repopulate = true;
     renderer->initialise_bindless(white_texture);
+
+    constexpr u32 override_material_count_initial = 16U;
+    auto blank =
+        make_default_override_materials(override_material_count_initial);
+    auto offset = renderer->geometry_pool->allocate_materials(std::span(blank));
+    override_pool = {
+        .base_slot = offset.start_index,
+        .capacity = override_material_count_initial,
+    };
   }
 
   {
@@ -90,8 +116,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
     auto &scene = *active_scene;
     const int grid_side = 3;
-    const float spacing = glm::sqrt(2.F) + 0.5F;
-    const float offset = (grid_side - 1) * spacing / 2.0f;
+    const float spacing = std::numbers::sqrt2_v<float> + 0.5F;
+    const float offset = (grid_side - 1) * spacing / 2.0F;
 
     for (int x = 0; x < grid_side; ++x) {
       for (int y = 0; y < grid_side; ++y) {
@@ -177,7 +203,14 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     sponza.get<Components::Transform>().position = {-10, 3, 9};
   }
 
-  // Does not exist
+  auto frustum_entity = active_scene->make("DebugFrustum");
+  auto &df = frustum_entity.emplace<Components::DebugFrustum>();
+  df.view = glm::lookAtLH(glm::vec3{5, -5, -10}, glm::vec3{0, 0, 0},
+                          glm::vec3{0, 1, 0});
+  df.proj = glm::perspective(glm::radians(30.0f), 1.77f, 0.1f, 30.0f);
+  df.color = glm::vec4{1.0f, 1.0f, 0.0f, 1.0f};
+
+  initialise_matrix_cache(get_frame_index_mut());
 }
 auto Dockforge::on_mouse_moved(const events::mouse_moved &e) -> void {
   if (glfwGetMouseButton(get_window(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
@@ -213,13 +246,14 @@ auto Dockforge::on_key_released(const events::key_released &e) -> void {
           editor_camera->position()};
 }
 auto Dockforge::resize(u32 w, u32 h) -> void {
-  info("Dockforge resized to {}x{}", w, h);
+  trace("Dockforge resized to {}x{}", w, h);
   viewport_resources.resize(*context, *renderer, w, h);
   renderer->resize();
   editor_camera->set_aspect(w, h);
   for (auto &&[e, cam] : active_scene->view<Components::Camera>().each())
     cam.set_aspect(w, h);
 }
+
 auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
   auto [view, proj] = resolve_camera();
   const auto ray = screen_to_ray(
@@ -234,7 +268,7 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
   for (auto &&[e, xt, m] :
        active_scene->view<Components::Transform, Components::Mesh>().each()) {
     const MeshAsset *asset = renderer->get_mesh(m);
-    if (!asset || !asset->mesh_aabb.is_valid())
+    if ((asset == nullptr) || !asset->mesh_aabb.is_valid())
       continue;
 
     const AABB world_aabb = asset->mesh_aabb.transform(xt.matrix());
@@ -247,6 +281,7 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
   }
 
   state.selected = best;
+  gizmo_prev_model.reset();
 }
 
 void Dockforge::refresh_entity_cache() {
@@ -275,7 +310,7 @@ void Dockforge::draw_scene_outliner() {
   ImGui::Separator();
 
   const float item_height = ImGui::GetTextLineHeightWithSpacing();
-  ImGui::BeginChild("##entity_list", ImVec2(0, 0), false,
+  ImGui::BeginChild("##entity_list", ImVec2(0, 0), ImGuiChildFlags_None,
                     ImGuiWindowFlags_HorizontalScrollbar);
 
   ImGuiListClipper clipper;
@@ -297,19 +332,20 @@ void Dockforge::draw_scene_outliner() {
         continue;
 
       // Build a display string without allocating when possible
-      char row_label[128];
-      if (mesh) {
-        std::snprintf(row_label, sizeof(row_label), "[M] %.*s  (%u)##%u",
-                      static_cast<int>(label.size()), label.data(),
-                      mesh->handle.index(), static_cast<uint32_t>(e));
+      std::array<char, 128> row_label{};
+      if (mesh != nullptr) {
+        std::snprintf(row_label.data(), std::size(row_label),
+                      "[M] %.*s  (%u)##%u", static_cast<int>(label.size()),
+                      label.data(), mesh->handle.index(),
+                      static_cast<uint32_t>(e));
       } else {
-        std::snprintf(row_label, sizeof(row_label), "     %.*s##%u",
+        std::snprintf(row_label.data(), std::size(row_label), "     %.*s##%u",
                       static_cast<int>(label.size()), label.data(),
                       static_cast<uint32_t>(e));
       }
 
       const bool is_selected = (state.selected == e);
-      if (ImGui::Selectable(row_label, is_selected,
+      if (ImGui::Selectable(row_label.data(), is_selected,
                             ImGuiSelectableFlags_SpanAllColumns)) {
         state.selected = e;
       }
@@ -334,12 +370,12 @@ void Dockforge::draw_scene_outliner() {
                                 0.0F, 10.0F);
   ImGui::NewLine();
 
-  changed |= ImGui::SliderFloat("Metallic", &mat.metallic_factor, 0.0f, 1.0f);
-  changed |= ImGui::SliderFloat("Roughness", &mat.roughness_factor, 0.0f, 1.0f);
-  changed |= ImGui::SliderFloat("Normal Scale", &mat.normal_scale, 0.0f, 2.0f);
+  changed |= ImGui::SliderFloat("Metallic", &mat.metallic_factor, 0.0F, 1.0F);
+  changed |= ImGui::SliderFloat("Roughness", &mat.roughness_factor, 0.0F, 1.0F);
+  changed |= ImGui::SliderFloat("Normal Scale", &mat.normal_scale, 0.0F, 2.0F);
   changed |= ImGui::SliderFloat("Occlusion Strength", &mat.occlusion_strength,
-                                0.0f, 1.0f);
-  changed |= ImGui::SliderFloat("Alpha Cutoff", &mat.alpha_cutoff, 0.0f, 1.0f);
+                                0.0F, 1.0F);
+  changed |= ImGui::SliderFloat("Alpha Cutoff", &mat.alpha_cutoff, 0.0F, 1.0F);
 
   static constexpr const char *alpha_modes[] = {"Opaque", "Mask", "Blend"};
   int alpha_mode = static_cast<int>(mat.alpha_mode);
@@ -391,6 +427,44 @@ void Dockforge::draw_scene_outliner() {
 
   ImGui::EndDisabled();
   return changed;
+}
+
+auto Dockforge::remove_override(Entity entity) -> void {
+  auto *material_override = entity.try_get<Components::MaterialOverride>();
+  if (material_override == nullptr)
+    return;
+
+  if (material_override->gpu_slot != ~0U)
+    override_pool.free(material_override->gpu_slot);
+
+  entity.remove<Components::MaterialOverride>();
+}
+
+auto Dockforge::draw_debug_shapes() -> void {
+  for (auto &&[e, line] : active_scene->view<Components::DebugLine>().each()) {
+    canvas_renderer->line(line.p1, line.p2, line.color);
+  }
+
+  for (auto &&[e, xt, box] :
+       active_scene->view<Components::Transform, Components::DebugBox>()
+           .each()) {
+    canvas_renderer->box(cached_matrix(e, xt),
+                         box.size * 0.5F, // canvas API takes half-extents
+                         box.color);
+  }
+
+  for (auto &&[e, xt, plane] :
+       active_scene->view<Components::Transform, Components::DebugPlane>()
+           .each()) {
+    const glm::vec3 origin = glm::vec3(cached_matrix(e, xt)[3]);
+    canvas_renderer->plane(origin, plane.v1, plane.v2, plane.n1, plane.n2,
+                           plane.s1, plane.s2, plane.color, plane.outline);
+  }
+
+  for (auto &&[e, frustum] :
+       active_scene->view<Components::DebugFrustum>().each()) {
+    canvas_renderer->frustum(frustum.view, frustum.proj, frustum.color);
+  }
 }
 
 auto Dockforge::build_ui() -> void {
@@ -498,22 +572,38 @@ auto Dockforge::build_ui() -> void {
   if (state.selected != entt::null) {
     Entity entity{*active_scene, state.selected};
     auto &transform = entity.get<Components::Transform>();
-    glm::mat4 model = transform.matrix();
     auto &&[view, proj] = resolve_camera();
+
+    glm::mat4 model =
+        cached_matrix(state.selected, entity.get<Components::Transform>());
 
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj), gizmo_op,
                          ImGuizmo::LOCAL, glm::value_ptr(model));
 
     if (ImGuizmo::IsUsing()) {
-      glm::vec3 translation;
-      glm::vec3 scale;
-      glm::vec3 skew;
-      glm::vec4 perspective;
-      glm::quat rotation;
-      glm::decompose(model, scale, rotation, translation, skew, perspective);
-      transform.position = translation;
-      transform.rotation = glm::normalize(rotation);
-      transform.scale = scale;
+      if (!gizmo_prev_model.has_value()) {
+        gizmo_prev_model =
+            cached_matrix(state.selected, entity.get<Components::Transform>());
+      }
+
+      const glm::mat4 delta = glm::inverse(*gizmo_prev_model) * model;
+      glm::vec3 delta_translation;
+      glm::vec3 delta_scale;
+      glm::vec3 delta_skew;
+      glm::vec4 delta_perspective;
+      glm::quat delta_rotation;
+
+      if (glm::decompose(delta, delta_scale, delta_rotation, delta_translation,
+                         delta_skew, delta_perspective)) {
+        transform.position += delta_translation;
+        transform.rotation =
+            glm::normalize(delta_rotation * transform.rotation);
+        transform.scale *= delta_scale;
+      }
+
+      gizmo_prev_model = model;
+    } else {
+      gizmo_prev_model.reset();
     }
 
     if (auto *mesh = entity.try_get<Components::Mesh>()) {
@@ -523,28 +613,75 @@ auto Dockforge::build_ui() -> void {
 
       selected_entity_materials = renderer->get_material_view_mut(*mesh);
     }
+
+    if (ImGui::Begin("Materials")) {
+      if (state.selected == entt::null) {
+        ImGui::TextDisabled("No entity selected");
+        ImGui::End();
+      } else {
+        Entity entity{*active_scene, state.selected};
+        auto *mesh = entity.try_get<Components::Mesh>();
+
+        if (auto *ov = entity.try_get<Components::MaterialOverride>()) {
+          ImGui::TextDisabled("Override active");
+          ImGui::SameLine();
+
+          ImGui::PushStyleColor(ImGuiCol_Button,
+                                ImVec4{0.55F, 0.15F, 0.15F, 1.0F});
+          ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                                ImVec4{0.75F, 0.20F, 0.20F, 1.0F});
+          ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                                ImVec4{0.90F, 0.25F, 0.25F, 1.0F});
+          bool was_removed = false;
+          if (ImGui::SmallButton("Remove Override")) {
+            remove_override(entity);
+            was_removed = true;
+          }
+          ImGui::PopStyleColor(3);
+
+          if (!was_removed) {
+            ImGui::Separator();
+            ImGui::PushID("override");
+            if (draw_material_editor(ov->material))
+              ov->dirty = true;
+            ImGui::PopID();
+          }
+
+        } else if (mesh != nullptr) {
+          auto mats = renderer->get_material_view_mut(*mesh);
+
+          if (mats.empty()) {
+            ImGui::TextDisabled("Mesh has no materials");
+          } else {
+            for (u32 i = 0; i < mats.size(); ++i) {
+              ImGui::PushID(static_cast<int>(i));
+              if (ImGui::CollapsingHeader(
+                      std::format("Material {}", i).c_str())) {
+                if (draw_material_editor(mats[i]) &&
+                    ImGui::IsItemDeactivatedAfterEdit())
+                  renderer->geometry_pool->flush_material(mats.slot(i));
+              }
+              ImGui::PopID();
+            }
+
+            ImGui::Separator();
+            if (ImGui::Button("Add Override")) {
+              auto &new_ov = entity.emplace<Components::MaterialOverride>();
+              new_ov.material = mats.first();
+            }
+            if (ImGui::IsItemHovered())
+              ImGui::SetTooltip("Stamps a single-material override.");
+          }
+
+        } else {
+          ImGui::TextDisabled("No mesh component");
+        }
+
+        ImGui::End();
+      }
+    }
   }
   ImGui::End();
-
-  if (ImGui::Begin("Materials")) {
-    if (selected_entity_materials.empty())
-      ImGui::Text("No selected entity");
-
-    for (u32 i = 0; i < selected_entity_materials.size(); ++i) {
-      ImGui::PushID(static_cast<int>(i));
-      if (ImGui::CollapsingHeader(std::format("Material {}", i).c_str())) {
-        ImGui::BeginGroup();
-        if (draw_material_editor(selected_entity_materials[i]) &&
-            ImGui::IsItemDeactivatedAfterEdit()) {
-          renderer->geometry_pool->flush_material(
-              selected_entity_materials.slot(i));
-        }
-        ImGui::EndGroup();
-      }
-      ImGui::PopID();
-    }
-    ImGui::End();
-  }
 
   ImGui::ShowDemoWindow();
 
@@ -556,26 +693,7 @@ auto Dockforge::build_ui() -> void {
     ImGui::End();
   }
 
-  const glm::vec3 dummy_pos = glm::vec3{5.0f, -5.0f, -10.0f};
-  const glm::vec3 target = glm::vec3{0.0f, 0.0f, 0.0f};
-  const glm::vec3 up = glm::vec3{0.0f, 1.0f, 0.0f};
-
-  const glm::mat4 dummy_view = glm::lookAtLH(dummy_pos, target, up);
-
-  const float fov = glm::radians(60.0F);
-  const float aspect = 1.77F;
-  const float zNear = 0.1f;
-  const float zFar = 30.0f;
-
-  const glm::mat4 dummy_proj = glm::perspectiveLH_ZO(fov, aspect, zFar, zNear);
-
-  const glm::mat4 dummy_vp = dummy_proj * dummy_view;
-
-  canvas_renderer->frustum(dummy_vp, glm::mat4{1.0f},
-                           glm::vec4{1.0f, 1.0f, 0.0f, 1.0f}
-                           // Yellow for the demo
-  );
-
+  draw_debug_shapes();
   canvas_renderer->render_2d();
 
   if (ImGui::Begin("Sun direction")) {
@@ -630,37 +748,113 @@ void emit_barrier(VkCommandBuffer cmd,
   vkCmdPipelineBarrier2(cmd, &dependency_info);
 }
 
+auto grow_pool(Dockforge &app) -> void {
+  const u32 old_capacity = app.override_pool.capacity;
+  const u32 new_capacity = old_capacity * 2;
+
+  info("MaterialOverridePool growing {} → {} slots", old_capacity,
+       new_capacity);
+
+  vkDeviceWaitIdle(app.context->device);
+
+  app.renderer->geometry_pool->reserve_materials(new_capacity - old_capacity);
+
+  auto new_data = make_default_override_materials(new_capacity);
+
+  if (app.override_pool.next > 0) {
+    auto live = app.renderer->geometry_pool->get_materials(
+        app.override_pool.base_slot, app.override_pool.next);
+    std::ranges::reverse_copy(live, new_data.begin());
+  }
+
+  const auto new_offset =
+      app.renderer->geometry_pool->allocate_materials(std::span(new_data));
+  const u32 delta = new_offset.start_index - app.override_pool.base_slot;
+
+  for (auto &&[e, ov] :
+       app.active_scene->template view<Components::MaterialOverride>().each()) {
+    if (ov.gpu_slot != ~0U)
+      ov.gpu_slot += delta;
+  }
+
+  for (auto &s : app.override_pool.free_slots)
+    s += delta;
+
+  app.override_pool.base_slot = new_offset.start_index;
+  app.override_pool.capacity = new_capacity;
+  app.override_pool.needs_grow = false;
+  app.renderer->bindless.need_repopulate = true;
+}
+
+auto Dockforge::resolve_material_slot(Entity e) -> u32 {
+  constexpr auto default_material = 0U;
+
+  auto *material_override = e.try_get<Components::MaterialOverride>();
+  if (material_override == nullptr)
+    return default_material;
+
+  if (material_override->gpu_slot == ~0U) {
+    if (auto slot = override_pool.alloc()) {
+      material_override->gpu_slot = *slot;
+      material_override->dirty = true;
+    } else {
+      warn("MaterialOverridePool full — override skipped this frame");
+      return default_material;
+    }
+  }
+
+  if (material_override->dirty) {
+    renderer->geometry_pool->get_materials_mut(
+        material_override->gpu_slot, 1)[0] = material_override->material;
+    renderer->geometry_pool->flush_material(material_override->gpu_slot);
+    material_override->dirty = false;
+  }
+
+  return material_override->gpu_slot;
+}
+
+auto resize_viewport(Dockforge &app) -> void {
+  double current_time = glfwGetTime();
+  double time_since_last_move = current_time - app.last_resize_change_time;
+  if (time_since_last_move > Dockforge::resize_debounce_delay) {
+    app.viewport_resources.resize(*app.context, *app.renderer,
+                                  app.last_ui_size.width,
+                                  app.last_ui_size.height);
+    app.renderer->resize();
+    app.editor_camera->set_aspect(app.last_ui_size.width,
+                                  app.last_ui_size.height);
+    app.viewport_panel_extent = app.last_ui_size;
+    app.viewport_panel_offset = app.last_ui_offset;
+    trace("Viewport resize {}x{}", app.viewport_panel_extent.width,
+          app.viewport_panel_extent.height);
+  }
+}
+
 auto Dockforge::render(RenderContext &ctx) -> u64 {
-  if (pending_pick) {
+  if (pending_pick) [[unlikely]] {
     try_pick_entity(*pending_pick);
     pending_pick.reset();
   }
 
-  double current_time = glfwGetTime();
-  if ((last_ui_size.width != viewport_panel_extent.width ||
-       last_ui_size.height != viewport_panel_extent.height)) {
-    double time_since_last_move = current_time - last_resize_change_time;
-    if (time_since_last_move > resize_debounce_delay) {
-      viewport_resources.resize(*context, *renderer, last_ui_size.width,
-                                last_ui_size.height);
-      renderer->resize();
-      editor_camera->set_aspect(last_ui_size.width, last_ui_size.height);
-      viewport_panel_extent = last_ui_size;
-      viewport_panel_offset = last_ui_offset;
-      info("Viewport resize {}x{}", viewport_panel_extent.width,
-           viewport_panel_extent.height);
-    }
+  if (override_pool.needs_grow) [[unlikely]] {
+    grow_pool(*this);
   }
 
-  constexpr u32 default_material = 0u;
+  const bool size_changed =
+      (last_ui_size.width != viewport_panel_extent.width ||
+       last_ui_size.height != viewport_panel_extent.height);
+  if (size_changed) [[unlikely]] {
+    resize_viewport(*this);
+  }
+
   for (auto &&[e, xt, m] :
        active_scene->group<Components::Transform, Components::Mesh>().each()) {
-    renderer->submit(m.handle, xt, forward_pipeline.get(), default_material);
+    renderer->submit(m.handle, cached_matrix(e, xt), forward_pipeline.get(),
+                     resolve_material_slot({*active_scene, e}));
   }
-
   auto [view, projection] = resolve_camera();
-  renderer->update_csm(view, projection, 0.1F /* editor_camera->near_plane() */,
-                       100.0F /* editor_camera->far_plane() */);
+  renderer->update_csm(view, projection, editor_camera->near_plane(),
+                       editor_camera->far_plane());
   renderer->prepare(ctx.frame_index, view, projection);
 
   if (renderer->bindless.repopulate_if_needed(renderer->textures,
@@ -674,22 +868,24 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   build_ui();
   imgui_renderer->end_frame();
 
-  const VkImageSubresourceRange color_range{.aspectMask =
-                                                VK_IMAGE_ASPECT_COLOR_BIT,
-                                            .levelCount = 1u,
-                                            .layerCount = 1u};
-  const VkImageSubresourceRange depth_range{.aspectMask =
-                                                VK_IMAGE_ASPECT_DEPTH_BIT,
-                                            .levelCount = 1u,
-                                            .layerCount = 1u};
+  const VkImageSubresourceRange color_range{
+      .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .levelCount = 1U,
+      .layerCount = 1U,
+  };
+  const VkImageSubresourceRange depth_range{
+      .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+      .levelCount = 1U,
+      .layerCount = 1U,
+  };
   const VkExtent2D vp_extent = viewport_resources.extent();
   const VkViewport viewport{
-      .x = 0.0f,
+      .x = 0.0F,
       .y = static_cast<float>(vp_extent.height),
       .width = static_cast<float>(vp_extent.width),
       .height = -static_cast<float>(vp_extent.height),
-      .minDepth = 0.0f,
-      .maxDepth = 1.0f,
+      .minDepth = 0.0F,
+      .maxDepth = 1.0F,
   };
   const VkRect2D scissor{
       .offset =
@@ -701,9 +897,9 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   };
 
   const auto &forward_texture =
-      renderer->textures.get(renderer->forward_target_handle)->texture;
+      renderer->resolve(renderer->forward_target_handle);
   const auto &display_texture =
-      renderer->textures.get(viewport_resources.display_target)->texture;
+      renderer->resolve(viewport_resources.display_target);
 
   {
     const std::array<VkImageMemoryBarrier2, 2> initial_barriers{{
@@ -778,7 +974,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         .extent = shadow_extent,
     };
 
-    for (u32 cascade_idx = 0u; cascade_idx < shadow_map_cascade_count;
+    for (u32 cascade_idx = 0U; cascade_idx < shadow_map_cascade_count;
          ++cascade_idx) {
       const VkRenderingAttachmentInfo depth_att{
           .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -788,13 +984,17 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
           .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
           .clearValue =
               {
-                  .depthStencil = {.depth = 1.0F, .stencil = 0u},
+                  .depthStencil =
+                      {
+                          .depth = 1.0F,
+                          .stencil = 0U,
+                      },
               }, // conventional: 1=far
       };
       const VkRenderingInfo ri{
           .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
           .renderArea = shadow_scissor,
-          .layerCount = 1u,
+          .layerCount = 1U,
           .pDepthAttachment = &depth_att,
       };
 
@@ -809,7 +1009,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       vkCmdEndRendering(ctx.main_cb);
     }
 
-    // Transition CSM to sampled for the forward pass
     const VkImageMemoryBarrier2 csm_to_sampled{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
@@ -821,11 +1020,11 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         .image = renderer->csm.image,
         .subresourceRange =
             {
-                VK_IMAGE_ASPECT_DEPTH_BIT,
-                0,
-                1,
-                0,
-                shadow_map_cascade_count,
+                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = shadow_map_cascade_count,
             },
     };
     emit_barrier(ctx.main_cb, csm_to_sampled);
@@ -839,7 +1038,14 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue = {.depthStencil = {0.0f, 0u}},
+        .clearValue =
+            {
+                .depthStencil =
+                    {
+                        .depth = 0.0f,
+                        .stencil = 0u,
+                    },
+            },
     };
     const VkRenderingInfo prepass_ri{
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
