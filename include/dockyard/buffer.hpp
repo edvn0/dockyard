@@ -32,6 +32,17 @@ public:
     }
   }
 
+  template <typename T> auto for_each_with_flush(auto &&func) {
+    if (mapped_data) {
+      auto *typed_ptr = static_cast<T *>(mapped_data);
+      auto count = allocation_info.size / sizeof(T);
+      for (size_t i = 0; i < count; ++i) {
+        func(typed_ptr[i]);
+      }
+      vmaFlushAllocation(allocator, allocation, 0, allocation_info.size);
+    }
+  }
+
   auto upload_with_offset(std::ranges::contiguous_range auto &&range,
                           usize byte_offset) {
     const auto bytes = std::ranges::size(range) *

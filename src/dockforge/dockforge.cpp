@@ -160,7 +160,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
         mesh::load_from_memory(*renderer, cube_verts, cube_indices).value();
 
     auto &scene = *active_scene;
-    const int grid_side = 3;
+    const int grid_side = 30;
     const float spacing = std::numbers::sqrt2_v<float> + 0.5F;
     const float offset = (grid_side - 1) * spacing / 2.0F;
 
@@ -869,6 +869,10 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       renderer->resolve(viewport_resources.display_target);
 
   {
+    renderer->culling_pass(ctx.main_cb);
+  }
+
+  {
     const VkExtent2D shadow_extent{
         .width = shadow_map_cascade_resolution,
         .height = shadow_map_cascade_resolution,
@@ -946,60 +950,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     emit_barrier(ctx.main_cb, csm_to_sampled);
   }
 
-  {
-    // depth → shader read for HiZ build
-    /*const VkImageMemoryBarrier2 depth_to_read{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .image = viewport_resources.depth_msaa.image,
-        .subresourceRange =
-            {
-                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-    };
-    emit_barrier(ctx.main_cb, depth_to_read);*/
-
-    renderer->culling_pass(
-        ctx.main_cb); // binds pipeline, pushes constants, dispatches
-
-    auto view = renderer->indirect_buffer_view();
-    std::array<VkBuffer, 2> buffers{std::get<0>(view), std::get<1>(view)};
-    std::array<VkBufferMemoryBarrier2, 2> buffer_barriers{};
-    for (size_t i = 0; i < buffers.size(); ++i) {
-      buffer_barriers[i] = {
-          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-          .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-          .buffer = buffers[i],
-          .offset = 0,
-          .size = VK_WHOLE_SIZE,
-      };
-    }
-    VkDependencyInfo dependency_info{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .pNext = nullptr,
-        .dependencyFlags = 0,
-        .memoryBarrierCount = 0,
-        .pMemoryBarriers = nullptr,
-        .bufferMemoryBarrierCount = static_cast<u32>(buffer_barriers.size()),
-        .pBufferMemoryBarriers = buffer_barriers.data(),
-        .imageMemoryBarrierCount = 0,
-        .pImageMemoryBarriers = nullptr,
-    };
-    vkCmdPipelineBarrier2(ctx.main_cb, &dependency_info);
-  }
-
   // ── 2. Depth pre-pass ───────────────────────────────────────────────
   {
     const VkRenderingAttachmentInfo depth_attachment{
@@ -1032,7 +982,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     vkCmdSetDepthBias(ctx.main_cb, 1.25f, 0.0f, 1.75f);
     vkCmdBindIndexBuffer(ctx.main_cb,
                          renderer->geometry_pool->index_buffer->get_buffer(),
-                         0u, VK_INDEX_TYPE_UINT32);
+                         0U, VK_INDEX_TYPE_UINT32);
     renderer->render_pass(ctx.main_cb, renderer->depth_prepass,
                           renderer->pipeline_registry->get(depth_pipeline));
     vkCmdEndRendering(ctx.main_cb);

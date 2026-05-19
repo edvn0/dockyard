@@ -5,8 +5,18 @@
 #include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
 #include <limits>
+#include <ranges>
+#include <vulkan/vulkan_core.h>
 
 namespace dy {
+
+struct PaddedDrawCommand {
+  u32 index_count;
+  u32 instance_count;
+  u32 first_index;
+  i32 vertex_offset;
+  u32 first_instance;
+};
 
 auto create_main_pipeline_layout(VkDevice device,
                                  VkDescriptorSetLayout bindless_layout)
@@ -34,14 +44,14 @@ auto create_composite_pipeline(VkDevice device,
                                VkPipeline &out_pipeline) -> void {
   const VkPushConstantRange push_range{
       .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-      .offset = 0u,
+      .offset = 0U,
       .size = sizeof(CompositePushConstants),
   };
   const VkPipelineLayoutCreateInfo layout_ci{
       .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1u,
+      .setLayoutCount = 1U,
       .pSetLayouts = &bindless_layout,
-      .pushConstantRangeCount = 1u,
+      .pushConstantRangeCount = 1U,
       .pPushConstantRanges = &push_range,
   };
   vkCreatePipelineLayout(device, &layout_ci, nullptr, &out_layout);
@@ -57,6 +67,36 @@ auto create_composite_pipeline(VkDevice device,
       });
   if (!result) {
     error("composite pipeline: {}", result.error());
+    std::abort();
+  }
+  out_pipeline = *result;
+}
+
+auto create_culling_pipeline(VkDevice device,
+                             VkDescriptorSetLayout bindless_layout,
+                             VkPipelineLayout &out_layout,
+                             VkPipeline &out_pipeline) -> void {
+  const VkPushConstantRange push_range{
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .offset = 0U,
+      .size = sizeof(CullingPushConstants),
+  };
+  const VkPipelineLayoutCreateInfo layout_ci{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = 1U,
+      .pSetLayouts = &bindless_layout,
+      .pushConstantRangeCount = 1U,
+      .pPushConstantRanges = &push_range,
+  };
+  vkCreatePipelineLayout(device, &layout_ci, nullptr, &out_layout);
+
+  auto result = build_compute_pipeline(
+      device, ComputePipelineDescription{
+                  .shader_path = VFSPath::create("shaders://culling.slang"),
+                  .layout = out_layout,
+              });
+  if (!result) {
+    error("culling pipeline: {}", result.error());
     std::abort();
   }
   out_pipeline = *result;
@@ -210,6 +250,9 @@ auto SceneRenderer::initialise_bindless() -> void {
   create_composite_pipeline(ctx.device, bindless.layout,
                             composite_pipeline_layout, composite_pipeline);
 
+  create_culling_pipeline(ctx.device, bindless.layout, culling_pipeline_layout,
+                          culling_pipeline);
+
   const VkSamplerCreateInfo shadow_ci{
       .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
       .magFilter = VK_FILTER_LINEAR,
@@ -279,7 +322,7 @@ auto SceneRenderer::upload_texture(std::span<const u32> data,
 }
 auto SceneRenderer::resize() -> void {
   frame_ubo_buffers.clear();
-  for (u32 i = 0u; i < frames_in_flight; ++i) {
+  for (u32 i = 0U; i < frames_in_flight; ++i) {
     frame_ubo_buffers.emplace_back(Buffer::create(
         ctx.allocator, sizeof(FrameUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT));
   }
@@ -292,6 +335,10 @@ auto SceneRenderer::destroy() -> void {
     vkDestroyPipeline(ctx.device, composite_pipeline, nullptr);
   if (composite_pipeline_layout != VK_NULL_HANDLE)
     vkDestroyPipelineLayout(ctx.device, composite_pipeline_layout, nullptr);
+  if (culling_pipeline_layout != VK_NULL_HANDLE)
+    vkDestroyPipelineLayout(ctx.device, culling_pipeline_layout, nullptr);
+  if (culling_pipeline != VK_NULL_HANDLE)
+    vkDestroyPipeline(ctx.device, culling_pipeline, nullptr);
 
   bindless.destroy();
 
@@ -328,16 +375,18 @@ void SceneRenderer::submit(MeshHandle handle, const glm::mat4 &t,
     glm::mat4 node_transform = t * node.local_transform;
 
     for (const auto &prim : node.primitives) {
-      submission_queue.emplace_back(
-          prim.mesh, pipeline_id,
-          material_id != 0 ? material_id : prim.material_id, node_transform);
+      u32 current_global_id = static_cast<u32>(submission_queue.size());
+
+      submission_queue.push_back({
+          .mesh = prim.mesh,
+          .pipeline_id = pipeline_id,
+          .material_id = material_id != 0 ? material_id : prim.material_id,
+          .transform = node_transform,
+          .aabb = prim.aabb,
+          .instance_id = current_global_id,
+      });
     }
   }
-}
-
-void SceneRenderer::submit(const Mesh &mesh, const glm::mat4 &t,
-                           u32 pipeline_id, u32 material_id) {
-  submission_queue.emplace_back(mesh, pipeline_id, material_id, t);
 }
 
 void SceneRenderer::ensure_global_capacity(usize instance_count) {
@@ -350,6 +399,28 @@ void SceneRenderer::ensure_global_capacity(usize instance_count) {
 
 namespace {
 std::atomic_uint64_t current_frame_index{std::numeric_limits<u64>::max()};
+
+auto extract_frustum_planes(const glm::mat4 &vp) -> std::array<glm::vec4, 6> {
+  const auto row = [&](const int i) -> glm::vec4 {
+    return {vp[0][i], vp[1][i], vp[2][i], vp[3][i]};
+  };
+
+  const glm::vec4 r0 = row(0);
+  const glm::vec4 r1 = row(1);
+  const glm::vec4 r2 = row(2);
+  const glm::vec4 r3 = row(3);
+
+  std::array<glm::vec4, 6> planes = {
+      glm::normalize(r3 + r0), // Left
+      glm::normalize(r3 - r0), // Right
+      glm::normalize(r3 - r1), // Bottom  ← swapped
+      glm::normalize(r3 + r1), // Top     ← swapped
+      glm::normalize(r2),      // Near
+      glm::normalize(r3 - r2), // Far
+  };
+
+  return planes;
+}
 }
 
 void SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
@@ -360,8 +431,13 @@ void SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
 
   ensure_global_capacity(submission_queue.size());
   global_instance_data.clear();
-  for (const auto &draw : submission_queue)
-    global_instance_data.emplace_back(draw.transform, draw.material_id);
+
+  for (const auto &draw : submission_queue) {
+    glm::vec3 half_extents = (draw.aabb.get_max() - draw.aabb.get_min()) * 0.5F;
+    float radius = glm::length(half_extents);
+    global_instance_data.emplace_back(draw.transform, draw.material_id, radius);
+  }
+
   global_instance_buffer->upload(global_instance_data);
 
   const glm::mat4 inv_view = glm::inverse(view);
@@ -377,13 +453,14 @@ void SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
       .camera_position = inv_view[3],
       // Just copy the struct directly — one memcpy worth of data
       .cascades = csm_frame_data.cascades,
+      .frustum_planes = extract_frustum_planes(view_proj),
       .shadow_array_index = csm_frame_data.shadow_array_index,
       .shadow_sampler_index = csm_frame_data.shadow_sampler_index,
   };
 
   frame_ubo_buffers.at(frame_index)->upload(std::span(&ubo, 1));
-  depth_prepass.bake(submission_queue);
-  forward_pass.bake(submission_queue);
+  depth_prepass.bake(submission_queue, global_instance_data.size());
+  forward_pass.bake(submission_queue, global_instance_data.size());
   submission_queue.clear();
 }
 
@@ -394,14 +471,14 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
     return;
 
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
-                          0u, 1u, &bindless.set, 0u, nullptr);
+                          0U, 1U, &bindless.set, 0U, nullptr);
 
   const GpuPushConstants push_constants{
       .vertex_buffer_ptr =
           DeviceAddress{
               pool.vertex_buffer->get_device_address(),
           },
-      .position_only_vertex_buffer_ptr =
+      .position_only_buffer_ptr =
           DeviceAddress{
               pool.position_only_vertex_buffer->get_device_address(),
           },
@@ -409,9 +486,9 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
           DeviceAddress{
               global_instance_buffer->get_device_address(),
           },
-      .remap_buffer_ptr =
+      .culled_index_remapping_buffer =
           DeviceAddress{
-              pass.index_remapping_buffer->get_device_address(),
+              pass.culled_index_remapping_buffer->get_device_address(),
           },
       .frame_ubo =
           DeviceAddress{
@@ -429,12 +506,12 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
                                 : pipeline_registry->get(batch.pipeline_id);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_ALL, 0u,
-                       sizeof(push_constants), &push_constants);
+                       sizeof(GpuPushConstants), &push_constants);
     vkCmdDrawIndexedIndirectCount(
         cmd, pass.indirect_buffer->get_buffer(),
-        batch.first_command_index * sizeof(VkDrawIndexedIndirectCommand),
+        batch.first_command_index * sizeof(PaddedDrawCommand),
         pass.count_buffer->get_buffer(), batch.count_buffer_offset,
-        batch.max_command_count, sizeof(VkDrawIndexedIndirectCommand));
+        batch.max_command_count, sizeof(PaddedDrawCommand));
   }
 }
 
@@ -452,75 +529,208 @@ void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
   vkCmdDraw(cmd, 3U, 1u, 0u, 0u);
 }
 
-void SceneRenderer::culling_pass(VkCommandBuffer) {
-  /* vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, culling_pipeline);
-   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                           culling_pipeline_layout, 0U, 1U, &bindless.set, 0U,
-                           nullptr);
-   const CullingPushConstants push{};
-   vkCmdPushConstants(cmd, culling_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                      0u, sizeof(push), &push);
-   auto geometry_count = global_instance_data.size();
-   auto dispatch_count = (geometry_count + 63) / 64;
-   vkCmdDispatch(cmd, dispatch_count, 1, 1);
-   */
+void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
+  auto geometry_count = global_instance_data.size();
+  if (geometry_count == 0 || depth_prepass.batches.empty() ||
+      forward_pass.batches.empty())
+    return;
+
+  const u32 zero_value = 0U;
+
+  u32 depth_cmd_count = static_cast<u32>(depth_prepass.indirect_buffer->size() /
+                                         sizeof(PaddedDrawCommand));
+  for (u32 i = 0; i < depth_cmd_count; ++i) {
+    VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
+                          offsetof(PaddedDrawCommand, instance_count);
+    vkCmdUpdateBuffer(cmd, depth_prepass.indirect_buffer->get_buffer(), offset,
+                      sizeof(u32), &zero_value);
+  }
+
+  u32 forward_cmd_count = static_cast<u32>(
+      forward_pass.indirect_buffer->size() / sizeof(PaddedDrawCommand));
+  for (u32 i = 0; i < forward_cmd_count; ++i) {
+    VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
+                          offsetof(PaddedDrawCommand, instance_count);
+    vkCmdUpdateBuffer(cmd, forward_pass.indirect_buffer->get_buffer(), offset,
+                      sizeof(u32), &zero_value);
+  }
+
+  VkBufferMemoryBarrier2 clear_barriers[2] = {
+      {.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+       .srcStageMask =
+           VK_PIPELINE_STAGE_2_TRANSFER_BIT, // ◄ vkCmdUpdateBuffer is a
+                                             // transfer operation!
+       .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+       .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+       .dstAccessMask =
+           VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+       .buffer = depth_prepass.indirect_buffer->get_buffer(),
+       .size = VK_WHOLE_SIZE},
+      {.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+       .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+       .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+       .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+       .dstAccessMask =
+           VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+       .buffer = forward_pass.indirect_buffer->get_buffer(),
+       .size = VK_WHOLE_SIZE}};
+
+  VkDependencyInfo clear_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                             .bufferMemoryBarrierCount = 2U,
+                             .pBufferMemoryBarriers = clear_barriers};
+  vkCmdPipelineBarrier2(cmd, &clear_dep);
+
+  CullingPushConstants push{
+      .total_instance_count = static_cast<u32>(geometry_count),
+      .instance_buffer = global_instance_buffer->get_device_address(),
+      .frame_data =
+          frame_ubo_buffers.at(current_frame_index)->get_device_address(),
+
+      .depth_original_remap_buffer =
+          depth_prepass.index_remapping_buffer->get_device_address(),
+      .depth_instance_to_command_buffer =
+          depth_prepass.instance_to_command_buffer->get_device_address(),
+      .depth_indirect_commands =
+          depth_prepass.indirect_buffer->get_device_address(),
+      .depth_culled_remap =
+          depth_prepass.culled_index_remapping_buffer->get_device_address(),
+
+      .forward_original_remap_buffer =
+          forward_pass.index_remapping_buffer->get_device_address(),
+      .forward_instance_to_command_buffer =
+          forward_pass.instance_to_command_buffer->get_device_address(),
+      .forward_indirect_commands =
+          forward_pass.indirect_buffer->get_device_address(),
+      .forward_culled_remap =
+          forward_pass.culled_index_remapping_buffer->get_device_address(),
+  };
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, culling_pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          culling_pipeline_layout, 0U, 1U, &bindless.set, 0U,
+                          nullptr);
+  vkCmdPushConstants(cmd, culling_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                     0U, sizeof(push), &push);
+
+  auto dispatch_count = (geometry_count + 63) / 64;
+  vkCmdDispatch(cmd, dispatch_count, 1, 1);
+
+  VkBufferMemoryBarrier2 post_cull_barriers[4] = {
+      // Indirect Commands
+      {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+          .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+          .buffer = depth_prepass.indirect_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+          .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+          .buffer = forward_pass.indirect_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+      // Culled Remapping Arrays
+      {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+          .buffer = depth_prepass.culled_index_remapping_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+          .buffer = forward_pass.culled_index_remapping_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+  };
+
+  VkDependencyInfo post_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                            .bufferMemoryBarrierCount = 4U,
+                            .pBufferMemoryBarriers = post_cull_barriers};
+  vkCmdPipelineBarrier2(cmd, &post_dep);
 }
 
 void RenderPass::ensure_capacity(usize command_count, usize instance_count,
-                                 usize batch_count) {
+                                 usize batch_count,
+                                 usize total_global_instances) {
   constexpr VkBufferUsageFlags indirect_flags =
       VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
   constexpr VkBufferUsageFlags storage_flags =
       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
   if (!indirect_buffer ||
-      indirect_buffer->size() <
-          command_count * sizeof(VkDrawIndexedIndirectCommand)) {
-    indirect_buffer = Buffer::create(
-        allocator, command_count * sizeof(VkDrawIndexedIndirectCommand),
-        indirect_flags);
+      indirect_buffer->size() < command_count * sizeof(PaddedDrawCommand)) {
+    indirect_buffer =
+        Buffer::create(allocator, command_count * sizeof(PaddedDrawCommand),
+                       indirect_flags | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT);
+  }
+  if (!count_buffer || count_buffer->size() < batch_count * sizeof(u32)) {
+    count_buffer =
+        Buffer::create(allocator, batch_count * sizeof(u32), indirect_flags);
+  }
+
+  if (!instance_to_command_buffer || instance_to_command_buffer->size() <
+                                         total_global_instances * sizeof(u32)) {
+    instance_to_command_buffer = Buffer::create(
+        allocator, total_global_instances * sizeof(u32), storage_flags);
   }
   if (!index_remapping_buffer ||
       index_remapping_buffer->size() < instance_count * sizeof(u32)) {
     index_remapping_buffer =
         Buffer::create(allocator, instance_count * sizeof(u32), storage_flags);
   }
-  if (!count_buffer || count_buffer->size() < batch_count * sizeof(u32)) {
-    count_buffer =
-        Buffer::create(allocator, batch_count * sizeof(u32), indirect_flags);
+  if (!culled_index_remapping_buffer ||
+      culled_index_remapping_buffer->size() < instance_count * sizeof(u32)) {
+    culled_index_remapping_buffer =
+        Buffer::create(allocator, instance_count * sizeof(u32), storage_flags);
   }
 }
-void RenderPass::bake(const std::vector<PendingDraw> &scene_draws) {
-  struct DrawRef {
-    u32 global_idx;
-    const PendingDraw *data;
-  };
 
-  std::vector<DrawRef> sorted_refs;
+void RenderPass::bake(const std::vector<PendingDraw> &scene_draws,
+                      usize total_global_instances) {
+  std::vector<const PendingDraw *> sorted_refs;
   sorted_refs.reserve(scene_draws.size());
-  for (u32 i = 0U; i < scene_draws.size(); ++i)
-    sorted_refs.push_back({.global_idx = i, .data = &scene_draws[i]});
+  for (const auto &draw : scene_draws) {
+    sorted_refs.push_back(&draw);
+  }
 
-  std::ranges::sort(sorted_refs, [this](const auto &a, const auto &b) {
-    return a.data->get_key(type) < b.data->get_key(type);
-  });
+  std::ranges::sort(sorted_refs,
+                    [this](const PendingDraw *a, const PendingDraw *b) {
+                      return a->get_key(type) < b->get_key(type);
+                    });
 
-  std::vector<VkDrawIndexedIndirectCommand> commands;
+  std::vector<PaddedDrawCommand> commands;
   std::vector<u32> remapped_indices;
   std::vector<u32> draw_counts;
+
+  std::vector<u32> instance_to_commands(total_global_instances, 0xFFFFFFFF);
+
   batches.clear();
 
   for (usize i = 0U; i < sorted_refs.size(); ++i) {
-    const auto &[global_idx, data] = sorted_refs[i];
+    const PendingDraw *data = sorted_refs[i];
+
     const bool is_new_pipeline =
-        i > 0U && data->pipeline_id != sorted_refs[i - 1].data->pipeline_id;
-    const bool is_new_mesh =
-        i > 0U &&
-        data->mesh.first_index != sorted_refs[i - 1].data->mesh.first_index;
+        i > 0U && data->pipeline_id != sorted_refs[i - 1]->pipeline_id;
+    const bool is_new_mesh = i > 0U && data->mesh.first_index !=
+                                           sorted_refs[i - 1]->mesh.first_index;
 
     if (is_new_pipeline || i == 0U) {
       const u32 count_idx = static_cast<u32>(draw_counts.size());
       draw_counts.push_back(0U);
+
       batches.push_back({
           .pipeline_id = data->pipeline_id,
           .max_command_count = 0U,
@@ -531,24 +741,30 @@ void RenderPass::bake(const std::vector<PendingDraw> &scene_draws) {
 
     if (is_new_mesh || is_new_pipeline || i == 0U) {
       commands.push_back({
-          .indexCount = data->mesh.index_count,
-          .instanceCount = 1U,
-          .firstIndex = data->mesh.first_index,
-          .vertexOffset = data->mesh.vertex_offset,
-          .firstInstance = static_cast<u32>(remapped_indices.size()),
+          .index_count = data->mesh.index_count,
+          .instance_count = 0U,
+          .first_index = data->mesh.first_index,
+          .vertex_offset = data->mesh.vertex_offset,
+          .first_instance = static_cast<u32>(remapped_indices.size()),
       });
       batches.back().max_command_count++;
       draw_counts.back()++;
-    } else {
-      commands.back().instanceCount++;
     }
-    remapped_indices.push_back(global_idx);
+
+    remapped_indices.push_back(data->instance_id);
+
+    u32 current_command_idx = static_cast<u32>(commands.size() - 1);
+
+    instance_to_commands[data->instance_id] = current_command_idx;
   }
 
-  ensure_capacity(commands.size(), remapped_indices.size(), draw_counts.size());
+  ensure_capacity(commands.size(), remapped_indices.size(), draw_counts.size(),
+                  total_global_instances);
+
   indirect_buffer->upload(commands);
-  index_remapping_buffer->upload(remapped_indices);
   count_buffer->upload(draw_counts);
+  index_remapping_buffer->upload(remapped_indices);
+  instance_to_command_buffer->upload(instance_to_commands);
 }
 
 [[nodiscard]] constexpr auto PendingDraw::get_key(RenderPassType pass) const
@@ -568,39 +784,49 @@ void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
     return;
 
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
-                          0u, 1u, &bindless.set, 0u, nullptr);
+                          0U, 1u, &bindless.set, 0u, nullptr);
   vkCmdBindIndexBuffer(cmd, geometry_pool->index_buffer->get_buffer(), 0u,
                        VK_INDEX_TYPE_UINT32);
 
-  GpuPushConstants push{
+  auto &pool = *geometry_pool;
+  const GpuPushConstants push_constants{
       .vertex_buffer_ptr =
-          DeviceAddress{geometry_pool->vertex_buffer->get_device_address()},
-      .position_only_vertex_buffer_ptr =
           DeviceAddress{
-              geometry_pool->position_only_vertex_buffer->get_device_address()},
+              pool.vertex_buffer->get_device_address(),
+          },
+      .position_only_buffer_ptr =
+          DeviceAddress{
+              pool.position_only_vertex_buffer->get_device_address(),
+          },
       .transform_buffer_ptr =
-          DeviceAddress{global_instance_buffer->get_device_address()},
-      .remap_buffer_ptr =
-          DeviceAddress{pass.index_remapping_buffer->get_device_address()},
+          DeviceAddress{
+              global_instance_buffer->get_device_address(),
+          },
+      .culled_index_remapping_buffer =
+          DeviceAddress{
+              pass.culled_index_remapping_buffer->get_device_address(),
+          },
       .frame_ubo =
           DeviceAddress{
-              frame_ubo_buffers.at(current_frame_index)->get_device_address()},
+              frame_ubo_buffers.at(current_frame_index)->get_device_address(),
+          },
       .material_ptr =
-          DeviceAddress{geometry_pool->material_buffer->get_device_address()},
+          DeviceAddress{
+              pool.material_buffer->get_device_address(),
+          },
       .cascade_index = cascade_idx,
   };
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-  vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_ALL, 0u,
-                     sizeof(push), &push);
+  vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_ALL, 0U,
+                     sizeof(GpuPushConstants), &push_constants);
 
-  // Draw all batches (shadow doesn't care about per-batch pipeline variation)
   for (const auto &batch : pass.batches) {
     vkCmdDrawIndexedIndirectCount(
         cmd, pass.indirect_buffer->get_buffer(),
-        batch.first_command_index * sizeof(VkDrawIndexedIndirectCommand),
+        batch.first_command_index * sizeof(PaddedDrawCommand),
         pass.count_buffer->get_buffer(), batch.count_buffer_offset,
-        batch.max_command_count, sizeof(VkDrawIndexedIndirectCommand));
+        batch.max_command_count, sizeof(PaddedDrawCommand));
   }
 }
 

@@ -454,7 +454,10 @@ void flatten_nodes(const fastgltf::Asset &asset,
   for (const auto idx : root_indices) {
     out.root_node_indices.push_back(
         static_cast<u32>(out.nodes.size() + stack.size()));
-    stack.push_back({idx, -1});
+    stack.push_back({
+        .node_idx = idx,
+        .parent_flat_idx = -1,
+    });
   }
 
   out.nodes.clear();
@@ -464,7 +467,10 @@ void flatten_nodes(const fastgltf::Asset &asset,
   for (const auto idx : root_indices) {
     out.root_node_indices.push_back(
         static_cast<u32>(out.nodes.size() + stack.size()));
-    stack.push_back({idx, -1});
+    stack.push_back({
+        .node_idx = idx,
+        .parent_flat_idx = -1,
+    });
   }
 
   out.nodes.clear();
@@ -480,7 +486,11 @@ void flatten_nodes(const fastgltf::Asset &asset,
   std::vector<Frame> dfs;
   dfs.reserve(root_indices.size());
   for (const auto idx : root_indices)
-    dfs.push_back({idx, -1, true});
+    dfs.push_back({
+        .node_idx = idx,
+        .parent_flat_idx = -1,
+        .is_root = true,
+    });
 
   while (!dfs.empty()) {
     auto [node_idx, parent_flat, is_root] = dfs.back();
@@ -511,14 +521,22 @@ void flatten_nodes(const fastgltf::Asset &asset,
                 ? out.material_slots[*gltf_mesh.primitives[pi].materialIndex]
                 : 0u;
 
-        desc.primitives.push_back({.mesh = h, .material_id = mat_id});
+        desc.primitives.push_back({
+            .mesh = h,
+            .material_id = mat_id,
+            .aabb = out.submesh_aabbs[mi][pi],
+        });
       }
     }
 
     out.nodes.push_back(std::move(desc));
 
     for (auto it = node.children.rbegin(); it != node.children.rend(); ++it)
-      dfs.push_back({*it, flat_idx, false});
+      dfs.push_back({
+          .node_idx = *it,
+          .parent_flat_idx = flat_idx,
+          .is_root = false,
+      });
   }
 }
 
@@ -559,159 +577,22 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
   };
 
   result.meshes = {{mesh}};
+  auto aabb = AABB::create();
+  for (const auto &v : vertices)
+    aabb.update({v.position[0], v.position[1], v.position[2]});
 
   MeshNodeDescription desc{};
   desc.name = "mesh_from_memory";
   desc.local_transform = glm::mat4{1.f};
   desc.parent_index = -1;
-  desc.primitives = {{.mesh = mesh, .material_id = 0u}};
+  desc.primitives = {{.mesh = mesh, .material_id = 0u, .aabb = aabb}};
 
   result.nodes = {std::move(desc)};
   result.root_node_indices = {0u};
 
-  auto aabb = AABB::create();
-  for (const auto &v : vertices)
-    aabb.update({v.position[0], v.position[1], v.position[2]});
-
   result.mesh_aabb = aabb;
-  result.submesh_aabbs = {aabb};
+  result.submesh_aabbs = {{aabb}};
 
-  return renderer.register_gltf(std::move(result));
-}
-
-auto load_from_path_old(const VFSPath &path, SceneRenderer &renderer)
-    -> std::expected<MeshHandle, std::string> {
-  auto &pool = *renderer.geometry_pool;
-
-  const auto fs_path = VFS::get().resolve(path);
-  if (!std::filesystem::exists(fs_path))
-    return std::unexpected(
-        std::format("load_gltf: not found: '{}'", fs_path.string()));
-
-  const auto gltf_dir = fs_path.parent_path();
-
-  fastgltf::Parser parser;
-  constexpr auto parse_opts = fastgltf::Options::LoadExternalBuffers |
-                              fastgltf::Options::LoadExternalImages |
-                              fastgltf::Options::GenerateMeshIndices;
-
-  auto data = fastgltf::GltfDataBuffer::FromPath(fs_path);
-  if (!data)
-    return std::unexpected(
-        std::format("load_gltf: could not read '{}': {}", fs_path.string(),
-                    fastgltf::getErrorMessage(data.error())));
-
-  auto asset_result = parser.loadGltf(data.get(), gltf_dir, parse_opts);
-  if (!asset_result)
-    return std::unexpected(
-        std::format("load_gltf: parse error in '{}': {}", fs_path.string(),
-                    fastgltf::getErrorMessage(asset_result.error())));
-
-  auto &asset = asset_result.get();
-
-  MeshAsset result{
-      .mesh_aabb = AABB::create(),
-  };
-  result.texture_handles.resize(asset.images.size());
-  result.material_slots.resize(asset.materials.size(), 0u);
-  result.meshes.resize(asset.meshes.size());
-
-  const auto color_spaces = classify_images(asset);
-
-  for (usize i = 0; i < asset.images.size(); ++i) {
-    auto decoded = load_image(asset, asset.images[i], gltf_dir);
-    if (!decoded) {
-      warn("load_gltf: image {}: {} — using white fallback", i,
-           decoded.error());
-      result.texture_handles[i] = renderer.dummy_texture_handle;
-      continue;
-    }
-
-    const std::string name =
-        asset.images[i].name.empty()
-            ? std::format("{}#img{}", fs_path.filename().string(), i)
-            : std::string(asset.images[i].name);
-
-    const VkFormat fmt = (color_spaces[i] == ImageColorSpace::srgb)
-                             ? VK_FORMAT_R8G8B8A8_SRGB
-                             : VK_FORMAT_R8G8B8A8_UNORM;
-
-    result.texture_handles[i] =
-        renderer.upload_texture(decoded->pixels, name, decoded->width,
-                                decoded->height, fmt, true, false);
-  }
-
-  if (!asset.materials.empty()) {
-    std::vector<GPUMaterial> gpu_mats;
-    gpu_mats.reserve(asset.materials.size());
-    for (const auto &mat : asset.materials)
-      gpu_mats.push_back(
-          build_gpu_material(mat, asset, result.texture_handles));
-
-    const auto mat_offset = pool.allocate_materials(gpu_mats);
-    result.material_base_slot = mat_offset.start_index;
-    result.material_count = static_cast<u32>(gpu_mats.size());
-
-    for (usize i = 0; i < gpu_mats.size(); ++i)
-      result.material_slots[i] =
-          result.material_base_slot + static_cast<u32>(i);
-  }
-
-  result.vertex_base_offset = pool.vertex_offset;
-  result.shadow_vertex_base_offset = pool.shadow_vertex_offset;
-  result.index_base_offset = pool.index_offset;
-  result.meshes.resize(asset.meshes.size());
-  result.submesh_aabbs.clear();
-
-  for (auto &&[mi, mesh] : std::views::enumerate(asset.meshes)) {
-    auto as_usize = static_cast<usize>(mi);
-    result.meshes[as_usize].reserve(mesh.primitives.size());
-
-    auto mesh_aabb = AABB::create();
-
-    for (const auto &prim : asset.meshes[as_usize].primitives) {
-      auto prim_result = extract_primitive(asset, prim);
-      if (!prim_result) {
-        warn("load_gltf: mesh {}: {} — inserting invalid handle", mi,
-             prim_result.error());
-        result.meshes[as_usize].push_back(Mesh{});
-        result.submesh_aabbs.push_back(AABB::create());
-        continue;
-      }
-
-      auto &&[prim_data, prim_aabb] = *prim_result;
-      result.submesh_aabbs.push_back(prim_aabb);
-      mesh_aabb.merge(prim_aabb);
-      auto &&[v_off, sv_off, i_off] =
-          pool.allocate(prim_data.vertices, prim_data.indices);
-
-      result.meshes[static_cast<usize>(mi)].push_back(Mesh{
-          .index_count = static_cast<u32>(prim_data.indices.size()),
-          .first_index = static_cast<u32>(i_off / sizeof(u32)),
-          .vertex_offset = static_cast<i32>(v_off / sizeof(Vertex)),
-      });
-    }
-
-    result.mesh_aabb.merge(mesh_aabb);
-  }
-
-  const auto scene_roots = [&]() -> std::span<const std::size_t> {
-    if (asset.defaultScene.has_value())
-      return asset.scenes[*asset.defaultScene].nodeIndices;
-    if (!asset.scenes.empty())
-      return asset.scenes[0].nodeIndices;
-    return {};
-  }();
-
-  if (scene_roots.empty())
-    warn("load_gltf: '{}' has no scenes — node list will be empty",
-         fs_path.filename().string());
-  else
-    flatten_nodes(asset, scene_roots, result);
-
-  info("load_gltf: '{}' — {} image(s), {} material(s), {} mesh(es), {} node(s)",
-       fs_path.filename().string(), asset.images.size(), asset.materials.size(),
-       asset.meshes.size(), result.nodes.size());
   return renderer.register_gltf(std::move(result));
 }
 
@@ -892,23 +773,25 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
     auto batch = pool.begin_transaction();
 
     result->meshes.resize(asset.meshes.size());
+    result->submesh_aabbs.resize(asset.meshes.size()); // same size as meshes
     result->vertex_base_offset = pool.vertex_offset;
     result->submesh_aabbs.clear();
 
     for (usize i = 0; i < prim_work_list.size(); ++i) {
       auto &res = extracted_prims[i];
+      const usize mesh_idx = prim_work_list[i].mesh_idx;
+
       if (!res) {
-        result->submesh_aabbs.push_back(
-            AABB::create()); // ← keep indices aligned
+        result->submesh_aabbs[mesh_idx].push_back(AABB::create());
         continue;
       }
 
       auto &[data, aabb] = *res;
 
       auto offsets = batch.allocate(data.vertices, data.indices);
-      result->submesh_aabbs.push_back(aabb); // ← per-submesh
+      result->submesh_aabbs[mesh_idx].push_back(aabb); // ← per-submesh
       result->mesh_aabb.merge(aabb);         // ← accumulate overall
-      result->meshes[prim_work_list[i].mesh_idx].push_back(Mesh{
+      result->meshes[mesh_idx].push_back(Mesh{
           .index_count = static_cast<u32>(data.indices.size()),
           .first_index = static_cast<u32>(offsets.index_offset / sizeof(u32)),
           .vertex_offset =

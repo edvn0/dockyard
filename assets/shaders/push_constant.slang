@@ -3,7 +3,9 @@ import handle;
 struct InstanceData {
     float4x4 transform;
     uint material_id;
-    uint pad0; uint pad1; uint pad2;
+    float bounding_radius; // replaces pad0
+    uint pad1;
+    uint pad2;
 };
 
 struct GPUMaterial {
@@ -43,6 +45,7 @@ struct FrameUBO
     float4x4 inverse_view_projection;
     float4 camera_pos;
     Array<CascadeData, shadow_map_cascade_count> cascades;
+    Array<float4, 6> frustum_planes;
     uint shadow_array_index;
     uint shadow_sampler_index;
 }
@@ -61,17 +64,23 @@ struct PositionOnlyVertex
     float position[3];
 };
 
-struct GpuPushConstants
-{
-    ImmutablePtr<Vertex> vertex_buffer_ptr;
-    ImmutablePtr<PositionOnlyVertex> position_only_buffer_ptr;
-    ImmutablePtr<InstanceData> instance_buffer_ptr;
-    ImmutablePtr<uint> remap_buffer_ptr;
-    ImmutablePtr<FrameUBO> frame_ubo;
-    ImmutablePtr<GPUMaterial> material_buffer_ptr;
-    uint cascade_index;
-    Array<uint, 3> _pad;
+[vk::ext_scalar_block_layout]
+struct VkDrawIndexedIndirectCommand {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstInstance;
 };
 
-[[vk::push_constant]]
-GpuPushConstants pc;
+struct GpuPushConstants
+{
+    ImmutablePtr<Vertex, AddressSpace.Device> vertex_buffer_ptr;
+    ImmutablePtr<PositionOnlyVertex, AddressSpace.Device> position_only_buffer_ptr;
+    ImmutablePtr<InstanceData, AddressSpace.Device> instance_buffer_ptr;
+    ImmutablePtr<uint, AddressSpace.Device> culled_index_remapping_buffer;
+    ImmutablePtr<FrameUBO, AddressSpace.Device> frame_ubo;
+    ImmutablePtr<GPUMaterial, AddressSpace.Device> material_buffer_ptr;
+    uint cascade_index;
+    uint _pad[3];
+};

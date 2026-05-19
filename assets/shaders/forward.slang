@@ -53,15 +53,15 @@ float4 sample_material_tex(uint idx, float2 uv)
 }
 
 [shader("vertex")]
-V2F vertexMain(uint vertex_id: SV_VulkanVertexID, uint instance_id: SV_InstanceID, uint inst_base: SV_VulkanInstanceID)
+V2F vertexMain(uint vertex_id: SV_VulkanVertexID, uint instance_id: SV_InstanceID, uint inst_base: SV_VulkanInstanceID, uniform GpuPushConstants pc)
 {
     V2F output;
 
-    let remap_indices = pc.remap_buffer_ptr;
+    let culled_remap_indices = pc.culled_index_remapping_buffer;
     let instance_data = pc.instance_buffer_ptr;
     let vertices = pc.vertex_buffer_ptr;
 
-    uint global_id = remap_indices[NonUniformResourceIndex(inst_base)];
+    uint global_id = culled_remap_indices[NonUniformResourceIndex(inst_base)];
     InstanceData instance = instance_data[global_id];
     float4x4 model_matrix = instance.transform;
     float3x3 normal_matrix = (float3x3)model_matrix;
@@ -94,7 +94,7 @@ V2F vertexMain(uint vertex_id: SV_VulkanVertexID, uint instance_id: SV_InstanceI
 // ── Fragment ─────────────────────────────────────────────────────────────────
 
 [shader("fragment")]
-float4 fragmentMain(V2F input) : SV_Target
+float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target
 {
     GPUMaterial mat = pc.material_buffer_ptr[NonUniformResourceIndex(input.material_id)];
 

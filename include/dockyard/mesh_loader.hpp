@@ -18,6 +18,7 @@ struct SceneRenderer;
 struct MeshPrimitiveReference {
   Mesh mesh;
   u32 material_id;
+  AABB aabb;
 };
 
 struct MeshNodeDescription {
@@ -32,8 +33,8 @@ struct MeshAsset {
   std::vector<u32> material_slots;            // [gltf_material_idx]
   std::vector<std::vector<Mesh>> meshes;
 
+  std::vector<std::vector<AABB>> submesh_aabbs;
   AABB mesh_aabb;
-  std::vector<AABB> submesh_aabbs;
 
   usize vertex_base_offset{};
   usize shadow_vertex_base_offset{};

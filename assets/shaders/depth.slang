@@ -6,11 +6,11 @@ struct V2F
 };
 
 [shader("vertex")]
-V2F vertexMain(uint vertexID: SV_VulkanVertexID, uint inst_base: SV_VulkanInstanceID)
+V2F vertexMain(uint vertexID: SV_VulkanVertexID, uint inst_base: SV_VulkanInstanceID, uniform GpuPushConstants pc)
 {
     V2F output;
 
-    let remap_indices = pc.remap_buffer_ptr;
+    let remap_indices = pc.culled_index_remapping_buffer;
     let instance_data = pc.instance_buffer_ptr;
     let vertices = pc.position_only_buffer_ptr;
 

@@ -227,17 +227,31 @@ auto Compiler::compile(const VFSPath &vfs_path)
   using enum CompilationError::Type;
 
   slang::CompilerOptionEntry target_options[] = {
-      {slang::CompilerOptionName::VulkanUseEntryPointName,
-       {slang::CompilerOptionValueKind::Int, 1}},
-      {slang::CompilerOptionName::DebugInformation,
-       {slang::CompilerOptionValueKind::Int, debug_level}},
-      {slang::CompilerOptionName::Optimization,
-       {slang::CompilerOptionValueKind::Int, optimisation_level}},
+      {
+          slang::CompilerOptionName::VulkanUseEntryPointName,
+          {slang::CompilerOptionValueKind::Int, 1},
+      },
+      {
+          slang::CompilerOptionName::DebugInformation,
+          {slang::CompilerOptionValueKind::Int, debug_level},
+      },
+      {
+          slang::CompilerOptionName::Optimization,
+          {slang::CompilerOptionValueKind::Int, optimisation_level},
+      },
+      {
+          slang::CompilerOptionName::GLSLForceScalarLayout,
+          {slang::CompilerOptionValueKind::Int, 1},
+      },
   };
 
   slang::CompilerOptionEntry session_options[] = {
       {slang::CompilerOptionName::MatrixLayoutColumn,
        {slang::CompilerOptionValueKind::Int, 1}},
+      {
+          slang::CompilerOptionName::GLSLForceScalarLayout,
+          {slang::CompilerOptionValueKind::Int, 1},
+      },
   };
   slang::TargetDesc target{};
   target.format = SLANG_SPIRV;
@@ -257,8 +271,8 @@ auto Compiler::compile(const VFSPath &vfs_path)
   Slang::ComPtr<slang::ISession> session;
   if (SLANG_FAILED(impl->global_session->createSession(session_desc,
                                                        session.writeRef())))
-    return std::unexpected{
-        CompilationError{Compilation, "failed to create slang session"}};
+    return std::unexpected{CompilationError{
+        .type = Compilation, .message = "failed to create slang session"}};
 
   auto stem = std::filesystem::path{vfs_path.relative_path()}.stem().string();
   Slang::ComPtr<ISlangBlob> diag;

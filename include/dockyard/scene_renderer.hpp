@@ -18,19 +18,37 @@
 namespace dy {
 
 struct GpuPushConstants {
-  const DeviceAddress vertex_buffer_ptr;               // 8 bytes
-  const DeviceAddress position_only_vertex_buffer_ptr; // 8 bytes
-  const DeviceAddress transform_buffer_ptr;            // 8 bytes
-  const DeviceAddress remap_buffer_ptr;                // 8 bytes
-  const DeviceAddress frame_ubo;                       // 8 bytes
-  const DeviceAddress material_ptr;                    // 8 bytes
+  const DeviceAddress vertex_buffer_ptr;
+  const DeviceAddress position_only_buffer_ptr;
+  const DeviceAddress transform_buffer_ptr;
+  const DeviceAddress culled_index_remapping_buffer;
+  const DeviceAddress frame_ubo;
+  const DeviceAddress material_ptr;
   u32 cascade_index;
-  u32 _pad[3];
+  u32 padding[3];
 };
 
 struct CompositePushConstants {
   const TextureHandle forward_texture_index;
   const SamplerHandle sampler;
+};
+
+struct alignas(8) CullingPushConstants {
+  u32 total_instance_count;
+  u32 padding;
+
+  DeviceAddress instance_buffer;
+  DeviceAddress frame_data;
+
+  DeviceAddress depth_original_remap_buffer;
+  DeviceAddress depth_instance_to_command_buffer;
+  DeviceAddress depth_indirect_commands;
+  DeviceAddress depth_culled_remap;
+
+  DeviceAddress forward_original_remap_buffer;
+  DeviceAddress forward_instance_to_command_buffer;
+  DeviceAddress forward_indirect_commands;
+  DeviceAddress forward_culled_remap;
 };
 
 enum class RenderPassType { DepthPrepass, Forward, Shadow };
@@ -40,6 +58,9 @@ struct PendingDraw {
   u32 pipeline_id;
   u32 material_id;
   glm::mat4 transform;
+  AABB aabb;
+
+  u32 instance_id;
 
   [[nodiscard]] constexpr auto get_key(RenderPassType pass) const -> u64;
 };
@@ -47,9 +68,15 @@ struct PendingDraw {
 struct RenderPass {
   RenderPassType type;
   VmaAllocator allocator;
+
+  // Pass-Specific Graphics Inputs (Created in bake)
   std::unique_ptr<Buffer> indirect_buffer{nullptr};
-  std::unique_ptr<Buffer> index_remapping_buffer{nullptr};
   std::unique_ptr<Buffer> count_buffer{nullptr};
+  std::unique_ptr<Buffer> index_remapping_buffer{nullptr};
+  std::unique_ptr<Buffer> instance_to_command_buffer{nullptr};
+
+  // Pass-Specific Compute Outputs (Filled in culling)
+  std::unique_ptr<Buffer> culled_index_remapping_buffer{nullptr};
 
   struct Batch {
     u32 pipeline_id;
@@ -60,14 +87,17 @@ struct RenderPass {
   std::vector<Batch> batches{};
 
   void ensure_capacity(usize command_count, usize instance_count,
-                       usize batch_count);
-  void bake(const std::vector<PendingDraw> &scene_draws);
+                       usize batch_count, usize total_global_instances);
+  void bake(const std::vector<PendingDraw> &scene_draws,
+            usize total_global_instances);
 };
 
 struct InstanceData {
   glm::mat4 transform;
   u32 material_id;
-  u32 pad[3];
+  float bounding_radius; // replaces pad0
+  u32 pad1;
+  u32 pad2;
 };
 
 struct alignas(16) CascadeData {
@@ -88,6 +118,7 @@ struct FrameUBO {
   glm::mat4 inverse_view_projection;
   glm::vec4 camera_position;
   std::array<CascadeData, shadow_map_cascade_count> cascades{};
+  std::array<glm::vec4, 6> frustum_planes{};
   u32 shadow_array_index;
   u32 shadow_sampler_index;
 };
@@ -119,12 +150,6 @@ struct SceneRenderer {
   RenderPass depth_prepass;
   RenderPass forward_pass;
 
-  auto indirect_buffer_view() const {
-    auto &a = depth_prepass.indirect_buffer->get_buffer();
-    auto &b = forward_pass.indirect_buffer->get_buffer();
-    return std::make_tuple(a, b);
-  }
-
   TexturePool textures;
   SamplerPool samplers;
   ComparisonSamplerPool comparison_samplers;
@@ -150,6 +175,7 @@ struct SceneRenderer {
   std::vector<InstanceData> global_instance_data{};
   std::vector<PendingDraw> submission_queue{};
   std::unique_ptr<Buffer> global_instance_buffer{nullptr};
+
   std::vector<std::unique_ptr<Buffer>> frame_ubo_buffers{};
 
   VkPipelineLayout pipeline_layout{VK_NULL_HANDLE};
@@ -157,6 +183,9 @@ struct SceneRenderer {
 
   VkPipelineLayout composite_pipeline_layout{VK_NULL_HANDLE};
   VkPipeline composite_pipeline{VK_NULL_HANDLE};
+
+  VkPipelineLayout culling_pipeline_layout{VK_NULL_HANDLE};
+  VkPipeline culling_pipeline{VK_NULL_HANDLE};
 
   CsmResources csm{};
   struct CsmFrameData {
@@ -195,8 +224,6 @@ struct SceneRenderer {
                const glm::mat4 &projection);
 
   void submit(MeshHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
-              u32 material_id = 0U);
-  void submit(const Mesh &mesh, const glm::mat4 &, u32 pipeline_id = 0U,
               u32 material_id = 0U);
 
   void update_csm(const glm::mat4 &view, const glm::mat4 &proj,
