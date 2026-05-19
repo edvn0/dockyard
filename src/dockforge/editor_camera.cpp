@@ -13,8 +13,12 @@ EditorCamera::EditorCamera(GLFWwindow *w, glm::vec3 position, glm::vec3 look_at,
 auto EditorCamera::save_keyframe(float time_to_reach) -> void {
   glm::vec3 fwd = camera.forward();
   glm::quat rot = glm::quatLookAtLH(fwd, glm::vec3(0, 1, 0));
-  path_controller.path.push_back(
-      {camera.position, rot, time_to_reach, EaseType::SmoothStep});
+  path_controller.path.push_back({
+      .position = camera.position,
+      .orientation = rot,
+      .travel_time = time_to_reach,
+      .easing = EaseType::SmoothStep,
+  });
 }
 
 auto EditorCamera::update(float ts) -> void {

@@ -18,10 +18,79 @@
 #include <imgui.h>
 
 #include <ImGuizmo.h>
+#include <vulkan/vulkan_core.h>
 
 #include "./cube_vertices.inl"
 
 namespace {
+auto resize_viewport(Dockforge &app) -> void {
+  double current_time = glfwGetTime();
+  double time_since_last_move = current_time - app.last_resize_change_time;
+  if (time_since_last_move > Dockforge::resize_debounce_delay) {
+    app.viewport_resources.resize(*app.context, *app.renderer,
+                                  app.last_ui_size.width,
+                                  app.last_ui_size.height);
+    app.renderer->resize();
+    app.editor_camera->set_aspect(app.last_ui_size.width,
+                                  app.last_ui_size.height);
+    app.viewport_panel_extent = app.last_ui_size;
+    app.viewport_panel_offset = app.last_ui_offset;
+    trace("Viewport resize {}x{}", app.viewport_panel_extent.width,
+          app.viewport_panel_extent.height);
+  }
+}
+
+auto make_default_override_materials(u32) -> std::vector<GPUMaterial>;
+auto grow_pool(Dockforge &app) -> void {
+  const u32 old_capacity = app.override_pool.capacity;
+  const u32 new_capacity = old_capacity * 2;
+
+  info("MaterialOverridePool growing {} → {} slots", old_capacity,
+       new_capacity);
+
+  vkDeviceWaitIdle(app.context->device);
+
+  app.renderer->geometry_pool->reserve_materials(new_capacity - old_capacity);
+
+  auto new_data = make_default_override_materials(new_capacity);
+
+  if (app.override_pool.next > 0) {
+    auto live = app.renderer->geometry_pool->get_materials(
+        app.override_pool.base_slot, app.override_pool.next);
+    std::ranges::reverse_copy(live, new_data.begin());
+  }
+
+  const auto new_offset =
+      app.renderer->geometry_pool->allocate_materials(std::span(new_data));
+  const u32 delta = new_offset.start_index - app.override_pool.base_slot;
+
+  for (auto &&[e, ov] :
+       app.active_scene->template view<Components::MaterialOverride>().each()) {
+    if (ov.gpu_slot != ~0U)
+      ov.gpu_slot += delta;
+  }
+
+  for (auto &s : app.override_pool.free_slots)
+    s += delta;
+
+  app.override_pool.base_slot = new_offset.start_index;
+  app.override_pool.capacity = new_capacity;
+  app.override_pool.needs_grow = false;
+  app.renderer->bindless.need_repopulate = true;
+}
+
+constexpr auto remove_rotation = [](const auto &m) {
+  glm::mat4 result(1.0f);
+
+  result[0][0] = glm::length(glm::vec3(m[0]));
+  result[1][1] = glm::length(glm::vec3(m[1]));
+  result[2][2] = glm::length(glm::vec3(m[2]));
+
+  result[3] = m[3];
+
+  return result;
+};
+
 auto make_default_override_materials(u32 count) -> std::vector<GPUMaterial> {
   std::vector<GPUMaterial> output(count);
   for (auto &material : output) {
@@ -61,30 +130,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
                                      glm::vec3{0.0f, 0.0f, 0.0f}, w, h);
 
   {
-    const u32 white = 0xFFFFFFFF;
-    const u32 blue = glm::packUnorm4x8(glm::vec4(0.5f, 0.5f, 1.0f, 1.0f));
-    const u32 mr_default = glm::packUnorm4x8(glm::vec4(0.0f, 1.0f, 0.0f, 1.0f));
-    const u32 occlusion_default = 0xFFFFFFFF;
-    const u32 black = 0xFF000000;
-
-    auto white_texture =
-        renderer->upload_texture(std::span(&white, 1), "white_fallback_texture",
-                                 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
-    (void)renderer->upload_texture(std::span(&blue, 1),
-                                   "normal_fallback_texture", 1, 1,
-                                   VK_FORMAT_R8G8B8A8_UNORM, false);
-    (void)renderer->upload_texture(std::span(&mr_default, 1),
-                                   "metallic_roughness_fallback_texture", 1, 1,
-                                   VK_FORMAT_R8G8B8A8_UNORM, false);
-    (void)renderer->upload_texture(std::span(&occlusion_default, 1),
-                                   "occlusion_fallback_texture", 1, 1,
-                                   VK_FORMAT_R8G8B8A8_UNORM, false);
-    (void)renderer->upload_texture(std::span(&black, 1),
-                                   "black_fallback_texture", 1, 1,
-                                   VK_FORMAT_R8G8B8A8_UNORM, false);
-    assert(white_texture.index() == 0);
-    info("White texture index: {}", white_texture.index());
-
     imgui_renderer = std::make_unique<ImGuiRenderer>(
         get_window(), 16, *renderer,
         FontChoice{
@@ -98,7 +143,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     viewport_resources = ViewportResources::create(*context, *renderer, w, h);
     renderer->update_output_texture(viewport_resources.forward_target);
     renderer->bindless.need_repopulate = true;
-    renderer->initialise_bindless(white_texture);
+    renderer->initialise_bindless();
 
     constexpr u32 override_material_count_initial = 16U;
     auto blank =
@@ -212,11 +257,11 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
   initialise_matrix_cache(get_frame_index_mut());
 }
-auto Dockforge::on_mouse_moved(const events::mouse_moved &e) -> void {
+auto Dockforge::on_mouse_moved(const events::MouseMoved &e) -> void {
   if (glfwGetMouseButton(get_window(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
     editor_camera->on_mouse_delta(e.dx, e.dy);
 }
-auto Dockforge::on_key_released(const events::key_released &e) -> void {
+auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
   if (e.key == GLFW_KEY_ESCAPE)
     glfwSetWindowShouldClose(get_window(), GLFW_TRUE);
 
@@ -305,7 +350,7 @@ void Dockforge::draw_scene_outliner() {
 
   // Optional: filter input
   static ImGuiTextFilter filter;
-  filter.Draw("##filter", -1.0f);
+  filter.Draw("##filter", -1.0F);
 
   ImGui::Separator();
 
@@ -377,9 +422,14 @@ void Dockforge::draw_scene_outliner() {
                                 0.0F, 1.0F);
   changed |= ImGui::SliderFloat("Alpha Cutoff", &mat.alpha_cutoff, 0.0F, 1.0F);
 
-  static constexpr const char *alpha_modes[] = {"Opaque", "Mask", "Blend"};
+  static constexpr std::array<const char *, 3> alpha_modes = {
+      "Opaque",
+      "Mask",
+      "Blend",
+  };
   int alpha_mode = static_cast<int>(mat.alpha_mode);
-  if (ImGui::Combo("Alpha Mode", &alpha_mode, alpha_modes, 3)) {
+  if (ImGui::Combo("Alpha Mode", &alpha_mode, alpha_modes.data(),
+                   std::size(alpha_modes))) {
     mat.alpha_mode = static_cast<u32>(alpha_mode);
     changed = true;
   }
@@ -388,7 +438,7 @@ void Dockforge::draw_scene_outliner() {
   ImGui::BeginDisabled();
 
   auto texture_row = [](const char *label, u32 index) {
-    static constexpr u32 k_none = ~0u;
+    static constexpr u32 k_none = ~0U;
     const float icon_size = ImGui::GetFrameHeight();
     const ImVec2 icon_dim{icon_size, icon_size};
     const ImVec2 p = ImGui::GetCursorScreenPos();
@@ -531,41 +581,26 @@ auto Dockforge::build_ui() -> void {
   }
 
   /*
-  auto [view, proj] = resolve_camera();
-  glm::mat4 view_matrix = view; // local copy so ViewManipulate can write back
+    auto [view, proj] = resolve_camera();
+    glm::mat4 view_matrix = view; // local copy so ViewManipulate can write back
 
-  ImVec2 gizmo_size = {128.f, 128.f};
-  ImVec2 gizmo_pos = {viewport_screen_pos.x + panel_size.x - gizmo_size.x,
-                      viewport_screen_pos.y};
+    ImVec2 gizmo_size = {128.f, 128.f};
+    ImVec2 gizmo_pos = {viewport_screen_pos.x + panel_size.x - gizmo_size.x,
+                        viewport_screen_pos.y};
 
-  ImGuizmo::ViewManipulate(glm::value_ptr(view_matrix), 8.f, gizmo_pos,
-                           gizmo_size, 0x10101010);
+    ImGuizmo::ViewManipulate(glm::value_ptr(view_matrix), 8.f, gizmo_pos,
+                             gizmo_size, 0x10101010);
 
-  if (std::memcmp(glm::value_ptr(view), glm::value_ptr(view_matrix),
-                  sizeof(glm::mat4)) != 0) {
-    const glm::mat3 rot = glm::mat3(view_matrix);
-    const glm::vec3 trans = glm::vec3(view_matrix[3]);
-    const glm::vec3 new_pos = -glm::transpose(rot) * trans;
-    // Third row of view matrix is -forward in LH
-    const glm::vec3 forward =
-        -glm::vec3(view_matrix[0][2], view_matrix[1][2], view_matrix[2][2]);
-    editor_camera->set_pose(new_pos, new_pos + forward);
-  }
-    */
-
-  constexpr auto remove_rotation = [](const auto &m) {
-    glm::mat4 result(1.0f);
-
-    // Extract scale by getting the length of the basis vectors
-    result[0][0] = glm::length(glm::vec3(m[0]));
-    result[1][1] = glm::length(glm::vec3(m[1]));
-    result[2][2] = glm::length(glm::vec3(m[2]));
-
-    // Copy the translation column
-    result[3] = m[3];
-
-    return result;
-  };
+    if (std::memcmp(glm::value_ptr(view), glm::value_ptr(view_matrix),
+                    sizeof(glm::mat4)) != 0) {
+      const glm::mat3 rot = glm::mat3(view_matrix);
+      const glm::vec3 trans = glm::vec3(view_matrix[3]);
+      const glm::vec3 new_pos = -glm::transpose(rot) * trans;
+      // Third row of view matrix is -forward in LH
+      const glm::vec3 forward =
+          glm::vec3(view_matrix[0][2], view_matrix[1][2], view_matrix[2][2]);
+      editor_camera->set_pose(new_pos, new_pos + forward);
+    } */
 
   MutableMaterialView selected_entity_materials{};
 
@@ -685,14 +720,6 @@ auto Dockforge::build_ui() -> void {
 
   ImGui::ShowDemoWindow();
 
-  if (ImGui::Begin("test")) {
-    ImGui::Text("%d x %d", viewport_panel_extent.width,
-                viewport_panel_extent.height);
-    ImGui::Text("%d x %d", viewport_panel_offset.width,
-                viewport_panel_offset.height);
-    ImGui::End();
-  }
-
   draw_debug_shapes();
   canvas_renderer->render_2d();
 
@@ -748,44 +775,6 @@ void emit_barrier(VkCommandBuffer cmd,
   vkCmdPipelineBarrier2(cmd, &dependency_info);
 }
 
-auto grow_pool(Dockforge &app) -> void {
-  const u32 old_capacity = app.override_pool.capacity;
-  const u32 new_capacity = old_capacity * 2;
-
-  info("MaterialOverridePool growing {} → {} slots", old_capacity,
-       new_capacity);
-
-  vkDeviceWaitIdle(app.context->device);
-
-  app.renderer->geometry_pool->reserve_materials(new_capacity - old_capacity);
-
-  auto new_data = make_default_override_materials(new_capacity);
-
-  if (app.override_pool.next > 0) {
-    auto live = app.renderer->geometry_pool->get_materials(
-        app.override_pool.base_slot, app.override_pool.next);
-    std::ranges::reverse_copy(live, new_data.begin());
-  }
-
-  const auto new_offset =
-      app.renderer->geometry_pool->allocate_materials(std::span(new_data));
-  const u32 delta = new_offset.start_index - app.override_pool.base_slot;
-
-  for (auto &&[e, ov] :
-       app.active_scene->template view<Components::MaterialOverride>().each()) {
-    if (ov.gpu_slot != ~0U)
-      ov.gpu_slot += delta;
-  }
-
-  for (auto &s : app.override_pool.free_slots)
-    s += delta;
-
-  app.override_pool.base_slot = new_offset.start_index;
-  app.override_pool.capacity = new_capacity;
-  app.override_pool.needs_grow = false;
-  app.renderer->bindless.need_repopulate = true;
-}
-
 auto Dockforge::resolve_material_slot(Entity e) -> u32 {
   constexpr auto default_material = 0U;
 
@@ -811,23 +800,6 @@ auto Dockforge::resolve_material_slot(Entity e) -> u32 {
   }
 
   return material_override->gpu_slot;
-}
-
-auto resize_viewport(Dockforge &app) -> void {
-  double current_time = glfwGetTime();
-  double time_since_last_move = current_time - app.last_resize_change_time;
-  if (time_since_last_move > Dockforge::resize_debounce_delay) {
-    app.viewport_resources.resize(*app.context, *app.renderer,
-                                  app.last_ui_size.width,
-                                  app.last_ui_size.height);
-    app.renderer->resize();
-    app.editor_camera->set_aspect(app.last_ui_size.width,
-                                  app.last_ui_size.height);
-    app.viewport_panel_extent = app.last_ui_size;
-    app.viewport_panel_offset = app.last_ui_offset;
-    trace("Viewport resize {}x{}", app.viewport_panel_extent.width,
-          app.viewport_panel_extent.height);
-  }
 }
 
 auto Dockforge::render(RenderContext &ctx) -> u64 {
@@ -873,11 +845,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       .levelCount = 1U,
       .layerCount = 1U,
   };
-  const VkImageSubresourceRange depth_range{
-      .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-      .levelCount = 1U,
-      .layerCount = 1U,
-  };
   const VkExtent2D vp_extent = viewport_resources.extent();
   const VkViewport viewport{
       .x = 0.0F,
@@ -902,57 +869,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       renderer->resolve(viewport_resources.display_target);
 
   {
-    const std::array<VkImageMemoryBarrier2, 2> initial_barriers{{
-        {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-            .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .image = viewport_resources.depth_msaa.image,
-            .subresourceRange = depth_range,
-        },
-        {
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .image = viewport_resources.forward_target_msaa.image,
-            .subresourceRange = color_range,
-        },
-    }};
-    const VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                               .imageMemoryBarrierCount = 2u,
-                               .pImageMemoryBarriers = initial_barriers.data()};
-    vkCmdPipelineBarrier2(ctx.main_cb, &dep);
-  }
-
-  {
-    // First frame: transition from UNDEFINED; subsequent: from GENERAL
-    // (sampled)
-    const VkImageMemoryBarrier2 csm_to_attachment{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        .srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        .dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, // UNDEFINED on first frame
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .image = renderer->csm.image,
-        .subresourceRange =
-            {
-                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = shadow_map_cascade_count,
-            },
-    };
-    emit_barrier(ctx.main_cb, csm_to_attachment);
-
     const VkExtent2D shadow_extent{
         .width = shadow_map_cascade_resolution,
         .height = shadow_map_cascade_resolution,
@@ -1030,6 +946,60 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     emit_barrier(ctx.main_cb, csm_to_sampled);
   }
 
+  {
+    // depth → shader read for HiZ build
+    /*const VkImageMemoryBarrier2 depth_to_read{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+        .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .image = viewport_resources.depth_msaa.image,
+        .subresourceRange =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+    };
+    emit_barrier(ctx.main_cb, depth_to_read);*/
+
+    renderer->culling_pass(
+        ctx.main_cb); // binds pipeline, pushes constants, dispatches
+
+    auto view = renderer->indirect_buffer_view();
+    std::array<VkBuffer, 2> buffers{std::get<0>(view), std::get<1>(view)};
+    std::array<VkBufferMemoryBarrier2, 2> buffer_barriers{};
+    for (size_t i = 0; i < buffers.size(); ++i) {
+      buffer_barriers[i] = {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+          .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+          .buffer = buffers[i],
+          .offset = 0,
+          .size = VK_WHOLE_SIZE,
+      };
+    }
+    VkDependencyInfo dependency_info{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .pNext = nullptr,
+        .dependencyFlags = 0,
+        .memoryBarrierCount = 0,
+        .pMemoryBarriers = nullptr,
+        .bufferMemoryBarrierCount = static_cast<u32>(buffer_barriers.size()),
+        .pBufferMemoryBarriers = buffer_barriers.data(),
+        .imageMemoryBarrierCount = 0,
+        .pImageMemoryBarriers = nullptr,
+    };
+    vkCmdPipelineBarrier2(ctx.main_cb, &dependency_info);
+  }
+
   // ── 2. Depth pre-pass ───────────────────────────────────────────────
   {
     const VkRenderingAttachmentInfo depth_attachment{
@@ -1066,23 +1036,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     renderer->render_pass(ctx.main_cb, renderer->depth_prepass,
                           renderer->pipeline_registry->get(depth_pipeline));
     vkCmdEndRendering(ctx.main_cb);
-  }
-
-  // ── 3. Forward resolve target barrier ──────────────────────────────
-  {
-    const VkImageMemoryBarrier2 forward_target_barrier{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .image = forward_texture.image,
-        .subresourceRange = color_range,
-    };
-    const VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                               .imageMemoryBarrierCount = 1u,
-                               .pImageMemoryBarriers = &forward_target_barrier};
-    vkCmdPipelineBarrier2(ctx.main_cb, &dep);
   }
 
   // ── 4. Forward MSAA pass ────────────────────────────────────────────
@@ -1134,40 +1087,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     vkCmdEndRendering(ctx.main_cb);
   }
 
-  // ── 5. Composite pass → display_target ─────────────────────────────
-  // forward_target (HDR) is sampled; display_target (LDR RGBA8) is written.
-  // Two barriers in one call: forward_target read, display_target write.
   {
-    const std::array<VkImageMemoryBarrier2, 2> composite_barriers{{
-        {
-            // forward_target: attachment write → shader sampled read
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .image = forward_texture.image,
-            .subresourceRange = color_range,
-        },
-        {
-            // display_target: UNDEFINED → color attachment write
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .image = display_texture.image,
-            .subresourceRange = color_range,
-        },
-    }};
-    const VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                               .imageMemoryBarrierCount = 2u,
-                               .pImageMemoryBarriers =
-                                   composite_barriers.data()};
-    vkCmdPipelineBarrier2(ctx.main_cb, &dep);
-
     const VkRenderingAttachmentInfo display_color{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView = display_texture.sampled_view,
@@ -1178,8 +1098,8 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     const VkRenderingInfo composite_ri{
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
         .renderArea = scissor,
-        .layerCount = 1u,
-        .colorAttachmentCount = 1u,
+        .layerCount = 1U,
+        .colorAttachmentCount = 1U,
         .pColorAttachments = &display_color,
     };
 
@@ -1189,21 +1109,8 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
 
   {
-    const std::array<VkImageMemoryBarrier2, 2> swapchain_barriers{{
-        {
-            // display_target: attachment write → fragment shader sampled read
-            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-            .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-            .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-            .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-            .image = display_texture.image,
-            .subresourceRange = color_range,
-        },
-        {
-            // swapchain image: UNDEFINED → color attachment
+    const std::array<VkImageMemoryBarrier2, 1> swapchain_barriers{
+        VkImageMemoryBarrier2{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
             .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -1212,25 +1119,29 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
             .image = ctx.swapchain_image.image,
             .subresourceRange = color_range,
         },
-    }};
-    const VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                               .imageMemoryBarrierCount = 2u,
-                               .pImageMemoryBarriers =
-                                   swapchain_barriers.data()};
+    };
+    const VkDependencyInfo dep{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = 1U,
+        .pImageMemoryBarriers = swapchain_barriers.data(),
+    };
     vkCmdPipelineBarrier2(ctx.main_cb, &dep);
 
     const VkRenderingAttachmentInfo swapchain_color{
         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
         .imageView = ctx.swapchain_image.view,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
     };
     const VkRenderingInfo swapchain_ri{
         .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea = {.extent = ctx.swapchain_image.extent},
-        .layerCount = 1u,
-        .colorAttachmentCount = 1u,
+        .renderArea =
+            {
+                .extent = ctx.swapchain_image.extent,
+            },
+        .layerCount = 1U,
+        .colorAttachmentCount = 1U,
         .pColorAttachments = &swapchain_color,
     };
 

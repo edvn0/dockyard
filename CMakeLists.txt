@@ -244,16 +244,12 @@ target_compile_definitions(dockyard-compiler PRIVATE
     $<$<CONFIG:Debug>:DOCKYARD_DEBUG>)
 target_include_directories(dockyard-compiler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
-# --- 3pp
 add_library(ThirdPartySTB STATIC "3PP/stb.c" "3PP/mikktspace.c")
 target_compile_definitions(ThirdPartySTB PRIVATE
   STB_IMAGE_IMPLEMENTATION
   STB_IMAGE_RESIZE_IMPLEMENTATION)
 target_include_directories(ThirdPartySTB PUBLIC "3PP")
 
-
-
-# ─── dockyard ─────────────────────────────────────────────────────────────────
 
 get_filename_component(ASSETS_ROOT_ABS "${ASSETS_ROOT}" ABSOLUTE)
 

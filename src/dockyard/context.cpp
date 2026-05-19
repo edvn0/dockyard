@@ -11,7 +11,7 @@
 namespace dy {
 
 auto RendererListener::on_swapchain_invalidated(
-    const events::swapchain_invalidated &e) const -> void {
+    const events::SwapchainInvalidated &e) const -> void {
 
   vkDeviceWaitIdle(ctx.device);
 
@@ -30,11 +30,13 @@ auto RendererListener::on_swapchain_invalidated(
     fs = FrameSync::create(ctx);
   }
 
-  dispatch.trigger<events::swapchain_resized>(
-      events::swapchain_resized{e.width, e.height});
+  dispatch.trigger<events::SwapchainResized>(events::SwapchainResized{
+      .width = e.width,
+      .height = e.height,
+  });
 }
 
-auto RendererListener::on_window_minimized(const events::window_minimized &e)
+auto RendererListener::on_window_minimized(const events::WindowMinimized &e)
     -> void {
   minimized = e.minimized;
 }
@@ -58,7 +60,7 @@ auto FrameResources::create(const VulkanContext &ctx) -> FrameResources {
 
 auto SwapchainResources::rebuild(const VulkanContext &ctx, VkSurfaceKHR surface,
                                  u32 width, u32 height) -> void {
-  for (auto view : image_views)
+  for (auto &view : image_views)
     vkDestroyImageView(ctx.device, view, nullptr);
   image_views.clear();
 
@@ -100,7 +102,7 @@ auto SwapchainResources::rebuild(const VulkanContext &ctx, VkSurfaceKHR surface,
 }
 
 auto SwapchainResources::destroy(const VulkanContext &ctx) -> void {
-  for (auto view : image_views)
+  for (auto &view : image_views)
     vkDestroyImageView(ctx.device, view, nullptr);
   for (auto &is : image_sync)
     is.destroy(ctx);
@@ -426,8 +428,12 @@ auto CommandBuffer::create(const VulkanContext &ctx) -> CommandBuffer {
   return cb;
 }
 
-auto VulkanContext::transition_to_general(VkImage image) const -> void {
-  one_time_submit([img = image](VkCommandBuffer cmd) {
+auto VulkanContext::transition_to_general(VkImage image,
+                                          VkImageAspectFlags aspect,
+                                          u32 mip_count, u32 layer_count) const
+    -> void {
+  one_time_submit([img = image, aspect, mip_count,
+                   layer_count](VkCommandBuffer cmd) {
     const VkImageMemoryBarrier2 barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
@@ -442,11 +448,11 @@ auto VulkanContext::transition_to_general(VkImage image) const -> void {
         .image = img,
         .subresourceRange =
             {
-                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                .aspectMask = aspect,
                 .baseMipLevel = 0,
-                .levelCount = 1,
+                .levelCount = mip_count,
                 .baseArrayLayer = 0,
-                .layerCount = shadow_map_cascade_count,
+                .layerCount = layer_count,
             },
     };
 

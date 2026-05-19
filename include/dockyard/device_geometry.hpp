@@ -120,7 +120,7 @@ struct GeometryTransaction {
   bool committed = false;
 
   ~GeometryTransaction();
-  auto allocate(std::span<const Vertex> v, std::span<const u32> i)
+  auto allocate(std::span<const Vertex>, std::span<const u32>)
       -> AllocatedOffset;
   void commit();
 };

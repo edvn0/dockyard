@@ -87,7 +87,7 @@ auto BindlessSet::grow_if_needed(u32 req_textures, u32 req_samplers,
   auto grow_and_clamp = [&](u32 &current, u32 requested, u32 cap) {
     if (requested <= current)
       return;
-    const u32 clamped = std::min(std::max(current * 2u, requested), cap);
+    const u32 clamped = std::min(std::max(current * 2U, requested), cap);
     if (clamped > current) {
       current = clamped;
       grew = true;
@@ -165,7 +165,6 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
     sampled_infos[i] = {VK_NULL_HANDLE, sv, VK_IMAGE_LAYOUT_GENERAL};
     storage_infos[i] = {VK_NULL_HANDLE, stv, VK_IMAGE_LAYOUT_GENERAL};
 
-    // Binding 0 — sampled 2D
     {
       VkWriteDescriptorSet wds{};
       wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -178,7 +177,6 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
       writes.emplace_back(std::move(wds));
     }
 
-    // Binding 2 — storage
     if (pw.pool_index < max_storage_images) {
       VkWriteDescriptorSet wds{};
       wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -191,7 +189,6 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
       writes.emplace_back(std::move(wds));
     }
 
-    // Binding 4 — cubemap
     if (detail::is_cubemap_view(pw.view_type) && pw.pool_index < max_cubemaps) {
       cubemap_infos.push_back(sampled_infos[i]);
       VkWriteDescriptorSet wds{};
@@ -205,7 +202,6 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
       writes.emplace_back(std::move(wds));
     }
 
-    // Binding 5 — 3D
     if (detail::is_3d_view(pw.view_type) && pw.pool_index < max_3d_images) {
       image_3d_infos.push_back(sampled_infos[i]);
       VkWriteDescriptorSet wds{};
@@ -219,13 +215,12 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
       writes.emplace_back(std::move(wds));
     }
 
-    // Binding 7 — 2D Array (CSM, etc)
     if (detail::is_array_view(pw.view_type) && pw.pool_index < max_2d_arrays) {
       image_array_2d_infos.push_back(sampled_infos[i]);
       VkWriteDescriptorSet wds{};
       wds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
       wds.dstSet = set;
-      wds.dstBinding = 7u; // Matches your HLSL binding
+      wds.dstBinding = 7u;
       wds.dstArrayElement = pw.pool_index;
       wds.descriptorCount = 1u;
       wds.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
@@ -235,7 +230,7 @@ auto BindlessSet::flush_pending_writes(VkImageView dummy_sampled,
   }
 
   vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(),
-                         0u, nullptr);
+                         0U, nullptr);
   pending_texture_writes.clear();
 }
 
@@ -248,7 +243,7 @@ auto BindlessSet::repopulate_if_needed(
     ComparisonSamplerPool &comparison_samplers) -> bool {
   if (!need_repopulate) [[likely]] {
     if (!pending_texture_writes.empty()) {
-      const auto &dummy_tex = textures.get(textures.handle_at(0u))->texture;
+      const auto &dummy_tex = textures.get(textures.handle_at(0U))->texture;
       const VkImageView ds = dummy_tex.sampled_view;
       const VkImageView dst = dummy_tex.storage_view != VK_NULL_HANDLE
                                   ? dummy_tex.storage_view
@@ -290,12 +285,11 @@ auto BindlessSet::repopulate_if_needed(
   std::vector<VkDescriptorImageInfo> image_2d_array_infos(
       max_2d_arrays, {VK_NULL_HANDLE, dummy_sampled, VK_IMAGE_LAYOUT_GENERAL});
 
-  // --- Textures (bindings 0, 2, 4, 5) ---
   {
     const u32 tex_cap = static_cast<u32>(textures.data().size());
     const u32 limit = std::min(tex_cap, max_textures);
 
-    for (u32 i = 0u; i < limit; ++i) {
+    for (u32 i = 0U; i < limit; ++i) {
       if (!textures.is_live(i))
         continue;
 
@@ -323,11 +317,10 @@ auto BindlessSet::repopulate_if_needed(
     }
   }
 
-  // --- Samplers (binding 1) ---
   {
     const u32 limit =
         std::min(static_cast<u32>(samplers.data().size()), max_samplers);
-    for (u32 i = 0u; i < limit; ++i) {
+    for (u32 i = 0U; i < limit; ++i) {
       if (!samplers.is_live(i))
         continue;
       const VkSampler s = samplers.data()[i].object.sampler;
@@ -335,12 +328,11 @@ auto BindlessSet::repopulate_if_needed(
     }
   }
 
-  // --- Comparison samplers (binding 3) ---
   {
     const u32 limit =
         std::min(static_cast<u32>(comparison_samplers.data().size()),
                  max_comparison_samplers);
-    for (u32 i = 0u; i < limit; ++i) {
+    for (u32 i = 0U; i < limit; ++i) {
       if (!comparison_samplers.is_live(i))
         continue;
       const VkSampler s = comparison_samplers.data()[i].object.sampler;

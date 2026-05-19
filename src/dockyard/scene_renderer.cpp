@@ -1,3 +1,4 @@
+#include "PCH.hpp"
 #include <dockyard/scene_renderer.hpp>
 
 #include <atomic>
@@ -128,10 +129,32 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
       ctx.allocator, vertex_count * sizeof(Vertex),
       vertex_count * sizeof(PositionOnlyVertex), index_count * sizeof(u32),
       material_count * sizeof(GPUMaterial));
+
+  const u32 white = 0xFFFFFFFF;
+  const u32 blue = glm::packUnorm4x8(glm::vec4(0.5f, 0.5f, 1.0f, 1.0f));
+  const u32 mr_default = glm::packUnorm4x8(glm::vec4(0.0f, 1.0f, 0.0f, 1.0f));
+  const u32 occlusion_default = 0xFFFFFFFF;
+  const u32 black = 0xFF000000;
+  white_texture = upload_texture(std::span(&white, 1), "white_fallback_texture",
+                                 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
+  normal_texture =
+      upload_texture(std::span(&blue, 1), "normal_fallback_texture", 1, 1,
+                     VK_FORMAT_R8G8B8A8_UNORM, false);
+  metallic_roughness_texture = upload_texture(
+      std::span(&mr_default, 1), "metallic_roughness_fallback_texture", 1, 1,
+      VK_FORMAT_R8G8B8A8_UNORM, false);
+  occlusion_texture = upload_texture(std::span(&occlusion_default, 1),
+                                     "occlusion_fallback_texture", 1, 1,
+                                     VK_FORMAT_R8G8B8A8_UNORM, false);
+  black_texture = upload_texture(std::span(&black, 1), "black_fallback_texture",
+                                 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
+  assert(white_texture.index() == 0);
+  info("White texture index: {}", white_texture.index());
+  dummy_texture_handle = white_texture;
+
   resize();
 }
-auto SceneRenderer::initialise_bindless(TextureHandle white) -> void {
-  dummy_texture_handle = white;
+auto SceneRenderer::initialise_bindless() -> void {
 
   const VkSamplerCreateInfo sampler_ci{
       .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -363,6 +386,7 @@ void SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
   forward_pass.bake(submission_queue);
   submission_queue.clear();
 }
+
 void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
                                 VkPipeline override_pipeline) {
   auto &pool = *geometry_pool;
@@ -413,6 +437,7 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
         batch.max_command_count, sizeof(VkDrawIndexedIndirectCommand));
   }
 }
+
 void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, composite_pipeline);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -424,7 +449,21 @@ void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
   };
   vkCmdPushConstants(cmd, composite_pipeline_layout,
                      VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), &push);
-  vkCmdDraw(cmd, 3u, 1u, 0u, 0u);
+  vkCmdDraw(cmd, 3U, 1u, 0u, 0u);
+}
+
+void SceneRenderer::culling_pass(VkCommandBuffer) {
+  /* vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, culling_pipeline);
+   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           culling_pipeline_layout, 0U, 1U, &bindless.set, 0U,
+                           nullptr);
+   const CullingPushConstants push{};
+   vkCmdPushConstants(cmd, culling_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                      0u, sizeof(push), &push);
+   auto geometry_count = global_instance_data.size();
+   auto dispatch_count = (geometry_count + 63) / 64;
+   vkCmdDispatch(cmd, dispatch_count, 1, 1);
+   */
 }
 
 void RenderPass::ensure_capacity(usize command_count, usize instance_count,
@@ -459,7 +498,7 @@ void RenderPass::bake(const std::vector<PendingDraw> &scene_draws) {
 
   std::vector<DrawRef> sorted_refs;
   sorted_refs.reserve(scene_draws.size());
-  for (u32 i = 0u; i < scene_draws.size(); ++i)
+  for (u32 i = 0U; i < scene_draws.size(); ++i)
     sorted_refs.push_back({.global_idx = i, .data = &scene_draws[i]});
 
   std::ranges::sort(sorted_refs, [this](const auto &a, const auto &b) {
@@ -471,17 +510,17 @@ void RenderPass::bake(const std::vector<PendingDraw> &scene_draws) {
   std::vector<u32> draw_counts;
   batches.clear();
 
-  for (usize i = 0u; i < sorted_refs.size(); ++i) {
+  for (usize i = 0U; i < sorted_refs.size(); ++i) {
     const auto &[global_idx, data] = sorted_refs[i];
     const bool is_new_pipeline =
-        i > 0u && data->pipeline_id != sorted_refs[i - 1].data->pipeline_id;
+        i > 0U && data->pipeline_id != sorted_refs[i - 1].data->pipeline_id;
     const bool is_new_mesh =
-        i > 0u &&
+        i > 0U &&
         data->mesh.first_index != sorted_refs[i - 1].data->mesh.first_index;
 
-    if (is_new_pipeline || i == 0u) {
+    if (is_new_pipeline || i == 0U) {
       const u32 count_idx = static_cast<u32>(draw_counts.size());
-      draw_counts.push_back(0u);
+      draw_counts.push_back(0U);
       batches.push_back({
           .pipeline_id = data->pipeline_id,
           .max_command_count = 0U,
@@ -490,10 +529,10 @@ void RenderPass::bake(const std::vector<PendingDraw> &scene_draws) {
       });
     }
 
-    if (is_new_mesh || is_new_pipeline || i == 0u) {
+    if (is_new_mesh || is_new_pipeline || i == 0U) {
       commands.push_back({
           .indexCount = data->mesh.index_count,
-          .instanceCount = 1u,
+          .instanceCount = 1U,
           .firstIndex = data->mesh.first_index,
           .vertexOffset = data->mesh.vertex_offset,
           .firstInstance = static_cast<u32>(remapped_indices.size()),
@@ -511,6 +550,7 @@ void RenderPass::bake(const std::vector<PendingDraw> &scene_draws) {
   index_remapping_buffer->upload(remapped_indices);
   count_buffer->upload(draw_counts);
 }
+
 [[nodiscard]] constexpr auto PendingDraw::get_key(RenderPassType pass) const
     -> u64 {
   const u32 mesh_id = mesh.first_index;
@@ -778,7 +818,8 @@ void SceneRenderer::init_csm() {
   info("CSM handle: {}", csm.bindless_handle.index());
   bindless.need_repopulate = true;
 
-  ctx.transition_to_general(csm.image);
+  ctx.transition_to_general(csm.image, VK_IMAGE_ASPECT_DEPTH_BIT, 1,
+                            shadow_map_cascade_count);
 }
 
 } // namespace dy

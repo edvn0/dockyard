@@ -3,7 +3,6 @@
 #include <dockyard/log.hpp>
 
 #include <ranges>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
 

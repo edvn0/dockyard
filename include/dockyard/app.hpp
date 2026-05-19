@@ -22,7 +22,11 @@ struct InitialisationContext {
 };
 
 struct DeletionQueue {
-  using Fn = std::function<void()>;
+  DeletionQueue(const DeletionQueue &) = delete;
+  DeletionQueue &operator=(const DeletionQueue &) = delete;
+  DeletionQueue(DeletionQueue &&) = delete;
+  DeletionQueue &operator=(DeletionQueue &&) = delete;
+
   static auto get() -> DeletionQueue &;
 
   auto begin_frame(std::unsigned_integral auto frame_index) -> void {
@@ -30,19 +34,16 @@ struct DeletionQueue {
     flush(static_cast<u32>(frame_index));
   }
 
-  auto push(Fn fn) -> void;
+  using Fn = std::function<void()>;
+  auto push(Fn &&) -> void;
   auto flush_all() -> void;
 
 private:
   std::array<std::vector<Fn>, frames_in_flight> per_frame{};
-  u32 current_frame = 0u;
+  u32 current_frame = 0U;
   auto flush(u32 frame_index) -> void;
 
   DeletionQueue() = default;
-  DeletionQueue(const DeletionQueue &) = delete;
-  DeletionQueue &operator=(const DeletionQueue &) = delete;
-  DeletionQueue(DeletionQueue &&) = delete;
-  DeletionQueue &operator=(DeletionQueue &&) = delete;
 };
 
 class App {
@@ -56,14 +57,14 @@ public:
   virtual auto render(RenderContext &) -> u64 = 0;
   virtual auto destroy() -> void = 0;
 
-  virtual auto on_key_pressed(const events::key_pressed &) -> void {}
-  virtual auto on_key_released(const events::key_released &) -> void {}
-  virtual auto on_mouse_button_pressed(const events::mouse_button_pressed &)
+  virtual auto on_key_pressed(const events::KeyPressed &) -> void {}
+  virtual auto on_key_released(const events::KeyReleased &) -> void {}
+  virtual auto on_mouse_button_pressed(const events::MouseButtonPressed &)
       -> void {}
-  virtual auto on_mouse_button_released(const events::mouse_button_released &)
+  virtual auto on_mouse_button_released(const events::MouseButtonReleased &)
       -> void {}
-  virtual auto on_mouse_moved(const events::mouse_moved &) -> void {}
-  virtual auto on_mouse_scrolled(const events::mouse_scrolled &) -> void {}
+  virtual auto on_mouse_moved(const events::MouseMoved &) -> void {}
+  virtual auto on_mouse_scrolled(const events::MouseScrolled &) -> void {}
 
 protected:
   [[nodiscard]] auto get_window() const { return window; }
@@ -76,8 +77,8 @@ private:
   GLFWwindow *window;
   u64 frame_index = 0;
 
-  auto recreate_swapchain_manually(GLFWwindow *, const RendererListener &)
-      -> void;
-  auto on_swapchain_resized(const events::swapchain_resized &) -> void;
+  static auto recreate_swapchain_manually(GLFWwindow *,
+                                          const RendererListener &) -> void;
+  auto on_swapchain_resized(const events::SwapchainResized &) -> void;
 };
 } // namespace dy

@@ -61,8 +61,8 @@ struct Dockforge : App {
 
   auto on_changed_tag(entt::registry &, entt::entity) -> void {}
   auto init(const InitialisationContext &ctx) -> void override;
-  auto on_mouse_moved(const events::mouse_moved &e) -> void override;
-  auto on_key_released(const events::key_released &e) -> void override;
+  auto on_mouse_moved(const events::MouseMoved &e) -> void override;
+  auto on_key_released(const events::KeyReleased &e) -> void override;
   [[nodiscard]] auto resolve_camera() const -> std::pair<glm::mat4, glm::mat4>;
   [[nodiscard]] auto resolve_camera_with_position() const
       -> std::tuple<glm::mat4, glm::mat4, glm::vec3>;

@@ -211,7 +211,7 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
     -> Texture {
   Texture rt{};
   rt.format = format;
-  rt.extent = {width, height};
+  rt.extent = {.width = width, .height = height};
 
   VkImageCreateInfo image_info{};
   image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -233,7 +233,7 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
   VmaAllocationCreateInfo vma_info{};
   vma_info.usage = VMA_MEMORY_USAGE_AUTO;
 
-  if (image_info.usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT) {
+  if ((image_info.usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT) != 0U) {
     vma_info.preferredFlags = VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
   }
 
@@ -268,6 +268,8 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
       result != VK_SUCCESS) {
     std::abort();
   }
+
+  ctx.transition_to_general(rt.image, aspect, 1, 1);
 
   return rt;
 }

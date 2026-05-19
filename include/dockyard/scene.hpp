@@ -39,8 +39,8 @@ public:
 };
 
 class Scene {
-  entt::registry scene;
   entt::entity primary_camera_entity{entt::null};
+  entt::registry scene;
 
   friend class Entity;
 
@@ -64,8 +64,8 @@ public:
   }
 
   auto make_camera(std::string_view name, u32 width, u32 height,
-                   glm::vec3 position = {0.0f, 0.0f, 0.0f},
-                   glm::vec3 look_at = {0.0f, 0.0f, 1.0f}) -> Entity;
+                   glm::vec3 position = {0.0F, 0.0F, 0.0F},
+                   glm::vec3 look_at = {0.0F, 0.0F, 1.0F}) -> Entity;
 
   auto set_primary_camera(entt::entity e) -> void;
   auto clear_primary_camera() -> void;

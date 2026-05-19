@@ -15,6 +15,10 @@
 
 #include <imgui.h>
 
+extern "C" {
+struct GLFWwindow;
+}
+
 namespace dy {
 
 struct FontChoice {

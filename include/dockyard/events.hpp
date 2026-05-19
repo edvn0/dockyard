@@ -5,54 +5,58 @@
 #include <cstdint>
 
 namespace dy::events {
-struct window_resized {
+
+struct WindowResized {
   u32 width;
   u32 height;
 };
 
-struct window_closed {};
+struct WindowClosed {};
 
-struct window_minimized {
+struct WindowMinimized {
   bool minimized;
 };
 
-struct swapchain_invalidated {
+struct SwapchainInvalidated {
   u32 width;
   u32 height;
 };
 
-struct swapchain_resized {
+struct SwapchainResized {
   u32 width;
   u32 height;
 };
 
-struct key_pressed {
-  int key;
-  int scancode;
-  int mods;
-};
-struct key_released {
+struct KeyPressed {
   int key;
   int scancode;
   int mods;
 };
 
-struct mouse_button_pressed {
-  int button;
+struct KeyReleased {
+  int key;
+  int scancode;
   int mods;
 };
-struct mouse_button_released {
+
+struct MouseButtonPressed {
   int button;
   int mods;
 };
 
-struct mouse_moved {
+struct MouseButtonReleased {
+  int button;
+  int mods;
+};
+
+struct MouseMoved {
   float x;
   float y;
   float dx;
   float dy;
 };
-struct mouse_scrolled {
+
+struct MouseScrolled {
   float dx;
   float dy;
 };

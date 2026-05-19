@@ -20,6 +20,7 @@ auto Scene::make_camera(std::string_view name, u32 width, u32 height,
 auto Scene::set_primary_camera(entt::entity e) -> void {
   primary_camera_entity = e;
 }
+
 auto Scene::clear_primary_camera() -> void {
   primary_camera_entity = entt::null;
 }

@@ -119,6 +119,12 @@ struct SceneRenderer {
   RenderPass depth_prepass;
   RenderPass forward_pass;
 
+  auto indirect_buffer_view() const {
+    auto &a = depth_prepass.indirect_buffer->get_buffer();
+    auto &b = forward_pass.indirect_buffer->get_buffer();
+    return std::make_tuple(a, b);
+  }
+
   TexturePool textures;
   SamplerPool samplers;
   ComparisonSamplerPool comparison_samplers;
@@ -127,9 +133,15 @@ struct SceneRenderer {
 
   std::deque<MeshAsset> mesh_registry;
 
-  TextureHandle dummy_texture_handle{};
-  SamplerHandle dummy_sampler_handle{};
-  TextureHandle forward_target_handle{};
+  TextureHandle dummy_texture_handle;
+  SamplerHandle dummy_sampler_handle;
+  TextureHandle white_texture;
+  TextureHandle normal_texture;
+  TextureHandle metallic_roughness_texture;
+  TextureHandle occlusion_texture;
+  TextureHandle black_texture;
+
+  TextureHandle forward_target_handle;
   auto update_output_texture(TextureHandle h) { forward_target_handle = h; }
 
   VkSampler dummy_sampler_vk = VK_NULL_HANDLE;
@@ -167,7 +179,7 @@ struct SceneRenderer {
 
   explicit SceneRenderer(VulkanContext &c, SwapchainResources &sc);
 
-  auto initialise_bindless(TextureHandle white) -> void;
+  auto initialise_bindless() -> void;
   void init_csm();
   auto upload_texture(std::span<const u32> data, std::string_view name, u32 w,
                       u32 h, VkFormat fmt, bool gen_mips, bool storage = true)
@@ -193,6 +205,7 @@ struct SceneRenderer {
   void render_pass(VkCommandBuffer, RenderPass &,
                    VkPipeline override_pipeline = VK_NULL_HANDLE);
   void composite_pass(VkCommandBuffer);
+  void culling_pass(VkCommandBuffer);
 
   auto register_gltf(MeshAsset &&asset) -> MeshHandle;
   auto register_external_view(VkImageView view, VkImageViewType type)

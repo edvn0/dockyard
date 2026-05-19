@@ -4,7 +4,7 @@
 namespace dy {
 
 void VFS::initialize(const std::filesystem::path& assets_root) {
-  std::lock_guard lock(mutex);
+  std::scoped_lock lock(mutex);
 
   if (!std::filesystem::exists(assets_root) ||
       !std::filesystem::is_directory(assets_root)) {
@@ -28,9 +28,11 @@ void VFS::initialize(const std::filesystem::path& assets_root) {
     info("\t[VFS]: Mount {} -> {}", k, v);
   }
 }
+
 auto VFS::resolve(const VFSPath &virtual_path) -> std::filesystem::path {
   return resolve(virtual_path.view());
 }
+
 auto VFS::resolve(std::string_view virtual_path) -> std::filesystem::path {
   ensure_initialised();
 
@@ -43,7 +45,7 @@ auto VFS::resolve(std::string_view virtual_path) -> std::filesystem::path {
   std::string prefix = path_str.substr(0, sep);
   std::string relative = path_str.substr(sep + 3);
 
-  std::lock_guard lock(mutex);
+  std::scoped_lock lock(mutex);
   if (auto it = mounts.find(prefix); it != mounts.end()) {
     return it->second / relative;
   }

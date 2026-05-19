@@ -15,9 +15,9 @@ auto FreeCameraController::update(float ts) -> void {
 
   auto fwd = camera.forward();
   auto right = camera.right();
-  constexpr glm::vec3 world_up{0.0f, 1.0f, 0.0f};
+  constexpr glm::vec3 world_up{0.0F, 1.0F, 0.0F};
 
-  glm::vec3 dir{0.0f};
+  glm::vec3 dir{0.0F};
   if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
     dir += fwd;
   if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
@@ -31,7 +31,7 @@ auto FreeCameraController::update(float ts) -> void {
   if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS)
     dir -= world_up;
 
-  if (glm::length(dir) > 1e-6f)
+  if (glm::length(dir) > 1e-6F)
     camera.position += glm::normalize(dir) * move_speed * ts;
 }
 auto FreeCameraController::on_mouse_delta(float dx, float dy) -> void {
@@ -40,5 +40,5 @@ auto FreeCameraController::on_mouse_delta(float dx, float dy) -> void {
 
   camera.yaw += glm::radians(dx * sensitivity);
   camera.pitch = glm::clamp(camera.pitch - glm::radians(dy * sensitivity),
-                            glm::radians(-89.0f), glm::radians(89.0f));
+                            glm::radians(-89.0F), glm::radians(89.0F));
 }

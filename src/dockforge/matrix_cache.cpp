@@ -44,7 +44,6 @@ u64 *matrix_cache_frame{nullptr};
   for (auto &entry : matrix_cache) {
     if (entry.entity == e) {
       if (!trs_matches(entry, t)) {
-        // Transform was modified externally — recompute in place
         entry.mat = compute_matrix(t);
         entry.position = t.position;
         entry.rotation = t.rotation;

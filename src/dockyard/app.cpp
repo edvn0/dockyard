@@ -184,20 +184,20 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
       .frame_ids = image_last_frame_id,
       .dispatch = dispatcher,
   };
-  dispatcher.sink<events::window_minimized>()
+  dispatcher.sink<events::WindowMinimized>()
       .connect<&RendererListener::on_window_minimized>(render_listener);
-  dispatcher.sink<events::swapchain_invalidated>()
+  dispatcher.sink<events::SwapchainInvalidated>()
       .connect<&RendererListener::on_swapchain_invalidated>(render_listener);
-  dispatcher.sink<events::swapchain_resized>()
+  dispatcher.sink<events::SwapchainResized>()
       .connect<&App::on_swapchain_resized>(*this);
-  dispatcher.sink<events::key_pressed>().connect<&App::on_key_pressed>(*this);
-  dispatcher.sink<events::key_released>().connect<&App::on_key_released>(*this);
-  dispatcher.sink<events::mouse_button_pressed>()
+  dispatcher.sink<events::KeyPressed>().connect<&App::on_key_pressed>(*this);
+  dispatcher.sink<events::KeyReleased>().connect<&App::on_key_released>(*this);
+  dispatcher.sink<events::MouseButtonPressed>()
       .connect<&App::on_mouse_button_pressed>(*this);
-  dispatcher.sink<events::mouse_button_released>()
+  dispatcher.sink<events::MouseButtonReleased>()
       .connect<&App::on_mouse_button_released>(*this);
-  dispatcher.sink<events::mouse_moved>().connect<&App::on_mouse_moved>(*this);
-  dispatcher.sink<events::mouse_scrolled>().connect<&App::on_mouse_scrolled>(
+  dispatcher.sink<events::MouseMoved>().connect<&App::on_mouse_moved>(*this);
+  dispatcher.sink<events::MouseScrolled>().connect<&App::on_mouse_scrolled>(
       *this);
 
   {
@@ -226,7 +226,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
       continue;
 
     if (render_listener.needs_recreation) {
-      recreate_swapchain_manually(window, render_listener);
+      App::recreate_swapchain_manually(window, render_listener);
       continue;
     }
 
@@ -236,7 +236,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
     auto maybe_index = acquire_swapchain_image(sc, frame);
     if (!maybe_index) {
-      recreate_swapchain_manually(window, render_listener);
+      App::recreate_swapchain_manually(window, render_listener);
       continue;
     }
     auto index = std::move(maybe_index).value();
@@ -255,9 +255,9 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
         .main_cb = cb.command_buffer,
         .swapchain_image =
             SwapchainImageView{
-                sc.images[index],
-                sc.image_views[index],
-                sc.swapchain.extent,
+                .image = sc.images[index],
+                .view = sc.image_views[index],
+                .extent = sc.swapchain.extent,
             },
         .frame_index = frame_index,
         .wait_value = frame.last_value,
@@ -298,7 +298,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
         vkQueuePresentKHR(ctx.present_queue(), &present_info);
     if (present_result == VK_ERROR_OUT_OF_DATE_KHR ||
         present_result == VK_SUBOPTIMAL_KHR) {
-      recreate_swapchain_manually(window, render_listener);
+      App::recreate_swapchain_manually(window, render_listener);
     } else if (present_result != VK_SUCCESS) {
       return -1;
     }
@@ -317,12 +317,11 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   return 0;
 }
 
-auto App::on_swapchain_resized(const events::swapchain_resized &e) -> void {
+auto App::on_swapchain_resized(const events::SwapchainResized &e) -> void {
   resize(e.width, e.height);
 }
 
 auto App::recreate_swapchain_manually(GLFWwindow *window,
-
                                       const RendererListener &render_listener)
     -> void {
   int w{};
@@ -332,8 +331,10 @@ auto App::recreate_swapchain_manually(GLFWwindow *window,
   if (w == 0 || h == 0)
     return;
 
-  render_listener.on_swapchain_invalidated(
-      {static_cast<u32>(w), static_cast<u32>(h)});
+  render_listener.on_swapchain_invalidated({
+      .width = static_cast<u32>(w),
+      .height = static_cast<u32>(h),
+  });
 }
 
 auto acquire_swapchain_image(const SwapchainResources &sc,
@@ -404,18 +405,22 @@ auto DeletionQueue::get() -> DeletionQueue & {
   static DeletionQueue instance;
   return instance;
 }
-auto DeletionQueue::push(Fn fn) -> void {
+
+auto DeletionQueue::push(Fn &&fn) -> void {
   per_frame[current_frame].push_back(std::move(fn));
 }
+
 auto DeletionQueue::flush_all() -> void {
   std::ranges::for_each(per_frame, [](auto &v) {
     std::ranges::for_each(v, [](auto &k) { k(); });
   });
 }
+
 auto DeletionQueue::flush(u32 frame_index) -> void {
-  for (auto &fn : per_frame[frame_index])
+  auto &functions = per_frame[frame_index];
+  for (auto &fn : functions)
     fn();
-  per_frame[frame_index].clear();
+  functions.clear();
 }
 
 } // namespace dy

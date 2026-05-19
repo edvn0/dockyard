@@ -206,26 +206,32 @@ auto GeometryPool::flush_materials(u32 base_slot, u32 count) -> void {
                      count * sizeof(GPUMaterial));
 }
 
+template <typename O> auto cast(void *ptr, usize offset) -> O * {
+  return reinterpret_cast<O *>(static_cast<u8 *>(ptr) + offset);
+}
+
 auto GeometryPool::allocate_without_flush(std::span<const Vertex> vertices,
                                           std::span<const u32> indices)
     -> AllocatedOffset {
-  AllocatedOffset off{vertex_offset, shadow_vertex_offset, index_offset};
+  AllocatedOffset off{
+      .vertex_offset = vertex_offset,
+      .shadow_vertex_offset = shadow_vertex_offset,
+      .index_offset = index_offset,
+  };
 
   auto *v_dst =
-      (Vertex *)((u8 *)vertex_buffer->get_mapped_pointer() + vertex_offset);
-  auto *sv_dst = (PositionOnlyVertex *)((u8 *)position_only_vertex_buffer
-                                            ->get_mapped_pointer() +
-                                        shadow_vertex_offset);
-  auto *i_dst =
-      (u32 *)((u8 *)index_buffer->get_mapped_pointer() + index_offset);
+      cast<Vertex>(vertex_buffer->get_mapped_pointer(), vertex_offset);
+  auto *sv_dst = cast<PositionOnlyVertex>(
+      position_only_vertex_buffer->get_mapped_pointer(), shadow_vertex_offset);
+  auto *i_dst = cast<u32>(index_buffer->get_mapped_pointer(), index_offset);
 
   std::memcpy(v_dst, vertices.data(), vertices.size_bytes());
   std::memcpy(i_dst, indices.data(), indices.size_bytes());
 
-  for (usize n = 0; n < vertices.size(); ++n) {
-    sv_dst[n].position[0] = vertices[n].position[0];
-    sv_dst[n].position[1] = vertices[n].position[1];
-    sv_dst[n].position[2] = vertices[n].position[2];
+  for (auto &&[index, vertex] : vertices | std::views::enumerate) {
+    sv_dst[index].position[0] = vertex.position[0];
+    sv_dst[index].position[1] = vertex.position[1];
+    sv_dst[index].position[2] = vertex.position[2];
   }
 
   vertex_offset += vertices.size_bytes();

@@ -3,7 +3,6 @@
 
 #include <glm/ext/matrix_transform.hpp>
 #include <imgui.h>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
 

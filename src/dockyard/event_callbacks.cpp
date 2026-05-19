@@ -34,30 +34,30 @@ auto install_glfw_callbacks(GLFWwindow *window, entt::dispatcher &dispatcher)
 
   glfwSetWindowCloseCallback(window, [](GLFWwindow *w) {
     auto &ctx = access(w);
-    ctx.dispatcher->enqueue<events::window_closed>();
+    ctx.dispatcher->enqueue<events::WindowClosed>();
   });
 
   glfwSetWindowIconifyCallback(window, [](GLFWwindow *w, int iconified) {
     auto &ctx = access(w);
-    ctx.dispatcher->enqueue<events::window_minimized>(iconified == GLFW_TRUE);
+    ctx.dispatcher->enqueue<events::WindowMinimized>(iconified == GLFW_TRUE);
   });
 
   glfwSetKeyCallback(
       window, [](GLFWwindow *w, int key, int scancode, int action, int mods) {
         auto &ctx = access(w);
         if (action == GLFW_PRESS)
-          ctx.dispatcher->enqueue<events::key_pressed>(key, scancode, mods);
+          ctx.dispatcher->enqueue<events::KeyPressed>(key, scancode, mods);
         else if (action == GLFW_RELEASE)
-          ctx.dispatcher->enqueue<events::key_released>(key, scancode, mods);
+          ctx.dispatcher->enqueue<events::KeyReleased>(key, scancode, mods);
       });
 
   glfwSetMouseButtonCallback(
       window, [](GLFWwindow *w, int button, int action, int mods) {
         auto &ctx = access(w);
         if (action == GLFW_PRESS)
-          ctx.dispatcher->enqueue<events::mouse_button_pressed>(button, mods);
+          ctx.dispatcher->enqueue<events::MouseButtonPressed>(button, mods);
         else if (action == GLFW_RELEASE)
-          ctx.dispatcher->enqueue<events::mouse_button_released>(button, mods);
+          ctx.dispatcher->enqueue<events::MouseButtonReleased>(button, mods);
       });
 
   glfwSetCursorPosCallback(window, [](GLFWwindow *w, double x, double y) {
@@ -67,13 +67,13 @@ auto install_glfw_callbacks(GLFWwindow *window, entt::dispatcher &dispatcher)
     const float dx = ctx.mouse.initialised ? fx - ctx.mouse.x : 0.0f;
     const float dy = ctx.mouse.initialised ? fy - ctx.mouse.y : 0.0f;
     ctx.mouse = {fx, fy, true};
-    ctx.dispatcher->enqueue<events::mouse_moved>(fx, fy, dx, dy);
+    ctx.dispatcher->enqueue<events::MouseMoved>(fx, fy, dx, dy);
   });
 
   glfwSetScrollCallback(window, [](GLFWwindow *w, double dx, double dy) {
     auto &ctx = access(w);
-    ctx.dispatcher->enqueue<events::mouse_scrolled>(static_cast<float>(dx),
-                                                    static_cast<float>(dy));
+    ctx.dispatcher->enqueue<events::MouseScrolled>(static_cast<float>(dx),
+                                                   static_cast<float>(dy));
   });
 }
 
@@ -85,8 +85,8 @@ auto poll_pending_events() -> void {
   if (c->resize.width == 0 || c->resize.height == 0)
     return;
 
-  c->dispatcher->enqueue<events::swapchain_invalidated>(c->resize.width,
-                                                        c->resize.height);
+  c->dispatcher->enqueue<events::SwapchainInvalidated>(c->resize.width,
+                                                       c->resize.height);
 }
 
 auto uninstall_glfw_callbacks(GLFWwindow *window) -> void {

@@ -30,7 +30,8 @@ struct VulkanContext {
 
   auto one_time_submit(std::function<void(VkCommandBuffer)> &&func) const
       -> void;
-  auto transition_to_general(VkImage) const -> void;
+  auto transition_to_general(VkImage, VkImageAspectFlags aspect, u32 mip_count,
+                             u32 layer_count) const -> void;
 
   static auto create(vkb::Instance &&inst, VkSurfaceKHR &&s) -> VulkanContext;
 };
@@ -129,9 +130,9 @@ struct RendererListener {
   mutable bool minimized{false};
   mutable bool needs_recreation{false};
 
-  auto on_swapchain_invalidated(const events::swapchain_invalidated &e) const
+  auto on_swapchain_invalidated(const events::SwapchainInvalidated &e) const
       -> void;
-  auto on_window_minimized(const events::window_minimized &e) -> void;
+  auto on_window_minimized(const events::WindowMinimized &e) -> void;
 };
 
 } // namespace dy
