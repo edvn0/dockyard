@@ -1,8 +1,8 @@
 #pragma once
 
-#include "dockyard/canvas_renderer.hpp"
 #include <dockforge/scene_outlier.hpp>
 #include <dockyard/app.hpp>
+#include <dockyard/canvas_renderer.hpp>
 #include <dockyard/freelist_pool.hpp>
 #include <dockyard/scene.hpp>
 

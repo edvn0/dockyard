@@ -1,36 +1,40 @@
 #include <dockforge/matrix_cache.hpp>
 
+#include <array>
 #include <dockyard/types.hpp>
 
 namespace {
 
 using namespace dy;
 
+// Aligned to 128 bytes (exactly 2 cache lines).
+// The lookup keys occupy the first cache line; the heavy mat4 occupies the
+// second.
 struct alignas(128) MatrixCacheEntry {
-  entt::entity entity = entt::null; // 4
-  u32 _pad0 = 0;                    // 4  — keeps last_used 8-aligned
-  u64 last_used = 0;                // 8
-  glm::vec3 position{};             // 12
-  u32 _pad1 = 0;                    // 4
-  glm::quat rotation{1, 0, 0, 0};   // 16
-  glm::vec3 scale{1, 1, 1};         // 12
-  u32 _pad2 = 0;                    // 4
-  glm::mat4 mat{1.0F};              // 64
-                                    // total: 128
-};
-static_assert(sizeof(MatrixCacheEntry) == 128);
+  entt::entity entity = entt::null; // 4 bytes
+  glm::vec3 position{};             // 12 bytes
+  glm::quat rotation{1, 0, 0, 0};   // 16 bytes
+  glm::vec3 scale{1, 1, 1};         // 12 bytes
+  u32 _pad[5] = {0}; // 20 bytes padding to push 'mat' to 64-byte alignment
 
+  glm::mat4 mat{1.0F}; // 64 bytes
+};
+static_assert(sizeof(MatrixCacheEntry) == 128,
+              "MatrixCacheEntry must be exactly 2 cache lines.");
+
+// A power-of-two size allows the compiler to optimize the modulo (%) into a
+// bitwise AND
 constexpr usize matrix_cache_size = 256;
 std::array<MatrixCacheEntry, matrix_cache_size> matrix_cache{};
-u64 *matrix_cache_frame{nullptr};
 
-[[nodiscard]] auto trs_matches(const MatrixCacheEntry &entry,
-                               const Components::Transform &t) -> bool {
+[[nodiscard]] inline auto trs_matches(const MatrixCacheEntry &entry,
+                                      const Components::Transform &t) -> bool {
   return entry.position == t.position && entry.rotation == t.rotation &&
          entry.scale == t.scale;
 }
 
-[[nodiscard]] auto compute_matrix(const Components::Transform &t) -> glm::mat4 {
+[[nodiscard]] inline auto compute_matrix(const Components::Transform &t)
+    -> glm::mat4 {
   return glm::translate(glm::mat4{1.0F}, t.position) *
          glm::mat4_cast(t.rotation) * glm::scale(glm::mat4{1.0F}, t.scale);
 }
@@ -39,31 +43,32 @@ u64 *matrix_cache_frame{nullptr};
                                       const Components::Transform &t)
     -> const glm::mat4 & {
 
-  MatrixCacheEntry *lru = matrix_cache.data();
+  // O(1) direct mapping via entity ID.
+  // Compiler optimizes this to a fast bitwise AND operation:
+  // (static_cast<usize>(e) & 0xFF)
+  const usize cache_index = static_cast<usize>(e) % matrix_cache_size;
+  MatrixCacheEntry &entry = matrix_cache[cache_index];
 
-  for (auto &entry : matrix_cache) {
-    if (entry.entity == e) {
-      if (!trs_matches(entry, t)) {
-        entry.mat = compute_matrix(t);
-        entry.position = t.position;
-        entry.rotation = t.rotation;
-        entry.scale = t.scale;
-      }
-      entry.last_used = *matrix_cache_frame;
-      return entry.mat;
+  // Direct Cache Hit
+  if (entry.entity == e) {
+    if (!trs_matches(entry, t)) [[unlikely]] {
+      entry.mat = compute_matrix(t);
+      entry.position = t.position;
+      entry.rotation = t.rotation;
+      entry.scale = t.scale;
     }
-    if (entry.last_used < lru->last_used)
-      lru = &entry;
+    return entry.mat;
   }
 
-  // Cache miss: evict LRU slot
-  lru->entity = e;
-  lru->mat = compute_matrix(t);
-  lru->position = t.position;
-  lru->rotation = t.rotation;
-  lru->scale = t.scale;
-  lru->last_used = *matrix_cache_frame;
-  return lru->mat;
+  // Cache Miss / Collision: Instantly evict the previous occupant.
+  // No LRU scans or frame timestamps needed.
+  entry.entity = e;
+  entry.mat = compute_matrix(t);
+  entry.position = t.position;
+  entry.rotation = t.rotation;
+  entry.scale = t.scale;
+
+  return entry.mat;
 }
 
 } // namespace
@@ -71,8 +76,4 @@ u64 *matrix_cache_frame{nullptr};
 auto cached_matrix(entt::entity e, const Components::Transform &t)
     -> const glm::mat4 & {
   return cached_matrix_impl(e, t);
-}
-
-auto initialise_matrix_cache(dy::u64 &frame_counter) -> void {
-  matrix_cache_frame = &frame_counter;
 }

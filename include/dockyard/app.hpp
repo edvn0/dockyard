@@ -12,6 +12,12 @@ struct GLFWwindow;
 
 namespace dy {
 
+#ifdef DOCKYARD_DEBUG
+inline constexpr auto enable_validation_layers = true;
+#else
+inline constexpr auto enable_validation_layers = false;
+#endif
+
 struct RenderContext;
 
 struct InitialisationContext {

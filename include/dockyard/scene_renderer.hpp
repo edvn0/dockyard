@@ -33,10 +33,7 @@ struct CompositePushConstants {
   const SamplerHandle sampler;
 };
 
-struct alignas(8) CullingPushConstants {
-  u32 total_instance_count;
-  u32 padding;
-
+struct CullingPushConstants {
   DeviceAddress instance_buffer;
   DeviceAddress frame_data;
 
@@ -49,6 +46,9 @@ struct alignas(8) CullingPushConstants {
   DeviceAddress forward_instance_to_command_buffer;
   DeviceAddress forward_indirect_commands;
   DeviceAddress forward_culled_remap;
+
+  u32 total_instance_count;
+  u32 padding[3];
 };
 
 enum class RenderPassType { DepthPrepass, Forward, Shadow };
@@ -69,6 +69,15 @@ struct RenderPass {
   RenderPassType type;
   VmaAllocator allocator;
 
+  struct DrawBucket {
+    Mesh mesh;
+    u32 pipeline_id;
+    u32 material_id;
+    std::vector<u32> instance_ids; // indices into global_instance_data
+  };
+
+  std::map<u64, DrawBucket> buckets; // key = get_key() result, already ordered
+
   // Pass-Specific Graphics Inputs (Created in bake)
   std::unique_ptr<Buffer> indirect_buffer{nullptr};
   std::unique_ptr<Buffer> count_buffer{nullptr};
@@ -88,8 +97,7 @@ struct RenderPass {
 
   void ensure_capacity(usize command_count, usize instance_count,
                        usize batch_count, usize total_global_instances);
-  void bake(const std::vector<PendingDraw> &scene_draws,
-            usize total_global_instances);
+  void bake(usize total_global_instances);
 };
 
 struct InstanceData {
@@ -242,6 +250,10 @@ struct SceneRenderer {
   [[nodiscard]] auto get_material_view(MeshHandle handle) const
       -> ConstMaterialView;
   [[nodiscard]] auto get_material_view_mut(MeshHandle handle)
+      -> MutableMaterialView;
+  [[nodiscard]] auto get_material_view(const MeshAsset &) const
+      -> ConstMaterialView;
+  [[nodiscard]] auto get_material_view_mut(const MeshAsset &) const
       -> MutableMaterialView;
 
   template <typename Handle>

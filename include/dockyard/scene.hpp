@@ -56,10 +56,14 @@ public:
   template <typename T> auto on_construct() { return scene.on_construct<T>(); }
   template <typename T> auto on_destroy() { return scene.on_destroy<T>(); }
 
+  auto registry() -> entt::registry & { return scene; }
+  auto registry() const -> const entt::registry & { return scene; }
+
   auto make(std::string_view name) -> Entity {
     auto e = Entity{scene};
     e.emplace<Components::Tag>(name);
     e.emplace<Components::Transform>();
+    e.emplace<Components::LocalToWorld>();
     return e;
   }
 

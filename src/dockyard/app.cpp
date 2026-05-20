@@ -117,8 +117,8 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
           .set_app_version(0, 1, 0)
           .set_engine_version(0, 1, 0)
           .require_api_version(1, 4, 0)
-          .enable_validation_layers()
-          .request_validation_layers()
+          .enable_validation_layers(enable_validation_layers)
+          .request_validation_layers(enable_validation_layers)
           .set_debug_callback(
               [](VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                  VkDebugUtilsMessageTypeFlagsEXT,
@@ -127,7 +127,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
                 std::string object_names;
                 if (data->objectCount > 0) {
                   object_names = " | Objects: ";
-                  for (uint32_t i = 0; i < data->objectCount; ++i) {
+                  for (u32 i = 0; i < data->objectCount; ++i) {
                     // pObjectName may be null if the application didn't set it
                     const char *name = data->pObjects[i].pObjectName;
                     object_names += (name ? name : "<unnamed>");

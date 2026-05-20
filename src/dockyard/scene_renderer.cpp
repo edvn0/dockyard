@@ -4,9 +4,9 @@
 #include <atomic>
 #include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
+#include <execution>
 #include <limits>
 #include <ranges>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
 
@@ -140,21 +140,31 @@ auto SceneRenderer::get_material_view(MeshHandle handle) const
     -> ConstMaterialView {
   const auto *mesh = get_mesh(handle);
   assert(mesh && "invalid mesh handle");
-  return {
-      .materials = geometry_pool->get_materials(mesh->material_base_slot,
-                                                mesh->material_count),
-      .base_slot = mesh->material_base_slot,
-  };
+  return get_material_view(*mesh);
 }
 
 auto SceneRenderer::get_material_view_mut(MeshHandle handle)
     -> MutableMaterialView {
   const auto *mesh = get_mesh(handle);
   assert(mesh && "invalid mesh handle");
+  return get_material_view_mut(*mesh);
+}
+
+auto SceneRenderer::get_material_view(const MeshAsset &mesh) const
+    -> ConstMaterialView {
   return {
-      .materials = geometry_pool->get_materials_mut(mesh->material_base_slot,
-                                                    mesh->material_count),
-      .base_slot = mesh->material_base_slot,
+      .materials = geometry_pool->get_materials(mesh.material_base_slot,
+                                                mesh.material_count),
+      .base_slot = mesh.material_base_slot,
+  };
+}
+
+auto SceneRenderer::get_material_view_mut(const MeshAsset &mesh) const
+    -> MutableMaterialView {
+  return {
+      .materials = geometry_pool->get_materials_mut(mesh.material_base_slot,
+                                                    mesh.material_count),
+      .base_slot = mesh.material_base_slot,
   };
 }
 
@@ -373,18 +383,41 @@ void SceneRenderer::submit(MeshHandle handle, const glm::mat4 &t,
 
   for (const auto &node : asset->nodes) {
     glm::mat4 node_transform = t * node.local_transform;
-
     for (const auto &prim : node.primitives) {
-      u32 current_global_id = static_cast<u32>(submission_queue.size());
+      u32 id = static_cast<u32>(submission_queue.size());
+      u32 resolved_mat = material_id != 0 ? material_id : prim.material_id;
 
-      submission_queue.push_back({
+      submission_queue.emplace_back(PendingDraw{
           .mesh = prim.mesh,
           .pipeline_id = pipeline_id,
-          .material_id = material_id != 0 ? material_id : prim.material_id,
+          .material_id = resolved_mat,
           .transform = node_transform,
           .aabb = prim.aabb,
-          .instance_id = current_global_id,
+          .instance_id = id,
       });
+
+      // const auto &mat =
+      // get_material_view(*asset).materials[prim.material_id];
+
+      // each pass decides membership here
+      if (true) {
+        u64 depth_key = static_cast<u64>(prim.mesh.first_index);
+        auto &b = depth_prepass.buckets[depth_key];
+        b.mesh = prim.mesh;
+        b.pipeline_id = pipeline_id;
+        b.instance_ids.push_back(id);
+      }
+
+      {
+        u64 fwd_key = (static_cast<u64>(pipeline_id) << 48) |
+                      (static_cast<u64>(resolved_mat) << 32) |
+                      prim.mesh.first_index;
+        auto &b = forward_pass.buckets[fwd_key];
+        b.mesh = prim.mesh;
+        b.pipeline_id = pipeline_id;
+        b.material_id = resolved_mat;
+        b.instance_ids.push_back(id);
+      }
     }
   }
 }
@@ -400,26 +433,33 @@ void SceneRenderer::ensure_global_capacity(usize instance_count) {
 namespace {
 std::atomic_uint64_t current_frame_index{std::numeric_limits<u64>::max()};
 
-auto extract_frustum_planes(const glm::mat4 &vp) -> std::array<glm::vec4, 6> {
+auto extract_frustum_planes(const glm::mat4 &vp)
+    -> const std::array<glm::vec4, 6> & {
+  static glm::mat4 last_vp{0.0F};
+  static std::array<glm::vec4, 6> cached_planes{};
+
+  if (vp == last_vp) {
+    return cached_planes;
+  }
+  last_vp = vp;
+
   const auto row = [&](const int i) -> glm::vec4 {
     return {vp[0][i], vp[1][i], vp[2][i], vp[3][i]};
   };
-
   const glm::vec4 r0 = row(0);
   const glm::vec4 r1 = row(1);
   const glm::vec4 r2 = row(2);
   const glm::vec4 r3 = row(3);
 
-  std::array<glm::vec4, 6> planes = {
-      glm::normalize(r3 + r0), // Left
-      glm::normalize(r3 - r0), // Right
-      glm::normalize(r3 - r1), // Bottom  ← swapped
-      glm::normalize(r3 + r1), // Top     ← swapped
-      glm::normalize(r2),      // Near
-      glm::normalize(r3 - r2), // Far
+  cached_planes = {
+      r3 + r0, r3 - r0, r3 - r1, r3 + r1, r2, r3 - r2,
   };
 
-  return planes;
+  for (auto &p : cached_planes) {
+    p /= glm::length(glm::vec3(p));
+  }
+
+  return cached_planes;
 }
 }
 
@@ -459,8 +499,15 @@ void SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
   };
 
   frame_ubo_buffers.at(frame_index)->upload(std::span(&ubo, 1));
-  depth_prepass.bake(submission_queue, global_instance_data.size());
-  forward_pass.bake(submission_queue, global_instance_data.size());
+  depth_prepass.bake(global_instance_data.size());
+  forward_pass.bake(global_instance_data.size());
+
+  for (auto &v : depth_prepass.buckets | std::views::values) {
+    v.instance_ids.clear();
+  }
+  for (auto &v : forward_pass.buckets | std::views::values) {
+    v.instance_ids.clear();
+  }
   submission_queue.clear();
 }
 
@@ -535,31 +582,30 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
       forward_pass.batches.empty())
     return;
 
-  const u32 zero_value = 0U;
+  {
+    static constexpr u32 zero_value = 0U;
+    u32 depth_cmd_count = static_cast<u32>(
+        depth_prepass.indirect_buffer->size() / sizeof(PaddedDrawCommand));
+    for (u32 i = 0; i < depth_cmd_count; ++i) {
+      VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
+                            offsetof(PaddedDrawCommand, instance_count);
+      vkCmdUpdateBuffer(cmd, depth_prepass.indirect_buffer->get_buffer(),
+                        offset, sizeof(u32), &zero_value);
+    }
 
-  u32 depth_cmd_count = static_cast<u32>(depth_prepass.indirect_buffer->size() /
-                                         sizeof(PaddedDrawCommand));
-  for (u32 i = 0; i < depth_cmd_count; ++i) {
-    VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
-                          offsetof(PaddedDrawCommand, instance_count);
-    vkCmdUpdateBuffer(cmd, depth_prepass.indirect_buffer->get_buffer(), offset,
-                      sizeof(u32), &zero_value);
-  }
-
-  u32 forward_cmd_count = static_cast<u32>(
-      forward_pass.indirect_buffer->size() / sizeof(PaddedDrawCommand));
-  for (u32 i = 0; i < forward_cmd_count; ++i) {
-    VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
-                          offsetof(PaddedDrawCommand, instance_count);
-    vkCmdUpdateBuffer(cmd, forward_pass.indirect_buffer->get_buffer(), offset,
-                      sizeof(u32), &zero_value);
+    u32 forward_cmd_count = static_cast<u32>(
+        forward_pass.indirect_buffer->size() / sizeof(PaddedDrawCommand));
+    for (u32 i = 0; i < forward_cmd_count; ++i) {
+      VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
+                            offsetof(PaddedDrawCommand, instance_count);
+      vkCmdUpdateBuffer(cmd, forward_pass.indirect_buffer->get_buffer(), offset,
+                        sizeof(u32), &zero_value);
+    }
   }
 
   VkBufferMemoryBarrier2 clear_barriers[2] = {
       {.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-       .srcStageMask =
-           VK_PIPELINE_STAGE_2_TRANSFER_BIT, // ◄ vkCmdUpdateBuffer is a
-                                             // transfer operation!
+       .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
        .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
        .dstAccessMask =
@@ -581,7 +627,6 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
   vkCmdPipelineBarrier2(cmd, &clear_dep);
 
   CullingPushConstants push{
-      .total_instance_count = static_cast<u32>(geometry_count),
       .instance_buffer = global_instance_buffer->get_device_address(),
       .frame_data =
           frame_ubo_buffers.at(current_frame_index)->get_device_address(),
@@ -603,6 +648,7 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
           forward_pass.indirect_buffer->get_device_address(),
       .forward_culled_remap =
           forward_pass.culled_index_remapping_buffer->get_device_address(),
+      .total_instance_count = static_cast<u32>(geometry_count),
   };
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, culling_pipeline);
@@ -698,64 +744,48 @@ void RenderPass::ensure_capacity(usize command_count, usize instance_count,
   }
 }
 
-void RenderPass::bake(const std::vector<PendingDraw> &scene_draws,
-                      usize total_global_instances) {
-  std::vector<const PendingDraw *> sorted_refs;
-  sorted_refs.reserve(scene_draws.size());
-  for (const auto &draw : scene_draws) {
-    sorted_refs.push_back(&draw);
-  }
-
-  std::ranges::sort(sorted_refs,
-                    [this](const PendingDraw *a, const PendingDraw *b) {
-                      return a->get_key(type) < b->get_key(type);
-                    });
-
+void RenderPass::bake(usize total_global_instances) {
   std::vector<PaddedDrawCommand> commands;
   std::vector<u32> remapped_indices;
   std::vector<u32> draw_counts;
-
   std::vector<u32> instance_to_commands(total_global_instances, 0xFFFFFFFF);
 
   batches.clear();
 
-  for (usize i = 0U; i < sorted_refs.size(); ++i) {
-    const PendingDraw *data = sorted_refs[i];
+  u32 current_pipeline = ~0U;
 
-    const bool is_new_pipeline =
-        i > 0U && data->pipeline_id != sorted_refs[i - 1]->pipeline_id;
-    const bool is_new_mesh = i > 0U && data->mesh.first_index !=
-                                           sorted_refs[i - 1]->mesh.first_index;
-
-    if (is_new_pipeline || i == 0U) {
-      const u32 count_idx = static_cast<u32>(draw_counts.size());
+  for (auto &&[key, bucket] : buckets) {
+    if (bucket.pipeline_id != current_pipeline) {
+      current_pipeline = bucket.pipeline_id;
       draw_counts.push_back(0U);
-
       batches.push_back({
-          .pipeline_id = data->pipeline_id,
+          .pipeline_id = bucket.pipeline_id,
           .max_command_count = 0U,
           .first_command_index = static_cast<u32>(commands.size()),
-          .count_buffer_offset = count_idx * static_cast<u32>(sizeof(u32)),
+          .count_buffer_offset =
+              static_cast<u32>((draw_counts.size() - 1) * sizeof(u32)),
       });
     }
 
-    if (is_new_mesh || is_new_pipeline || i == 0U) {
-      commands.push_back({
-          .index_count = data->mesh.index_count,
-          .instance_count = 0U,
-          .first_index = data->mesh.first_index,
-          .vertex_offset = data->mesh.vertex_offset,
-          .first_instance = static_cast<u32>(remapped_indices.size()),
-      });
-      batches.back().max_command_count++;
-      draw_counts.back()++;
+    const u32 first_instance = static_cast<u32>(remapped_indices.size());
+    const u32 cmd_idx = static_cast<u32>(commands.size());
+
+    commands.push_back({
+        .index_count = bucket.mesh.index_count,
+        .instance_count = 0U,
+        .first_index = bucket.mesh.first_index,
+        .vertex_offset = bucket.mesh.vertex_offset,
+        .first_instance = first_instance,
+    });
+    batches.back().max_command_count++;
+    draw_counts.back()++;
+
+    for (u32 iid : bucket.instance_ids) {
+      remapped_indices.push_back(iid);
+      instance_to_commands[iid] = cmd_idx;
     }
 
-    remapped_indices.push_back(data->instance_id);
-
-    u32 current_command_idx = static_cast<u32>(commands.size() - 1);
-
-    instance_to_commands[data->instance_id] = current_command_idx;
+    bucket.instance_ids.clear(); // reset for next frame in-place
   }
 
   ensure_capacity(commands.size(), remapped_indices.size(), draw_counts.size(),

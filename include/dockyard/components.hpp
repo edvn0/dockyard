@@ -81,6 +81,7 @@ struct Transform {
   glm::vec3 position{};
   glm::quat rotation{};
   glm::vec3 scale{1};
+  bool is_dirty{true};
 
   [[nodiscard]] auto matrix() const -> glm::mat4 {
     glm::mat4 res = glm::translate(glm::mat4(1.0F), position);
@@ -88,6 +89,10 @@ struct Transform {
     res = glm::scale(res, scale);
     return res;
   }
+};
+
+struct LocalToWorld {
+  glm::mat4 matrix{1.0f};
 };
 
 struct MaterialOverride {

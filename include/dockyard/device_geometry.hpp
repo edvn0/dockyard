@@ -5,6 +5,7 @@
 
 #include <memory>
 #include <type_traits>
+#include <utility>
 #include <vk_mem_alloc.h>
 
 namespace dy {
@@ -29,6 +30,40 @@ struct PositionOnlyVertex {
 static_assert(std::is_trivially_copyable_v<PositionOnlyVertex>);
 static_assert(sizeof(PositionOnlyVertex) == 12);
 
+enum class MaterialFlags : u32 {
+  none = 0,
+  depth_prepass = 1 << 0,
+  alpha_mask = 1 << 1,
+};
+constexpr auto operator|(MaterialFlags a, MaterialFlags b) -> MaterialFlags {
+  return static_cast<MaterialFlags>(std::to_underlying(a) |
+                                    std::to_underlying(b));
+}
+constexpr auto operator&(MaterialFlags a, MaterialFlags b) -> MaterialFlags {
+  return static_cast<MaterialFlags>(std::to_underlying(a) &
+                                    std::to_underlying(b));
+}
+constexpr bool operator!(MaterialFlags f) { return f == MaterialFlags::none; }
+constexpr auto operator|=(MaterialFlags &a, MaterialFlags b)
+    -> MaterialFlags & {
+  a = a | b;
+  return a;
+}
+constexpr auto operator&=(MaterialFlags &a, MaterialFlags b)
+    -> MaterialFlags & {
+  a = a & b;
+  return a;
+}
+constexpr auto has_flag(MaterialFlags flags, MaterialFlags flag) -> bool {
+  return (flags & flag) == flag;
+}
+constexpr auto set_flag(MaterialFlags &flags, MaterialFlags flag) -> void {
+  flags |= flag;
+}
+constexpr auto clear_flag(MaterialFlags &flags, MaterialFlags flag) -> void {
+  flags &= static_cast<MaterialFlags>(~std::to_underlying(flag));
+}
+
 struct GPUMaterial {
   alignas(16) float albedo_factor[4];
   alignas(16) float emissive_factor[4];
@@ -46,7 +81,7 @@ struct GPUMaterial {
 
   u32 emissive_index;
   u32 occlusion_index;
-  u32 pad0;
+  MaterialFlags flags{MaterialFlags::depth_prepass};
 };
 static_assert(std::is_trivially_copyable_v<GPUMaterial>);
 static_assert(sizeof(GPUMaterial) % 16 == 0);

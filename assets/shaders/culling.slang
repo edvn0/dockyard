@@ -2,8 +2,6 @@ import push_constant;
 
 struct CullingPushConstants
 {
-    uint total_instance_count;
-    uint padding;
 
     ImmutablePtr<InstanceData, AddressSpace.Device> instance_buffer;
     ImmutablePtr<FrameUBO, AddressSpace.Device> frame_data;
@@ -17,6 +15,9 @@ struct CullingPushConstants
     ImmutablePtr<uint, AddressSpace.Device> forward_instance_to_command;
     Ptr<VkDrawIndexedIndirectCommand, Access.ReadWrite, AddressSpace.Device> forward_indirect_commands;
     Ptr<uint, Access.ReadWrite, AddressSpace.Device> forward_culled_remap;
+
+    uint total_instance_count;
+    uint padding[3];
 };
 
 bool is_visible(float4x4 model_matrix, float radius, Array<float4, 6> frustum_planes, float3 camera_pos, float max_dist_sq)

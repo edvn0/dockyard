@@ -118,6 +118,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
   editor_scene = std::make_shared<Scene>();
   active_scene = editor_scene;
+  active_scene->group<Components::Transform, Components::LocalToWorld,
+                      Components::Mesh>();
   active_scene->on_construct<Components::Tag>()
       .connect<&Dockforge::on_changed_tag>(*this);
   active_scene->on_destroy<Components::Tag>()
@@ -160,7 +162,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
         mesh::load_from_memory(*renderer, cube_verts, cube_indices).value();
 
     auto &scene = *active_scene;
-    const int grid_side = 30;
+    const int grid_side = 10;
     const float spacing = std::numbers::sqrt2_v<float> + 0.5F;
     const float offset = (grid_side - 1) * spacing / 2.0F;
 
@@ -254,9 +256,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
                           glm::vec3{0, 1, 0});
   df.proj = glm::perspective(glm::radians(30.0f), 1.77f, 0.1f, 30.0f);
   df.color = glm::vec4{1.0f, 1.0f, 0.0f, 1.0f};
-
-  initialise_matrix_cache(get_frame_index_mut());
 }
+
 auto Dockforge::on_mouse_moved(const events::MouseMoved &e) -> void {
   if (glfwGetMouseButton(get_window(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
     editor_camera->on_mouse_delta(e.dx, e.dy);
@@ -753,9 +754,34 @@ auto Dockforge::destroy() -> void {
   renderer.reset();
 }
 
+auto update_local_to_world_matrices(entt::registry &registry) -> void {
+  auto render_group =
+      registry.group<Components::Transform, Components::LocalToWorld,
+                     Components::Mesh>();
+
+  for (auto e : render_group) {
+    auto &transform = render_group.get<Components::Transform>(e);
+
+    if (!transform.is_dirty)
+      continue;
+
+    auto &ltw = render_group.get<Components::LocalToWorld>(e);
+
+    // Compute the matrix
+    ltw.matrix = glm::translate(glm::mat4{1.0F}, transform.position) *
+                 glm::mat4_cast(transform.rotation) *
+                 glm::scale(glm::mat4{1.0F}, transform.scale);
+
+    // Reset the flag
+    transform.is_dirty = false;
+  }
+}
+
 auto Dockforge::update(float ts) -> void {
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
+
+  update_local_to_world_matrices(active_scene->registry());
 }
 
 void emit_barrier(VkCommandBuffer cmd,
@@ -819,9 +845,12 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     resize_viewport(*this);
   }
 
-  for (auto &&[e, xt, m] :
-       active_scene->group<Components::Transform, Components::Mesh>().each()) {
-    renderer->submit(m.handle, cached_matrix(e, xt), forward_pipeline.get(),
+  auto render_group =
+      active_scene->group<Components::Transform, Components::LocalToWorld,
+                          Components::Mesh>();
+
+  for (auto &&[e, xt, ltw, m] : render_group.each()) {
+    renderer->submit(m.handle, ltw.matrix, forward_pipeline.get(),
                      resolve_material_slot({*active_scene, e}));
   }
   auto [view, projection] = resolve_camera();
