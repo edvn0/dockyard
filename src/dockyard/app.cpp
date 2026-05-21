@@ -416,6 +416,16 @@ auto DeletionQueue::on_destroy(Fn &&fn) -> void {
   on_app_exit.push_back(std::move(fn));
 }
 
+auto DeletionQueue::destroy_at_exit(VkDevice device, VkPipeline pipeline,
+                                    VkPipelineLayout pipeline_layout) -> void {
+  on_app_exit.emplace_back([device, pipeline, pipeline_layout] {
+    if (pipeline != VK_NULL_HANDLE)
+      vkDestroyPipeline(device, pipeline, nullptr);
+    if (pipeline_layout != VK_NULL_HANDLE)
+      vkDestroyPipelineLayout(device, pipeline_layout, nullptr);
+  });
+}
+
 auto DeletionQueue::flush_all() -> void {
   std::ranges::for_each(per_frame, [](auto &v) {
     std::ranges::for_each(v, [](auto &k) { k(); });

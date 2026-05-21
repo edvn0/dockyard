@@ -41,7 +41,6 @@ struct Dockforge : App {
   ViewportResources viewport_resources;
 
   std::optional<glm::vec2> pending_pick;
-  std::optional<glm::mat4> gizmo_prev_model;
   ImGuizmo::OPERATION gizmo_op = ImGuizmo::TRANSLATE;
   VkExtent2D viewport_panel_extent{};
   VkExtent2D viewport_panel_offset{};

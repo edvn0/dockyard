@@ -1,7 +1,7 @@
 #pragma once
 
-#include "dockyard/events.hpp"
 #include <dockyard/context.hpp>
+#include <dockyard/events.hpp>
 #include <dockyard/types.hpp>
 
 #include <tuple>
@@ -45,9 +45,11 @@ struct DeletionQueue {
   auto on_destroy(Fn &&) -> void;
   auto flush_all() -> void;
 
+  auto destroy_at_exit(VkDevice, VkPipeline, VkPipelineLayout) -> void;
+
 private:
   std::array<std::vector<Fn>, frames_in_flight> per_frame{};
-  std::vector<Fn> on_app_exit{};
+  std::vector<Fn> on_app_exit;
   u32 current_frame = 0U;
   auto flush(u32 frame_index) -> void;
 

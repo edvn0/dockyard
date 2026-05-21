@@ -22,9 +22,7 @@ struct alignas(128) MatrixCacheEntry {
 static_assert(sizeof(MatrixCacheEntry) == 128,
               "MatrixCacheEntry must be exactly 2 cache lines.");
 
-// A power-of-two size allows the compiler to optimize the modulo (%) into a
-// bitwise AND
-constexpr usize matrix_cache_size = 256;
+constexpr usize matrix_cache_size = 10242;
 std::array<MatrixCacheEntry, matrix_cache_size> matrix_cache{};
 
 [[nodiscard]] inline auto trs_matches(const MatrixCacheEntry &entry,
@@ -35,18 +33,13 @@ std::array<MatrixCacheEntry, matrix_cache_size> matrix_cache{};
 
 [[nodiscard]] inline auto compute_matrix(const Components::Transform &t)
     -> glm::mat4 {
-  const auto &[pos, rot, scl] = t.get();
-  return glm::translate(glm::mat4{1.0F}, pos) * glm::mat4_cast(rot) *
-         glm::scale(glm::mat4{1.0F}, scl);
+  return t.matrix();
 }
 
 [[nodiscard]] auto cached_matrix_impl(entt::entity e,
                                       const Components::Transform &t)
     -> const glm::mat4 & {
 
-  // O(1) direct mapping via entity ID.
-  // Compiler optimizes this to a fast bitwise AND operation:
-  // (static_cast<usize>(e) & 0xFF)
   const usize cache_index = static_cast<usize>(e) % matrix_cache_size;
   MatrixCacheEntry &entry = matrix_cache[cache_index];
 

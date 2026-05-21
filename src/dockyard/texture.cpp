@@ -192,7 +192,7 @@ auto Texture::destroy(const VulkanContext &ctx) -> void {
   auto sampled = this->sampled_view;
   auto storage = this->storage_view;
   auto alloc = this->allocation;
-  DeletionQueue::get().push([o = this->owned, dev = ctx.device,
+  DeletionQueue::the().push([o = this->owned, dev = ctx.device,
                              allocator = ctx.allocator, image, sampled, storage,
                              alloc]() {
     if (o) {

@@ -75,29 +75,26 @@ struct RenderPass {
     u32 material_id;
     std::vector<u32> instance_ids; // indices into global_instance_data
   };
-
   std::map<u64, DrawBucket> buckets; // key = get_key() result, already ordered
-
-  // Pass-Specific Graphics Inputs (Created in bake)
-  std::unique_ptr<Buffer> indirect_buffer{nullptr};
-  std::unique_ptr<Buffer> count_buffer{nullptr};
-  std::unique_ptr<Buffer> index_remapping_buffer{nullptr};
-  std::unique_ptr<Buffer> instance_to_command_buffer{nullptr};
-
-  // Pass-Specific Compute Outputs (Filled in culling)
-  std::unique_ptr<Buffer> culled_index_remapping_buffer{nullptr};
-
   struct Batch {
     u32 pipeline_id;
     u32 max_command_count;
     u32 first_command_index;
     u32 count_buffer_offset;
   };
-  std::vector<Batch> batches{};
+  std::vector<Batch> batches;
+  struct FrameWorkspace {
+    std::unique_ptr<Buffer> indirect_buffer;
+    std::unique_ptr<Buffer> count_buffer;
+    std::unique_ptr<Buffer> instance_to_command_buffer;
+    std::unique_ptr<Buffer> index_remapping_buffer;
+    std::unique_ptr<Buffer> culled_index_remapping_buffer;
+  };
+  std::array<FrameWorkspace, frames_in_flight> frame_workspaces{};
 
-  void ensure_capacity(usize command_count, usize instance_count,
-                       usize batch_count, usize total_global_instances);
-  void bake(usize total_global_instances);
+  auto ensure_capacity(usize command_count, usize instance_count,
+                       usize batch_count, usize total_global_instances) -> bool;
+  auto bake(usize) -> bool;
 };
 
 struct InstanceData {
@@ -228,8 +225,8 @@ struct SceneRenderer {
   void ensure_global_capacity(usize instance_count);
 
   // Prepare should setup frame index.
-  void prepare(u64 frame_index, const glm::mat4 &view,
-               const glm::mat4 &projection);
+  auto prepare(u64 frame_index, const glm::mat4 &view,
+               const glm::mat4 &projection) -> bool;
 
   void submit(MeshHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
               u32 material_id = 0U);

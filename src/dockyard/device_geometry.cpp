@@ -182,7 +182,7 @@ auto GeometryPool::allocate_materials(std::span<const MaterialAsset> mats)
 
 [[nodiscard]] auto GeometryPool::get_materials(u32 base_slot, u32 count) const
     -> std::span<const GPUMaterial> {
-  auto *ptr =
+  const auto *ptr =
       static_cast<const GPUMaterial *>(material_buffer->get_mapped_pointer());
   assert(base_slot + count <= material_offset && "out of range material read");
   return {ptr + base_slot, count};

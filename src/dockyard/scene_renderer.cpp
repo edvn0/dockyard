@@ -10,6 +10,130 @@
 
 namespace dy {
 
+namespace {
+
+auto compute_cascade_splits(float near_z, float far_z, float lambda = 0.85f)
+    -> std::array<float, shadow_map_cascade_count> {
+  std::array<float, shadow_map_cascade_count> splits{};
+  const float range = far_z - near_z;
+  const float ratio = far_z / near_z;
+
+  for (u32 i = 0; i < shadow_map_cascade_count; ++i) {
+    const float p = static_cast<float>(i + 1) /
+                    static_cast<float>(shadow_map_cascade_count);
+    const float log_split = near_z * std::pow(ratio, p);
+    const float uni_split = near_z + range * p;
+    splits[i] = lambda * log_split + (1.0f - lambda) * uni_split;
+  }
+  return splits;
+}
+
+// Generic — works for both standard and reverse-Z projections.
+// Reverse-Z: near_z -> 1.0, far_z -> 0.0.
+auto split_to_ndc_z(const glm::mat4 &proj, float view_z) -> float {
+  const glm::vec4 clip = proj * glm::vec4(0.0f, 0.0f, view_z, 1.0f);
+  return clip.z / clip.w;
+}
+
+// z_near_ndc / z_far_ndc are in the camera's NDC convention.
+// Reverse-Z: pass z_near_ndc=1.0, z_far_ndc<1.0 for each cascade.
+auto frustum_corners_world(const glm::mat4 &inv_view_proj, float z_near_ndc,
+                           float z_far_ndc) -> std::array<glm::vec3, 8> {
+  const glm::vec4 ndc[8] = {
+      {-1.0f, 1.0f, z_near_ndc, 1.0f}, {1.0f, 1.0f, z_near_ndc, 1.0f},
+      {1.0f, -1.0f, z_near_ndc, 1.0f}, {-1.0f, -1.0f, z_near_ndc, 1.0f},
+      {-1.0f, 1.0f, z_far_ndc, 1.0f},  {1.0f, 1.0f, z_far_ndc, 1.0f},
+      {1.0f, -1.0f, z_far_ndc, 1.0f},  {-1.0f, -1.0f, z_far_ndc, 1.0f},
+  };
+
+  std::array<glm::vec3, 8> corners;
+  for (u32 i = 0; i < 8; ++i) {
+    const glm::vec4 world = inv_view_proj * ndc[i];
+    const float w = std::abs(world.w) > 1e-5f ? world.w : 1.0f;
+    corners[i] = glm::vec3(world) / w;
+  }
+  return corners;
+}
+
+// light_toward_sun: unit vector pointing *toward* the sun.
+// This is the L vector used in dot(N, L) diffuse lighting — i.e. (0, 1, 0)
+// for a sun directly overhead.
+//
+// Shadow maps use standard (non-reversed) Z.  Ortho projections do not have
+// the precision cliffs that motivate reverse-Z, and standard Z keeps the
+// sampler comparison op straightforward (VK_COMPARE_OP_LESS_OR_EQUAL).
+auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
+                     float prev_split_ndc, float curr_split_ndc,
+                     float curr_split_view, const glm::vec3 &light_toward_sun)
+    -> CascadeData {
+  const glm::mat4 inv_view_proj = glm::inverse(camera_proj * camera_view);
+  const auto corners =
+      frustum_corners_world(inv_view_proj, prev_split_ndc, curr_split_ndc);
+
+  // --- 1. Minimum bounding sphere ---
+  glm::vec3 center(0.0f);
+  for (const auto &c : corners)
+    center += c;
+  center /= 8.0f;
+
+  float radius = 0.0f;
+  for (const auto &c : corners)
+    radius = std::max(radius, glm::distance(c, center));
+
+  // Snap radius to texel grid to prevent cascade size shimmer.
+  radius = std::ceil(radius * 16.0f) / 16.0f;
+
+  // --- 2. Light-view matrix ---
+  // Eye is placed behind the scene *in the direction of the sun*, so the
+  // camera looks from the sun's side toward the scene (correct orientation).
+  //
+  // z_extent is how far the eye is from center in light-view space.
+  // The 500-unit margin buys depth for shadow casters behind the view frustum.
+  const glm::vec3 up = std::abs(light_toward_sun.y) > 0.99f
+                           ? glm::vec3(0.0f, 0.0f, 1.0f)
+                           : glm::vec3(0.0f, 1.0f, 0.0f);
+  const float z_extent = radius + 500.0f;
+  const glm::vec3 eye = center + light_toward_sun * z_extent;
+  glm::mat4 light_view = glm::lookAtLH(eye, center, up);
+
+  // --- 3. Texel snapping ---
+  // Transform the world origin into light-view "texel" space, round it, and
+  // apply the residual as a translation correction.  This keeps the shadow
+  // texel grid stationary as the camera moves, eliminating edge crawl.
+  const float texels_per_unit =
+      static_cast<float>(shadow_map_cascade_resolution) / (radius * 2.0f);
+  glm::vec4 shadow_origin = light_view * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+  shadow_origin *= texels_per_unit;
+
+  const glm::vec4 rounded = glm::round(shadow_origin);
+  glm::vec4 offset = (rounded - shadow_origin) / texels_per_unit;
+  offset.z = 0.0f; // never shift depth — that would break near/far
+  offset.w = 0.0f;
+  light_view[3] += offset;
+
+  // --- 4. Orthographic projection ---
+  // In light-view space the eye is at the origin.  The bounding sphere center
+  // is at Z = z_extent (along +Z, since lookAtLH makes +Z point toward center).
+  // The sphere occupies [z_extent - radius, z_extent + radius] on the Z axis.
+  //
+  // We extend near/far by caster_margin to capture shadow casters that lie
+  // outside the camera frustum but still cast into it.
+  const float caster_margin = 500.0f;
+  const float ortho_near = z_extent - radius - caster_margin;
+  const float ortho_far = z_extent + radius + caster_margin;
+
+  const glm::mat4 light_proj = glm::orthoLH_ZO(-radius, radius, // left, right
+                                               -radius, radius, // bottom, top
+                                               ortho_near, ortho_far);
+
+  return {
+      .view_proj = light_proj * light_view,
+      .split_depth = curr_split_view,
+  };
+}
+
+} // namespace
+
 struct PaddedDrawCommand {
   u32 index_count;
   u32 instance_count;
@@ -259,17 +383,13 @@ auto SceneRenderer::initialise_bindless() -> void {
 
   create_composite_pipeline(ctx.device, bindless.layout,
                             composite_pipeline_layout, composite_pipeline);
-  DeletionQueue::the().on_destroy([dev = ctx.device,
-                                   l = composite_pipeline_layout,
-                                   p = composite_pipeline] {
-    if (p != VK_NULL_HANDLE)
-      vkDestroyPipeline(dev, p, nullptr);
-    if (l != VK_NULL_HANDLE)
-      vkDestroyPipelineLayout(dev, l, nullptr);
-  });
+  DeletionQueue::the().destroy_at_exit(ctx.device, composite_pipeline,
+                                       composite_pipeline_layout);
 
   create_culling_pipeline(ctx.device, bindless.layout, culling_pipeline_layout,
                           culling_pipeline);
+  DeletionQueue::the().destroy_at_exit(ctx.device, culling_pipeline,
+                                       culling_pipeline_layout);
 
   const VkSamplerCreateInfo shadow_ci{
       .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -349,15 +469,6 @@ auto SceneRenderer::resize() -> void {
 auto SceneRenderer::destroy() -> void {
   csm.destroy(ctx.device, ctx.allocator);
 
-  if (composite_pipeline != VK_NULL_HANDLE)
-    vkDestroyPipeline(ctx.device, composite_pipeline, nullptr);
-  if (composite_pipeline_layout != VK_NULL_HANDLE)
-    vkDestroyPipelineLayout(ctx.device, composite_pipeline_layout, nullptr);
-  if (culling_pipeline_layout != VK_NULL_HANDLE)
-    vkDestroyPipelineLayout(ctx.device, culling_pipeline_layout, nullptr);
-  if (culling_pipeline != VK_NULL_HANDLE)
-    vkDestroyPipeline(ctx.device, culling_pipeline, nullptr);
-
   bindless.destroy();
 
   std::ranges::for_each(textures.mutable_data(), [&c = ctx](auto &v) {
@@ -366,13 +477,13 @@ auto SceneRenderer::destroy() -> void {
   });
   std::ranges::for_each(samplers.mutable_data(), [&c = ctx](auto &v) {
     auto &&[sampler] = v.object;
-    DeletionQueue::get().push(
+    DeletionQueue::the().push(
         [dev = c.device, s = sampler] { vkDestroySampler(dev, s, nullptr); });
   });
   std::ranges::for_each(
       comparison_samplers.mutable_data(), [&c = ctx](auto &v) {
         auto &&[sampler] = v.object;
-        DeletionQueue::get().push([dev = c.device, s = sampler] {
+        DeletionQueue::the().push([dev = c.device, s = sampler] {
           vkDestroySampler(dev, s, nullptr);
         });
       });
@@ -471,11 +582,11 @@ auto extract_frustum_planes(const glm::mat4 &vp)
 }
 }
 
-void SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
-                            const glm::mat4 &projection) {
+auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
+                            const glm::mat4 &projection) -> bool {
   current_frame_index = frame_index;
   if (submission_queue.empty())
-    return;
+    return false;
 
   ensure_global_capacity(submission_queue.size());
   global_instance_data.clear();
@@ -507,8 +618,12 @@ void SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
   };
 
   frame_ubo_buffers.at(frame_index)->upload(std::span(&ubo, 1));
-  depth_prepass.bake(global_instance_data.size());
-  forward_pass.bake(global_instance_data.size());
+  if (!depth_prepass.bake(global_instance_data.size())) {
+    return false;
+  }
+  if (!forward_pass.bake(global_instance_data.size())) {
+    return false;
+  }
 
   for (auto &v : depth_prepass.buckets | std::views::values) {
     v.instance_ids.clear();
@@ -517,6 +632,7 @@ void SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
     v.instance_ids.clear();
   }
   submission_queue.clear();
+  return true;
 }
 
 void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
@@ -525,6 +641,7 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
   if (pass.batches.empty())
     return;
 
+  auto &ws = pass.frame_workspaces.at(current_frame_index);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
                           0U, 1U, &bindless.set, 0U, nullptr);
 
@@ -543,7 +660,7 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
           },
       .culled_index_remapping_buffer =
           DeviceAddress{
-              pass.culled_index_remapping_buffer->get_device_address(),
+              ws.culled_index_remapping_buffer->get_device_address(),
           },
       .frame_ubo =
           DeviceAddress{
@@ -563,9 +680,9 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
     vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_ALL, 0u,
                        sizeof(GpuPushConstants), &push_constants);
     vkCmdDrawIndexedIndirectCount(
-        cmd, pass.indirect_buffer->get_buffer(),
+        cmd, ws.indirect_buffer->get_buffer(),
         batch.first_command_index * sizeof(PaddedDrawCommand),
-        pass.count_buffer->get_buffer(), batch.count_buffer_offset,
+        ws.count_buffer->get_buffer(), batch.count_buffer_offset,
         batch.max_command_count, sizeof(PaddedDrawCommand));
   }
 }
@@ -589,45 +706,51 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
   if (geometry_count == 0 || depth_prepass.batches.empty() ||
       forward_pass.batches.empty())
     return;
-
+  auto &depth_ws = depth_prepass.frame_workspaces.at(current_frame_index);
+  auto &forward_ws = forward_pass.frame_workspaces.at(current_frame_index);
   {
     static constexpr u32 zero_value = 0U;
-    u32 depth_cmd_count = static_cast<u32>(
-        depth_prepass.indirect_buffer->size() / sizeof(PaddedDrawCommand));
+    u32 depth_cmd_count = static_cast<u32>(depth_ws.indirect_buffer->size() /
+                                           sizeof(PaddedDrawCommand));
     for (u32 i = 0; i < depth_cmd_count; ++i) {
       VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
                             offsetof(PaddedDrawCommand, instance_count);
-      vkCmdUpdateBuffer(cmd, depth_prepass.indirect_buffer->get_buffer(),
-                        offset, sizeof(u32), &zero_value);
+      vkCmdUpdateBuffer(cmd, depth_ws.indirect_buffer->get_buffer(), offset,
+                        sizeof(u32), &zero_value);
     }
 
     u32 forward_cmd_count = static_cast<u32>(
-        forward_pass.indirect_buffer->size() / sizeof(PaddedDrawCommand));
+        forward_ws.indirect_buffer->size() / sizeof(PaddedDrawCommand));
     for (u32 i = 0; i < forward_cmd_count; ++i) {
       VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
                             offsetof(PaddedDrawCommand, instance_count);
-      vkCmdUpdateBuffer(cmd, forward_pass.indirect_buffer->get_buffer(), offset,
+      vkCmdUpdateBuffer(cmd, forward_ws.indirect_buffer->get_buffer(), offset,
                         sizeof(u32), &zero_value);
     }
   }
 
   VkBufferMemoryBarrier2 clear_barriers[2] = {
-      {.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-       .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-       .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-       .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-       .dstAccessMask =
-           VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-       .buffer = depth_prepass.indirect_buffer->get_buffer(),
-       .size = VK_WHOLE_SIZE},
-      {.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-       .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-       .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-       .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-       .dstAccessMask =
-           VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-       .buffer = forward_pass.indirect_buffer->get_buffer(),
-       .size = VK_WHOLE_SIZE}};
+      {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask =
+              VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+          .buffer = depth_ws.indirect_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask =
+              VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+          .buffer = forward_ws.indirect_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+  };
 
   VkDependencyInfo clear_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
                              .bufferMemoryBarrierCount = 2U,
@@ -640,22 +763,21 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
           frame_ubo_buffers.at(current_frame_index)->get_device_address(),
 
       .depth_original_remap_buffer =
-          depth_prepass.index_remapping_buffer->get_device_address(),
+          depth_ws.index_remapping_buffer->get_device_address(),
       .depth_instance_to_command_buffer =
-          depth_prepass.instance_to_command_buffer->get_device_address(),
-      .depth_indirect_commands =
-          depth_prepass.indirect_buffer->get_device_address(),
+          depth_ws.instance_to_command_buffer->get_device_address(),
+      .depth_indirect_commands = depth_ws.indirect_buffer->get_device_address(),
       .depth_culled_remap =
-          depth_prepass.culled_index_remapping_buffer->get_device_address(),
+          depth_ws.culled_index_remapping_buffer->get_device_address(),
 
       .forward_original_remap_buffer =
-          forward_pass.index_remapping_buffer->get_device_address(),
+          forward_ws.index_remapping_buffer->get_device_address(),
       .forward_instance_to_command_buffer =
-          forward_pass.instance_to_command_buffer->get_device_address(),
+          forward_ws.instance_to_command_buffer->get_device_address(),
       .forward_indirect_commands =
-          forward_pass.indirect_buffer->get_device_address(),
+          forward_ws.indirect_buffer->get_device_address(),
       .forward_culled_remap =
-          forward_pass.culled_index_remapping_buffer->get_device_address(),
+          forward_ws.culled_index_remapping_buffer->get_device_address(),
       .total_instance_count = static_cast<u32>(geometry_count),
   };
 
@@ -677,7 +799,7 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
           .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
           .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
           .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-          .buffer = depth_prepass.indirect_buffer->get_buffer(),
+          .buffer = depth_ws.indirect_buffer->get_buffer(),
           .size = VK_WHOLE_SIZE,
       },
       {
@@ -686,7 +808,7 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
           .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
           .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
           .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-          .buffer = forward_pass.indirect_buffer->get_buffer(),
+          .buffer = forward_ws.indirect_buffer->get_buffer(),
           .size = VK_WHOLE_SIZE,
       },
       // Culled Remapping Arrays
@@ -696,7 +818,7 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
           .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
           .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
           .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-          .buffer = depth_prepass.culled_index_remapping_buffer->get_buffer(),
+          .buffer = depth_ws.culled_index_remapping_buffer->get_buffer(),
           .size = VK_WHOLE_SIZE,
       },
       {
@@ -705,7 +827,7 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
           .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
           .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
           .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-          .buffer = forward_pass.culled_index_remapping_buffer->get_buffer(),
+          .buffer = forward_ws.culled_index_remapping_buffer->get_buffer(),
           .size = VK_WHOLE_SIZE,
       },
   };
@@ -715,51 +837,53 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
                             .pBufferMemoryBarriers = post_cull_barriers};
   vkCmdPipelineBarrier2(cmd, &post_dep);
 }
-
-void RenderPass::ensure_capacity(usize command_count, usize instance_count,
+auto RenderPass::ensure_capacity(usize command_count, usize instance_count,
                                  usize batch_count,
-                                 usize total_global_instances) {
+                                 usize total_global_instances) -> bool {
   constexpr VkBufferUsageFlags indirect_flags =
       VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
   constexpr VkBufferUsageFlags storage_flags =
       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
-  if (!indirect_buffer ||
-      indirect_buffer->size() < command_count * sizeof(PaddedDrawCommand)) {
-    indirect_buffer =
-        Buffer::create(allocator, command_count * sizeof(PaddedDrawCommand),
-                       indirect_flags | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT);
-  }
-  if (!count_buffer || count_buffer->size() < batch_count * sizeof(u32)) {
-    count_buffer =
-        Buffer::create(allocator, batch_count * sizeof(u32), indirect_flags);
-  }
+  usize indirect_needed = command_count * sizeof(PaddedDrawCommand);
+  usize count_needed = batch_count * sizeof(u32);
+  usize global_needed = total_global_instances * sizeof(u32);
+  usize instance_needed = instance_count * sizeof(u32);
 
-  if (!instance_to_command_buffer || instance_to_command_buffer->size() <
-                                         total_global_instances * sizeof(u32)) {
-    instance_to_command_buffer = Buffer::create(
-        allocator, total_global_instances * sizeof(u32), storage_flags);
-  }
-  if (!index_remapping_buffer ||
-      index_remapping_buffer->size() < instance_count * sizeof(u32)) {
-    index_remapping_buffer =
-        Buffer::create(allocator, instance_count * sizeof(u32), storage_flags);
-  }
-  if (!culled_index_remapping_buffer ||
-      culled_index_remapping_buffer->size() < instance_count * sizeof(u32)) {
-    culled_index_remapping_buffer =
-        Buffer::create(allocator, instance_count * sizeof(u32), storage_flags);
-  }
+  VmaAllocatorInfo allocator_info{};
+  vmaGetAllocatorInfo(allocator, &allocator_info);
+
+  auto &ws = frame_workspaces.at(current_frame_index);
+
+  auto ensure_buffer = [alloc = allocator, dev = allocator_info.device](
+                           std::unique_ptr<Buffer> &buffer, usize needed_size,
+                           VkBufferUsageFlags flags) {
+    if (!buffer || buffer->size() < needed_size) {
+      if (buffer) {
+        vkDeviceWaitIdle(dev);
+      }
+      buffer = Buffer::create(alloc, needed_size, flags);
+    }
+  };
+
+  ensure_buffer(ws.indirect_buffer, indirect_needed,
+                indirect_flags | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT);
+  ensure_buffer(ws.count_buffer, count_needed, indirect_flags);
+  ensure_buffer(ws.instance_to_command_buffer, global_needed, storage_flags);
+  ensure_buffer(ws.index_remapping_buffer, instance_needed, storage_flags);
+  ensure_buffer(ws.culled_index_remapping_buffer, instance_needed,
+                storage_flags);
+
+  return true;
 }
 
-void RenderPass::bake(usize total_global_instances) {
+auto RenderPass::bake(usize total_global_instances) -> bool {
   std::vector<PaddedDrawCommand> commands;
   std::vector<u32> remapped_indices;
   std::vector<u32> draw_counts;
   std::vector<u32> instance_to_commands(total_global_instances, 0xFFFFFFFF);
 
   batches.clear();
-
   u32 current_pipeline = ~0U;
 
   for (auto &&[key, bucket] : buckets) {
@@ -793,16 +917,19 @@ void RenderPass::bake(usize total_global_instances) {
       instance_to_commands[iid] = cmd_idx;
     }
 
-    bucket.instance_ids.clear(); // reset for next frame in-place
+    bucket.instance_ids.clear();
   }
 
   ensure_capacity(commands.size(), remapped_indices.size(), draw_counts.size(),
                   total_global_instances);
 
-  indirect_buffer->upload(commands);
-  count_buffer->upload(draw_counts);
-  index_remapping_buffer->upload(remapped_indices);
-  instance_to_command_buffer->upload(instance_to_commands);
+  auto &ws = frame_workspaces.at(current_frame_index);
+  ws.indirect_buffer->upload_with_offset(commands, 0);
+  ws.count_buffer->upload_with_offset(draw_counts, 0);
+  ws.index_remapping_buffer->upload_with_offset(remapped_indices, 0);
+  ws.instance_to_command_buffer->upload_with_offset(instance_to_commands, 0);
+
+  return true;
 }
 
 [[nodiscard]] constexpr auto PendingDraw::get_key(RenderPassType pass) const
@@ -821,6 +948,7 @@ void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
   if (pass.batches.empty())
     return;
 
+  auto &ws = pass.frame_workspaces.at(current_frame_index);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
                           0U, 1u, &bindless.set, 0u, nullptr);
   vkCmdBindIndexBuffer(cmd, geometry_pool->index_buffer->get_buffer(), 0u,
@@ -842,7 +970,7 @@ void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
           },
       .culled_index_remapping_buffer =
           DeviceAddress{
-              pass.culled_index_remapping_buffer->get_device_address(),
+              ws.culled_index_remapping_buffer->get_device_address(),
           },
       .frame_ubo =
           DeviceAddress{
@@ -861,133 +989,11 @@ void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
 
   for (const auto &batch : pass.batches) {
     vkCmdDrawIndexedIndirectCount(
-        cmd, pass.indirect_buffer->get_buffer(),
+        cmd, ws.indirect_buffer->get_buffer(),
         batch.first_command_index * sizeof(PaddedDrawCommand),
-        pass.count_buffer->get_buffer(), batch.count_buffer_offset,
+        ws.count_buffer->get_buffer(), batch.count_buffer_offset,
         batch.max_command_count, sizeof(PaddedDrawCommand));
   }
-}
-
-static auto compute_cascade_splits(float near_z, float far_z,
-                                   float lambda = 0.85f)
-    -> std::array<float, shadow_map_cascade_count> {
-  std::array<float, shadow_map_cascade_count> splits{};
-  const float range = far_z - near_z;
-  const float ratio = far_z / near_z;
-
-  for (u32 i = 0; i < shadow_map_cascade_count; ++i) {
-    const float p = static_cast<float>(i + 1) /
-                    static_cast<float>(shadow_map_cascade_count);
-    const float log_split = near_z * std::pow(ratio, p);
-    const float uni_split = near_z + range * p;
-    splits[i] = lambda * log_split + (1.0f - lambda) * uni_split;
-  }
-  return splits;
-}
-
-// Generic — works for both standard and reverse-Z projections.
-// Reverse-Z: near_z -> 1.0, far_z -> 0.0.
-static auto split_to_ndc_z(const glm::mat4 &proj, float view_z) -> float {
-  const glm::vec4 clip = proj * glm::vec4(0.0f, 0.0f, view_z, 1.0f);
-  return clip.z / clip.w;
-}
-
-// z_near_ndc / z_far_ndc are in the camera's NDC convention.
-// Reverse-Z: pass z_near_ndc=1.0, z_far_ndc<1.0 for each cascade.
-static auto frustum_corners_world(const glm::mat4 &inv_view_proj,
-                                  float z_near_ndc, float z_far_ndc)
-    -> std::array<glm::vec3, 8> {
-  const glm::vec4 ndc[8] = {
-      {-1.0f, 1.0f, z_near_ndc, 1.0f}, {1.0f, 1.0f, z_near_ndc, 1.0f},
-      {1.0f, -1.0f, z_near_ndc, 1.0f}, {-1.0f, -1.0f, z_near_ndc, 1.0f},
-      {-1.0f, 1.0f, z_far_ndc, 1.0f},  {1.0f, 1.0f, z_far_ndc, 1.0f},
-      {1.0f, -1.0f, z_far_ndc, 1.0f},  {-1.0f, -1.0f, z_far_ndc, 1.0f},
-  };
-
-  std::array<glm::vec3, 8> corners;
-  for (u32 i = 0; i < 8; ++i) {
-    const glm::vec4 world = inv_view_proj * ndc[i];
-    const float w = std::abs(world.w) > 1e-5f ? world.w : 1.0f;
-    corners[i] = glm::vec3(world) / w;
-  }
-  return corners;
-}
-
-// light_toward_sun: unit vector pointing *toward* the sun.
-// This is the L vector used in dot(N, L) diffuse lighting — i.e. (0, 1, 0)
-// for a sun directly overhead.
-//
-// Shadow maps use standard (non-reversed) Z.  Ortho projections do not have
-// the precision cliffs that motivate reverse-Z, and standard Z keeps the
-// sampler comparison op straightforward (VK_COMPARE_OP_LESS_OR_EQUAL).
-static auto compute_cascade(const glm::mat4 &camera_view,
-                            const glm::mat4 &camera_proj, float prev_split_ndc,
-                            float curr_split_ndc, float curr_split_view,
-                            const glm::vec3 &light_toward_sun) -> CascadeData {
-  const glm::mat4 inv_view_proj = glm::inverse(camera_proj * camera_view);
-  const auto corners =
-      frustum_corners_world(inv_view_proj, prev_split_ndc, curr_split_ndc);
-
-  // --- 1. Minimum bounding sphere ---
-  glm::vec3 center(0.0f);
-  for (const auto &c : corners)
-    center += c;
-  center /= 8.0f;
-
-  float radius = 0.0f;
-  for (const auto &c : corners)
-    radius = std::max(radius, glm::distance(c, center));
-
-  // Snap radius to texel grid to prevent cascade size shimmer.
-  radius = std::ceil(radius * 16.0f) / 16.0f;
-
-  // --- 2. Light-view matrix ---
-  // Eye is placed behind the scene *in the direction of the sun*, so the
-  // camera looks from the sun's side toward the scene (correct orientation).
-  //
-  // z_extent is how far the eye is from center in light-view space.
-  // The 500-unit margin buys depth for shadow casters behind the view frustum.
-  const glm::vec3 up = std::abs(light_toward_sun.y) > 0.99f
-                           ? glm::vec3(0.0f, 0.0f, 1.0f)
-                           : glm::vec3(0.0f, 1.0f, 0.0f);
-  const float z_extent = radius + 500.0f;
-  const glm::vec3 eye = center + light_toward_sun * z_extent;
-  glm::mat4 light_view = glm::lookAtLH(eye, center, up);
-
-  // --- 3. Texel snapping ---
-  // Transform the world origin into light-view "texel" space, round it, and
-  // apply the residual as a translation correction.  This keeps the shadow
-  // texel grid stationary as the camera moves, eliminating edge crawl.
-  const float texels_per_unit =
-      static_cast<float>(shadow_map_cascade_resolution) / (radius * 2.0f);
-  glm::vec4 shadow_origin = light_view * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
-  shadow_origin *= texels_per_unit;
-
-  const glm::vec4 rounded = glm::round(shadow_origin);
-  glm::vec4 offset = (rounded - shadow_origin) / texels_per_unit;
-  offset.z = 0.0f; // never shift depth — that would break near/far
-  offset.w = 0.0f;
-  light_view[3] += offset;
-
-  // --- 4. Orthographic projection ---
-  // In light-view space the eye is at the origin.  The bounding sphere center
-  // is at Z = z_extent (along +Z, since lookAtLH makes +Z point toward center).
-  // The sphere occupies [z_extent - radius, z_extent + radius] on the Z axis.
-  //
-  // We extend near/far by caster_margin to capture shadow casters that lie
-  // outside the camera frustum but still cast into it.
-  const float caster_margin = 500.0f;
-  const float ortho_near = z_extent - radius - caster_margin;
-  const float ortho_far = z_extent + radius + caster_margin;
-
-  const glm::mat4 light_proj = glm::orthoLH_ZO(-radius, radius, // left, right
-                                               -radius, radius, // bottom, top
-                                               ortho_near, ortho_far);
-
-  return {
-      .view_proj = light_proj * light_view,
-      .split_depth = curr_split_view,
-  };
 }
 
 void SceneRenderer::update_csm(const glm::mat4 &view, const glm::mat4 &proj,

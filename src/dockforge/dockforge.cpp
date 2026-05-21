@@ -327,7 +327,6 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
   }
 
   state.selected = best;
-  gizmo_prev_model.reset();
 }
 
 void Dockforge::refresh_entity_cache() {
@@ -606,120 +605,107 @@ auto Dockforge::build_ui() -> void {
   MutableMaterialView selected_entity_materials{};
 
   if (state.selected != entt::null) {
-    Entity entity{*active_scene, state.selected};
-    auto &transform = entity.get<Components::Transform>();
+    Entity selected_entity{*active_scene, state.selected};
+    auto &transform = selected_entity.get<Components::Transform>();
     auto &&[view, proj] = resolve_camera();
 
-    glm::mat4 model =
-        cached_matrix(state.selected, entity.get<Components::Transform>());
-
+    auto matrix = selected_entity.get<Components::Transform>().matrix();
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj), gizmo_op,
-                         ImGuizmo::LOCAL, glm::value_ptr(model));
+                         ImGuizmo::LOCAL, glm::value_ptr(matrix));
 
     if (ImGuizmo::IsUsing()) {
-      if (!gizmo_prev_model.has_value()) {
-        gizmo_prev_model =
-            cached_matrix(state.selected, entity.get<Components::Transform>());
+      glm::vec3 new_pos;
+      glm::vec3 new_scale;
+      glm::vec3 skew;
+      glm::vec4 persp;
+      glm::quat new_rot;
+
+      if (glm::decompose(matrix, new_scale, new_rot, new_pos, skew, persp)) {
+        auto &&[pos, rot, scale] = transform.mut();
+        pos = new_pos;
+        rot = glm::normalize(new_rot);
+        scale = new_scale;
       }
-
-      const glm::mat4 delta = glm::inverse(*gizmo_prev_model) * model;
-      glm::vec3 delta_translation;
-      glm::vec3 delta_scale;
-      glm::vec3 delta_skew;
-      glm::vec4 delta_perspective;
-      glm::quat delta_rotation;
-
-      if (glm::decompose(delta, delta_scale, delta_rotation, delta_translation,
-                         delta_skew, delta_perspective)) {
-        auto &&[prev_translation, prev_rotation, prev_scale] = transform.mut();
-        prev_translation += delta_translation;
-        prev_rotation = glm::normalize(delta_rotation * prev_rotation);
-        prev_scale *= delta_scale;
-      }
-
-      gizmo_prev_model = model;
-    } else {
-      gizmo_prev_model.reset();
     }
 
-    if (auto *mesh = entity.try_get<Components::Mesh>()) {
+    if (auto *mesh = selected_entity.try_get<Components::Mesh>()) {
       auto *resolved = renderer->get_mesh(*mesh);
-      canvas_renderer->box(remove_rotation(model), resolved->mesh_aabb,
+      canvas_renderer->box(remove_rotation(matrix), resolved->mesh_aabb,
                            glm::vec4{0.1, 0.9, 0.2, 1.0F});
 
       selected_entity_materials = renderer->get_material_view_mut(*mesh);
     }
-
-    if (ImGui::Begin("Materials")) {
-      if (state.selected == entt::null) {
-        ImGui::TextDisabled("No entity selected");
-        ImGui::End();
-      } else {
-        Entity entity{*active_scene, state.selected};
-        auto *mesh = entity.try_get<Components::Mesh>();
-
-        if (auto *ov = entity.try_get<Components::MaterialOverride>()) {
-          ImGui::TextDisabled("Override active");
-          ImGui::SameLine();
-
-          ImGui::PushStyleColor(ImGuiCol_Button,
-                                ImVec4{0.55F, 0.15F, 0.15F, 1.0F});
-          ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                                ImVec4{0.75F, 0.20F, 0.20F, 1.0F});
-          ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-                                ImVec4{0.90F, 0.25F, 0.25F, 1.0F});
-          bool was_removed = false;
-          if (ImGui::SmallButton("Remove Override")) {
-            remove_override(entity);
-            was_removed = true;
-          }
-          ImGui::PopStyleColor(3);
-
-          if (!was_removed) {
-            ImGui::Separator();
-            ImGui::PushID("override");
-            if (draw_material_editor(ov->material))
-              ov->dirty = true;
-            ImGui::PopID();
-          }
-
-        } else if (mesh != nullptr) {
-          auto mats = renderer->get_material_view_mut(*mesh);
-
-          if (mats.empty()) {
-            ImGui::TextDisabled("Mesh has no materials");
-          } else {
-            for (u32 i = 0; i < mats.size(); ++i) {
-              ImGui::PushID(static_cast<int>(i));
-              if (ImGui::CollapsingHeader(
-                      std::format("Material {}", i).c_str())) {
-                if (draw_material_editor(mats[i]) &&
-                    ImGui::IsItemDeactivatedAfterEdit())
-                  renderer->geometry_pool->flush_material(mats.slot(i));
-              }
-              ImGui::PopID();
-            }
-
-            ImGui::Separator();
-            if (ImGui::Button("Add Override")) {
-              auto &new_ov = entity.emplace<Components::MaterialOverride>();
-              new_ov.material = mats.first();
-            }
-            if (ImGui::IsItemHovered())
-              ImGui::SetTooltip("Stamps a single-material override.");
-          }
-
-        } else {
-          ImGui::TextDisabled("No mesh component");
-        }
-
-        ImGui::End();
-      }
-    }
   }
   ImGui::End();
 
-  ImGui::ShowDemoWindow();
+  if (ImGui::Begin("Materials")) {
+    Entity selected_entity{*active_scene, state.selected};
+    if (!selected_entity.valid()) {
+      ImGui::TextDisabled("No entity selected");
+      ImGui::End();
+    } else {
+      auto *mesh = selected_entity.try_get<Components::Mesh>();
+
+      if (auto *material_override =
+              selected_entity.try_get<Components::MaterialOverride>()) {
+        ImGui::TextDisabled("Override active");
+        ImGui::SameLine();
+
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              ImVec4{0.55F, 0.15F, 0.15F, 1.0F});
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+                              ImVec4{0.75F, 0.20F, 0.20F, 1.0F});
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+                              ImVec4{0.90F, 0.25F, 0.25F, 1.0F});
+        bool was_removed = false;
+        if (ImGui::SmallButton("Remove Override")) {
+          remove_override(selected_entity);
+          was_removed = true;
+        }
+        ImGui::PopStyleColor(3);
+
+        if (!was_removed) {
+          ImGui::Separator();
+          ImGui::PushID("override");
+          if (draw_material_editor(material_override->material))
+            material_override->dirty = true;
+          ImGui::PopID();
+        }
+
+      } else if (mesh != nullptr) {
+        auto mats = renderer->get_material_view_mut(*mesh);
+
+        if (mats.empty()) {
+          ImGui::TextDisabled("Mesh has no materials");
+        } else {
+          for (u32 i = 0; i < mats.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i));
+            if (ImGui::CollapsingHeader(
+                    std::format("Material {}", i).c_str())) {
+              if (draw_material_editor(mats[i]) &&
+                  ImGui::IsItemDeactivatedAfterEdit())
+                renderer->geometry_pool->flush_material(mats.slot(i));
+            }
+            ImGui::PopID();
+          }
+
+          ImGui::Separator();
+          if (ImGui::Button("Add Override")) {
+            auto &new_ov =
+                selected_entity.emplace<Components::MaterialOverride>();
+            new_ov.material = mats.first();
+          }
+          if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Stamps a single-material override.");
+        }
+
+      } else {
+        ImGui::TextDisabled("No mesh component");
+      }
+
+      ImGui::End();
+    }
+  }
 
   draw_debug_shapes();
   canvas_renderer->render_2d();
@@ -857,7 +843,9 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   auto [view, projection] = resolve_camera();
   renderer->update_csm(view, projection, editor_camera->near_plane(),
                        editor_camera->far_plane());
-  renderer->prepare(ctx.frame_index, view, projection);
+  if (!renderer->prepare(ctx.frame_index, view, projection)) {
+    return ctx.next_frame_wait_value();
+  }
 
   if (renderer->bindless.repopulate_if_needed(renderer->textures,
                                               renderer->samplers,

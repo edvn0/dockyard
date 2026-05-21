@@ -25,6 +25,8 @@ public:
 
   explicit Entity(entt::registry &r) : reg(r), entity(reg.create()) {}
 
+  [[nodiscard]] auto valid() const -> bool { return entity != entt::null; }
+  [[nodiscard]] auto id() const -> entt::entity { return entity; }
   [[nodiscard]] auto handle() const -> entt::entity { return entity; }
 
   template <typename T, typename... Args>
