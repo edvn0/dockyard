@@ -56,7 +56,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 #endif
 
   auto renderdoc = renderdoc_init();
-  if (glfwPlatformSupported(GLFW_PLATFORM_WAYLAND)) {
+  if (glfwPlatformSupported(GLFW_PLATFORM_WAYLAND) == GLFW_TRUE) {
     glfwInitHint(GLFW_PLATFORM, GLFW_PLATFORM_WAYLAND);
   }
   if (renderdoc.is_active()) {
@@ -232,7 +232,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
     auto &frame = frames.frame_sync[frame_index];
     vkWaitForFences(ctx.device, 1, &frame.in_flight_fence, VK_TRUE, UINT64_MAX);
-    DeletionQueue::get().begin_frame(frame_index);
+    DeletionQueue::the().begin_frame(frame_index);
 
     auto maybe_index = acquire_swapchain_image(sc, frame);
     if (!maybe_index) {
@@ -260,6 +260,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
                 .extent = sc.swapchain.extent,
             },
         .frame_index = frame_index,
+        .last_frame_index = last_frame_index,
         .wait_value = frame.last_value,
         .image_available = frame.image_available_semaphore,
         .render_finished = image.render_finished_semaphore,
@@ -305,13 +306,14 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
     image_last_frame_id[index] = frame_id;
     frame_id++;
+    last_frame_index = frame_index;
     frame_index = (frame_index + 1) % frames_in_flight;
   }
 
   vkDeviceWaitIdle(ctx.device);
   destroy();
   vkDeviceWaitIdle(ctx.device);
-  DeletionQueue::get().flush_all();
+  DeletionQueue::the().flush_all();
 
   info("Application exited successfully");
   return 0;
@@ -401,7 +403,7 @@ auto glfw_error_logger() -> void {
   error("GLFW error: {}", description);
 }
 
-auto DeletionQueue::get() -> DeletionQueue & {
+auto DeletionQueue::the() -> DeletionQueue & {
   static DeletionQueue instance;
   return instance;
 }
@@ -410,10 +412,15 @@ auto DeletionQueue::push(Fn &&fn) -> void {
   per_frame[current_frame].push_back(std::move(fn));
 }
 
+auto DeletionQueue::on_destroy(Fn &&fn) -> void {
+  on_app_exit.push_back(std::move(fn));
+}
+
 auto DeletionQueue::flush_all() -> void {
   std::ranges::for_each(per_frame, [](auto &v) {
     std::ranges::for_each(v, [](auto &k) { k(); });
   });
+  std::ranges::for_each(on_app_exit, [](auto &fn) { fn(); });
 }
 
 auto DeletionQueue::flush(u32 frame_index) -> void {

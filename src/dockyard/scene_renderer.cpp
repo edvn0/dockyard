@@ -259,6 +259,14 @@ auto SceneRenderer::initialise_bindless() -> void {
 
   create_composite_pipeline(ctx.device, bindless.layout,
                             composite_pipeline_layout, composite_pipeline);
+  DeletionQueue::the().on_destroy([dev = ctx.device,
+                                   l = composite_pipeline_layout,
+                                   p = composite_pipeline] {
+    if (p != VK_NULL_HANDLE)
+      vkDestroyPipeline(dev, p, nullptr);
+    if (l != VK_NULL_HANDLE)
+      vkDestroyPipelineLayout(dev, l, nullptr);
+  });
 
   create_culling_pipeline(ctx.device, bindless.layout, culling_pipeline_layout,
                           culling_pipeline);

@@ -29,14 +29,15 @@ std::array<MatrixCacheEntry, matrix_cache_size> matrix_cache{};
 
 [[nodiscard]] inline auto trs_matches(const MatrixCacheEntry &entry,
                                       const Components::Transform &t) -> bool {
-  return entry.position == t.position && entry.rotation == t.rotation &&
-         entry.scale == t.scale;
+  const auto &[pos, rot, scl] = t.get();
+  return entry.position == pos && entry.rotation == rot && entry.scale == scl;
 }
 
 [[nodiscard]] inline auto compute_matrix(const Components::Transform &t)
     -> glm::mat4 {
-  return glm::translate(glm::mat4{1.0F}, t.position) *
-         glm::mat4_cast(t.rotation) * glm::scale(glm::mat4{1.0F}, t.scale);
+  const auto &[pos, rot, scl] = t.get();
+  return glm::translate(glm::mat4{1.0F}, pos) * glm::mat4_cast(rot) *
+         glm::scale(glm::mat4{1.0F}, scl);
 }
 
 [[nodiscard]] auto cached_matrix_impl(entt::entity e,
@@ -53,9 +54,10 @@ std::array<MatrixCacheEntry, matrix_cache_size> matrix_cache{};
   if (entry.entity == e) {
     if (!trs_matches(entry, t)) [[unlikely]] {
       entry.mat = compute_matrix(t);
-      entry.position = t.position;
-      entry.rotation = t.rotation;
-      entry.scale = t.scale;
+      const auto &[pos, rot, scl] = t.get();
+      entry.position = pos;
+      entry.rotation = rot;
+      entry.scale = scl;
     }
     return entry.mat;
   }
@@ -64,9 +66,10 @@ std::array<MatrixCacheEntry, matrix_cache_size> matrix_cache{};
   // No LRU scans or frame timestamps needed.
   entry.entity = e;
   entry.mat = compute_matrix(t);
-  entry.position = t.position;
-  entry.rotation = t.rotation;
-  entry.scale = t.scale;
+  const auto &[pos, rot, scl] = t.get();
+  entry.position = pos;
+  entry.rotation = rot;
+  entry.scale = scl;
 
   return entry.mat;
 }

@@ -66,7 +66,7 @@ private:
 // ---------------------------------------------------------------------------
 
 template <typename Tag, typename Impl> class Pool {
-  static constexpr u32 k_sentinel = 0xffff'ffffu;
+  static constexpr u32 k_sentinel = 0xffff'ffffU;
 
 public:
   using handle_type = Handle<Tag>;
@@ -84,21 +84,21 @@ public:
   auto create(Impl obj) -> handle_type {
     u32 idx = 0u;
 
-    if (free_head_ != k_sentinel) {
-      idx = free_head_;
-      free_head_ = slots_[idx].next_free;
-      slots_[idx].next_free = k_sentinel;
-      slots_[idx].gen += 1u; // even → odd: mark live
-      slots_[idx].object = std::move(obj);
+    if (freelist_head != k_sentinel) {
+      idx = freelist_head;
+      freelist_head = pool_slots[idx].next_free;
+      pool_slots[idx].next_free = k_sentinel;
+      pool_slots[idx].gen += 1u; // even → odd: mark live
+      pool_slots[idx].object = std::move(obj);
     } else {
-      idx = static_cast<u32>(slots_.size());
-      auto &slot = slots_.emplace_back();
+      idx = static_cast<u32>(pool_slots.size());
+      auto &slot = pool_slots.emplace_back();
       slot.gen = 1u; // first use
       slot.object = std::move(obj);
     }
 
-    ++num_live_;
-    return handle_type{idx, slots_[idx].gen};
+    ++number_alive;
+    return handle_type{idx, pool_slots[idx].gen};
   }
 
   auto destroy(handle_type h) -> void {
@@ -106,15 +106,15 @@ public:
       return;
 
     const u32 idx = h.index();
-    assert(idx < slots_.size() && "index out of range");
-    assert((slots_[idx].gen & 1u) == 1u && "slot is already dead");
-    assert(h.gen() == slots_[idx].gen && "stale handle / double-destroy");
+    assert(idx < pool_slots.size() && "index out of range");
+    assert((pool_slots[idx].gen & 1u) == 1u && "slot is already dead");
+    assert(h.gen() == pool_slots[idx].gen && "stale handle / double-destroy");
 
-    slots_[idx].object = Impl{};
-    slots_[idx].gen += 1u; // odd → even: mark dead
-    slots_[idx].next_free = free_head_;
-    free_head_ = idx;
-    --num_live_;
+    pool_slots[idx].object = Impl{};
+    pool_slots[idx].gen += 1u; // odd → even: mark dead
+    pool_slots[idx].next_free = freelist_head;
+    freelist_head = idx;
+    --number_alive;
   }
 
   // -----------------------------------------------------------------------
@@ -125,54 +125,54 @@ public:
     if (h.empty())
       return nullptr;
     const u32 idx = h.index();
-    assert(idx < slots_.size() && "index out of range");
-    assert(h.gen() == slots_[idx].gen && "stale handle");
-    return &slots_[idx].object;
+    assert(idx < pool_slots.size() && "index out of range");
+    assert(h.gen() == pool_slots[idx].gen && "stale handle");
+    return &pool_slots[idx].object;
   }
 
   [[nodiscard]] auto get(handle_type h) const -> const Impl * {
     if (h.empty())
       return nullptr;
     const u32 idx = h.index();
-    assert(idx < slots_.size() && "index out of range");
-    assert(h.gen() == slots_[idx].gen && "stale handle");
-    return &slots_[idx].object;
+    assert(idx < pool_slots.size() && "index out of range");
+    assert(h.gen() == pool_slots[idx].gen && "stale handle");
+    return &pool_slots[idx].object;
   }
 
   // Reconstruct a valid handle from a raw slot index.
   // Only safe to call when you know the slot is live (e.g. iterating data()
   // after an is_live() check, or fetching the dummy slot at index 0).
   [[nodiscard]] auto handle_at(u32 idx) const -> handle_type {
-    assert(idx < slots_.size() && "index out of range");
+    assert(idx < pool_slots.size() && "index out of range");
     assert(is_live(idx) && "slot is not live");
-    return handle_type{idx, slots_[idx].gen};
+    return handle_type{idx, pool_slots[idx].gen};
   }
 
   [[nodiscard]] auto is_live(u32 idx) const -> bool {
-    return idx < slots_.size() && (slots_[idx].gen & 1u) == 1u;
+    return idx < pool_slots.size() && (pool_slots[idx].gen & 1u) == 1u;
   }
 
   [[nodiscard]] auto data() const -> const std::span<const Slot> {
-    return slots_;
+    return pool_slots;
   }
   [[nodiscard]] auto mutable_data() -> std::span<Slot> {
-    return std::span(slots_);
+    return std::span(pool_slots);
   }
-  [[nodiscard]] auto num_objects() const -> u32 { return num_live_; }
+  [[nodiscard]] auto num_objects() const -> u32 { return number_alive; }
   [[nodiscard]] auto capacity() const -> u32 {
-    return static_cast<u32>(slots_.size());
+    return static_cast<u32>(pool_slots.size());
   }
 
   auto clear() -> void {
-    slots_.clear();
-    free_head_ = k_sentinel;
-    num_live_ = 0u;
+    pool_slots.clear();
+    freelist_head = k_sentinel;
+    number_alive = 0u;
   }
 
 private:
-  std::vector<Slot> slots_;
-  u32 free_head_ = k_sentinel;
-  u32 num_live_ = 0u;
+  std::vector<Slot> pool_slots;
+  u32 freelist_head = k_sentinel;
+  u32 number_alive = 0u;
 };
 
 // ---------------------------------------------------------------------------

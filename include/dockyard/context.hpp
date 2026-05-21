@@ -60,6 +60,7 @@ struct RenderContext {
 
   SwapchainImageView swapchain_image;
   u64 frame_index;
+  u64 last_frame_index;
 
   u64 wait_value;              // Start of this frame's GPU timeline
   VkSemaphore image_available; // Wait on this for the FIRST swapchain touch
@@ -86,7 +87,7 @@ struct ViewportResources {
   TextureHandle forward_target{};
   TextureHandle display_target{};
 
-  auto extent() const { return forward_target_msaa.extent; }
+  [[nodiscard]] auto extent() const { return forward_target_msaa.extent; }
 
   auto resize(const VulkanContext &ctx, SceneRenderer &, u32 width, u32 height)
       -> void;
@@ -100,8 +101,8 @@ struct SwapchainResources {
   std::vector<VkImageView> image_views;
   std::vector<ImageSync> image_sync;
 
-  auto extent() const { return swapchain.extent; }
-  auto format() const { return swapchain.image_format; }
+  [[nodiscard]] auto extent() const { return swapchain.extent; }
+  [[nodiscard]] auto format() const { return swapchain.image_format; }
 
   auto rebuild(const VulkanContext &ctx, VkSurfaceKHR surface, u32 width,
                u32 height) -> void;

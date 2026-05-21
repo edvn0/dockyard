@@ -77,11 +77,37 @@ struct Tag {
   explicit Tag(const std::string_view n) : tag(n) {}
 };
 
-struct Transform {
+class Transform {
+private:
+  struct Accessor {
+    glm::vec3 &position;
+    glm::quat &rotation;
+    glm::vec3 &scale;
+  };
+
+  struct ConstAccessor {
+    const glm::vec3 &position;
+    const glm::quat &rotation;
+    const glm::vec3 &scale;
+  };
+
   glm::vec3 position{};
   glm::quat rotation{};
   glm::vec3 scale{1};
   bool is_dirty{true};
+
+public:
+  auto set_dirty(bool dirty) -> void { is_dirty = dirty; }
+  [[nodiscard]] auto dirty() const -> bool { return is_dirty; }
+
+  [[nodiscard]] auto mut() -> Accessor {
+    is_dirty = true;
+    return {.position = position, .rotation = rotation, .scale = scale};
+  }
+
+  [[nodiscard]] auto get() const -> ConstAccessor {
+    return {.position = position, .rotation = rotation, .scale = scale};
+  }
 
   [[nodiscard]] auto matrix() const -> glm::mat4 {
     glm::mat4 res = glm::translate(glm::mat4(1.0F), position);
@@ -92,7 +118,7 @@ struct Transform {
 };
 
 struct LocalToWorld {
-  glm::mat4 matrix{1.0f};
+  glm::mat4 matrix{1.0F};
 };
 
 struct MaterialOverride {

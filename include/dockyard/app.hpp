@@ -33,7 +33,7 @@ struct DeletionQueue {
   DeletionQueue(DeletionQueue &&) = delete;
   DeletionQueue &operator=(DeletionQueue &&) = delete;
 
-  static auto get() -> DeletionQueue &;
+  static auto the() -> DeletionQueue &;
 
   auto begin_frame(std::unsigned_integral auto frame_index) -> void {
     current_frame = static_cast<u32>(frame_index);
@@ -42,10 +42,12 @@ struct DeletionQueue {
 
   using Fn = std::function<void()>;
   auto push(Fn &&) -> void;
+  auto on_destroy(Fn &&) -> void;
   auto flush_all() -> void;
 
 private:
   std::array<std::vector<Fn>, frames_in_flight> per_frame{};
+  std::vector<Fn> on_app_exit{};
   u32 current_frame = 0U;
   auto flush(u32 frame_index) -> void;
 
@@ -82,6 +84,7 @@ protected:
 private:
   GLFWwindow *window;
   u64 frame_index = 0;
+  u64 last_frame_index = 0;
 
   static auto recreate_swapchain_manually(GLFWwindow *,
                                           const RendererListener &) -> void;

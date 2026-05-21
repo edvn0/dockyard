@@ -171,7 +171,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
         for (int z = 0; z < grid_side; ++z) {
           auto name = std::format("Cube_{}_{}_{}", x, y, z);
           auto entity = scene.make(name);
-          entity.get<Components::Transform>().position = {
+          entity.get<Components::Transform>().mut().position = {
               (static_cast<float>(x) * spacing) - offset,
               (static_cast<float>(y) * spacing) - offset,
               (static_cast<float>(z) * spacing) - offset,
@@ -182,8 +182,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     }
     auto floor = scene.make("Floor");
     floor.emplace<Components::Mesh>(mesh_handle);
-    floor.get<Components::Transform>().scale = {30, 1, 30};
-    floor.get<Components::Transform>().position = {0, -10, 0};
+    floor.get<Components::Transform>().mut().scale = {30, 1, 30};
+    floor.get<Components::Transform>().mut().position = {0, -10, 0};
   }
 
   auto &registry = *renderer->pipeline_registry;
@@ -240,14 +240,14 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   if (loaded) {
     auto entity = active_scene->make("Helmet");
     entity.emplace<Components::Mesh>(*loaded);
-    entity.get<Components::Transform>().position = {-5, 3, 9};
+    entity.get<Components::Transform>().mut().position = {-5, 3, 9};
   }
 
   if (auto loaded_sponza = mesh::load_from_path(
           VFSPath::create("meshes://main_sponza.glb"), *renderer)) {
     auto sponza = active_scene->make("Sponza");
     sponza.emplace<Components::Mesh>(*loaded_sponza);
-    sponza.get<Components::Transform>().position = {-10, 3, 9};
+    sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
   }
 
   auto frustum_entity = active_scene->make("DebugFrustum");
@@ -631,10 +631,10 @@ auto Dockforge::build_ui() -> void {
 
       if (glm::decompose(delta, delta_scale, delta_rotation, delta_translation,
                          delta_skew, delta_perspective)) {
-        transform.position += delta_translation;
-        transform.rotation =
-            glm::normalize(delta_rotation * transform.rotation);
-        transform.scale *= delta_scale;
+        auto &&[prev_translation, prev_rotation, prev_scale] = transform.mut();
+        prev_translation += delta_translation;
+        prev_rotation = glm::normalize(delta_rotation * prev_rotation);
+        prev_scale *= delta_scale;
       }
 
       gizmo_prev_model = model;
@@ -762,18 +762,19 @@ auto update_local_to_world_matrices(entt::registry &registry) -> void {
   for (auto e : render_group) {
     auto &transform = render_group.get<Components::Transform>(e);
 
-    if (!transform.is_dirty)
+    if (!transform.dirty())
       continue;
 
     auto &ltw = render_group.get<Components::LocalToWorld>(e);
 
+    auto &&[position, rotation, scale] = transform.get();
+
     // Compute the matrix
-    ltw.matrix = glm::translate(glm::mat4{1.0F}, transform.position) *
-                 glm::mat4_cast(transform.rotation) *
-                 glm::scale(glm::mat4{1.0F}, transform.scale);
+    ltw.matrix = glm::translate(glm::mat4{1.0F}, position) *
+                 glm::mat4_cast(rotation) * glm::scale(glm::mat4{1.0F}, scale);
 
     // Reset the flag
-    transform.is_dirty = false;
+    transform.set_dirty(false);
   }
 }
 
