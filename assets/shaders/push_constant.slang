@@ -34,20 +34,23 @@ struct CascadeData {
     float split_depth; // view-space z of cascade far (negative, RH)
     float _pad[3];
 };
+// 64 + 16 = 80 bytes
 
 struct FrameUBO
 {
-    float4x4 view;
-    float4x4 projection;
-    float4x4 view_projection;
-    float4x4 inverse_projection;
-    float4x4 inverse_view;
-    float4x4 inverse_view_projection;
-    float4 camera_pos;
-    Array<CascadeData, shadow_map_cascade_count> cascades;
-    Array<float4, 6> frustum_planes;
-    uint shadow_array_index;
-    uint shadow_sampler_index;
+    float4x4 view;                                         // 64 bytes
+    float4x4 projection;                                   // 64 bytes
+    float4x4 view_projection;                              // 64 bytes
+    float4x4 inverse_projection;                           // 64 bytes
+    float4x4 inverse_view;                                 // 64 bytes
+    float4x4 inverse_view_projection;                      // 64 bytes
+    Array<CascadeData, shadow_map_cascade_count> cascades; // 80 * 6 = 480 bytes
+    Array<float4, 6> frustum_planes;                       // 16 * 4 = 96 bytes
+    float4 camera_pos;                                     // 16 bytes
+    float4 sun_direction;                                  // 16 bytes
+    uint shadow_array_index;                               // 4 bytes
+    uint shadow_sampler_index;                             // 4 bytes
+    uint _pad[2];                                          // padding to make size a multiple of 16 bytes
 }
 
 struct Vertex

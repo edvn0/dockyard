@@ -23,7 +23,7 @@ auto compute_cascade_splits(float near_z, float far_z, float lambda = 0.85f)
                     static_cast<float>(shadow_map_cascade_count);
     const float log_split = near_z * std::pow(ratio, p);
     const float uni_split = near_z + range * p;
-    splits[i] = lambda * log_split + (1.0f - lambda) * uni_split;
+    splits[i] = lambda * log_split + (1.0F - lambda) * uni_split;
   }
   return splits;
 }
@@ -31,7 +31,7 @@ auto compute_cascade_splits(float near_z, float far_z, float lambda = 0.85f)
 // Generic — works for both standard and reverse-Z projections.
 // Reverse-Z: near_z -> 1.0, far_z -> 0.0.
 auto split_to_ndc_z(const glm::mat4 &proj, float view_z) -> float {
-  const glm::vec4 clip = proj * glm::vec4(0.0f, 0.0f, view_z, 1.0f);
+  const glm::vec4 clip = proj * glm::vec4(0.0F, 0.0F, view_z, 1.0F);
   return clip.z / clip.w;
 }
 
@@ -40,16 +40,16 @@ auto split_to_ndc_z(const glm::mat4 &proj, float view_z) -> float {
 auto frustum_corners_world(const glm::mat4 &inv_view_proj, float z_near_ndc,
                            float z_far_ndc) -> std::array<glm::vec3, 8> {
   const glm::vec4 ndc[8] = {
-      {-1.0f, 1.0f, z_near_ndc, 1.0f}, {1.0f, 1.0f, z_near_ndc, 1.0f},
-      {1.0f, -1.0f, z_near_ndc, 1.0f}, {-1.0f, -1.0f, z_near_ndc, 1.0f},
-      {-1.0f, 1.0f, z_far_ndc, 1.0f},  {1.0f, 1.0f, z_far_ndc, 1.0f},
-      {1.0f, -1.0f, z_far_ndc, 1.0f},  {-1.0f, -1.0f, z_far_ndc, 1.0f},
+      {-1.0F, 1.0F, z_near_ndc, 1.0F}, {1.0F, 1.0F, z_near_ndc, 1.0F},
+      {1.0F, -1.0F, z_near_ndc, 1.0F}, {-1.0F, -1.0F, z_near_ndc, 1.0F},
+      {-1.0F, 1.0F, z_far_ndc, 1.0F},  {1.0F, 1.0F, z_far_ndc, 1.0F},
+      {1.0F, -1.0F, z_far_ndc, 1.0F},  {-1.0F, -1.0F, z_far_ndc, 1.0F},
   };
 
   std::array<glm::vec3, 8> corners;
   for (u32 i = 0; i < 8; ++i) {
     const glm::vec4 world = inv_view_proj * ndc[i];
-    const float w = std::abs(world.w) > 1e-5f ? world.w : 1.0f;
+    const float w = std::abs(world.w) > 1e-5f ? world.w : 1.0F;
     corners[i] = glm::vec3(world) / w;
   }
   return corners;
@@ -71,17 +71,17 @@ auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
       frustum_corners_world(inv_view_proj, prev_split_ndc, curr_split_ndc);
 
   // --- 1. Minimum bounding sphere ---
-  glm::vec3 center(0.0f);
+  glm::vec3 center(0.0F);
   for (const auto &c : corners)
     center += c;
-  center /= 8.0f;
+  center /= 8.0F;
 
-  float radius = 0.0f;
+  float radius = 0.0F;
   for (const auto &c : corners)
     radius = std::max(radius, glm::distance(c, center));
 
   // Snap radius to texel grid to prevent cascade size shimmer.
-  radius = std::ceil(radius * 16.0f) / 16.0f;
+  radius = std::ceil(radius * 16.0F) / 16.0F;
 
   // --- 2. Light-view matrix ---
   // Eye is placed behind the scene *in the direction of the sun*, so the
@@ -90,9 +90,9 @@ auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
   // z_extent is how far the eye is from center in light-view space.
   // The 500-unit margin buys depth for shadow casters behind the view frustum.
   const glm::vec3 up = std::abs(light_toward_sun.y) > 0.99f
-                           ? glm::vec3(0.0f, 0.0f, 1.0f)
-                           : glm::vec3(0.0f, 1.0f, 0.0f);
-  const float z_extent = radius + 500.0f;
+                           ? glm::vec3(0.0F, 0.0F, 1.0F)
+                           : glm::vec3(0.0F, 1.0F, 0.0F);
+  const float z_extent = radius + 500.0F;
   const glm::vec3 eye = center + light_toward_sun * z_extent;
   glm::mat4 light_view = glm::lookAtLH(eye, center, up);
 
@@ -101,14 +101,14 @@ auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
   // apply the residual as a translation correction.  This keeps the shadow
   // texel grid stationary as the camera moves, eliminating edge crawl.
   const float texels_per_unit =
-      static_cast<float>(shadow_map_cascade_resolution) / (radius * 2.0f);
-  glm::vec4 shadow_origin = light_view * glm::vec4(0.0f, 0.0f, 0.0f, 1.0f);
+      static_cast<float>(shadow_map_cascade_resolution) / (radius * 2.0F);
+  glm::vec4 shadow_origin = light_view * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F);
   shadow_origin *= texels_per_unit;
 
   const glm::vec4 rounded = glm::round(shadow_origin);
   glm::vec4 offset = (rounded - shadow_origin) / texels_per_unit;
-  offset.z = 0.0f; // never shift depth — that would break near/far
-  offset.w = 0.0f;
+  offset.z = 0.0F; // never shift depth — that would break near/far
+  offset.w = 0.0F;
   light_view[3] += offset;
 
   // --- 4. Orthographic projection ---
@@ -118,7 +118,7 @@ auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
   //
   // We extend near/far by caster_margin to capture shadow casters that lie
   // outside the camera frustum but still cast into it.
-  const float caster_margin = 500.0f;
+  const float caster_margin = 500.0F;
   const float ortho_near = z_extent - radius - caster_margin;
   const float ortho_far = z_extent + radius + caster_margin;
 
@@ -305,8 +305,8 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
       material_count * sizeof(GPUMaterial));
 
   const u32 white = 0xFFFFFFFF;
-  const u32 blue = glm::packUnorm4x8(glm::vec4(0.5f, 0.5f, 1.0f, 1.0f));
-  const u32 mr_default = glm::packUnorm4x8(glm::vec4(0.0f, 1.0f, 0.0f, 1.0f));
+  const u32 blue = glm::packUnorm4x8(glm::vec4(0.5f, 0.5f, 1.0F, 1.0F));
+  const u32 mr_default = glm::packUnorm4x8(glm::vec4(0.0F, 1.0F, 0.0F, 1.0F));
   const u32 occlusion_default = 0xFFFFFFFF;
   const u32 black = 0xFF000000;
   white_texture = upload_texture(std::span(&white, 1), "white_fallback_texture",
@@ -338,12 +338,12 @@ auto SceneRenderer::initialise_bindless() -> void {
       .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
       .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
       .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .mipLodBias = 0.0f,
+      .mipLodBias = 0.0F,
       .anisotropyEnable = VK_TRUE,
       .maxAnisotropy = 16,
       .compareEnable = VK_FALSE,
-      .minLod = 0.0f,
-      .maxLod = 1.0f,
+      .minLod = 0.0F,
+      .maxLod = 1.0F,
       .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
       .unnormalizedCoordinates = VK_FALSE,
   };
@@ -362,8 +362,8 @@ auto SceneRenderer::initialise_bindless() -> void {
       .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
       .compareEnable = VK_TRUE,
       .compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL,
-      .minLod = 0.0f,
-      .maxLod = 1.0f,
+      .minLod = 0.0F,
+      .maxLod = 1.0F,
       .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
   };
   vk::check(vkCreateSampler(ctx.device, &comparison_ci, nullptr,
@@ -401,8 +401,8 @@ auto SceneRenderer::initialise_bindless() -> void {
       .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
       .compareEnable = VK_TRUE,
       .compareOp = VK_COMPARE_OP_LESS_OR_EQUAL, // shadow maps are conventional
-      .minLod = 0.0f,
-      .maxLod = 1.0f,
+      .minLod = 0.0F,
+      .maxLod = 1.0F,
       .borderColor =
           VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE, // 1.0 = fully lit outside
   };
@@ -609,10 +609,10 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
       .inverse_projection = inv_proj,
       .inverse_view = inv_view,
       .inverse_view_projection = glm::inverse(view_proj),
-      .camera_position = inv_view[3],
-      // Just copy the struct directly — one memcpy worth of data
       .cascades = csm_frame_data.cascades,
       .frustum_planes = extract_frustum_planes(view_proj),
+      .camera_position = inv_view[3],
+      .sun_direction = sun_direction,
       .shadow_array_index = csm_frame_data.shadow_array_index,
       .shadow_sampler_index = csm_frame_data.shadow_sampler_index,
   };
@@ -1000,17 +1000,14 @@ void SceneRenderer::update_csm(const glm::mat4 &view, const glm::mat4 &proj,
                                float camera_near, float camera_far) {
   const auto splits = compute_cascade_splits(camera_near, camera_far);
 
-  // Reverse-Z: the camera near plane sits at NDC Z = 1.0.
-  // We walk outward cascade by cascade; each split's NDC is < the previous.
-  float prev_ndc = 1.0f;
+  float prev_ndc = 1.0F;
 
   for (u32 i = 0u; i < shadow_map_cascade_count; ++i) {
     const float view_z = splits[i];
     const float curr_ndc = split_to_ndc_z(proj, view_z);
 
-    csm_frame_data.cascades[i] = compute_cascade(
-        view, proj, prev_ndc, curr_ndc, view_z,
-        sun_direction); // sun_direction == toward-sun (L vector)
+    csm_frame_data.cascades[i] =
+        compute_cascade(view, proj, prev_ndc, curr_ndc, view_z, sun_direction);
 
     prev_ndc = curr_ndc;
   }

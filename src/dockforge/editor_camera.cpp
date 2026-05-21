@@ -2,7 +2,7 @@
 
 EditorCamera::EditorCamera(GLFWwindow *w, glm::vec3 position, glm::vec3 look_at,
                            u32 width, u32 height)
-    : free_controller(camera, w), path_controller(camera) {
+    : free_controller{camera, w}, path_controller{.camera = camera} {
   camera.position = position;
   camera.set_aspect(width, height);
   auto [y, p] = Components::Camera::facing_toward(position, look_at);

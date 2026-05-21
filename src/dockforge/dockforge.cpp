@@ -80,7 +80,7 @@ auto grow_pool(Dockforge &app) -> void {
 }
 
 constexpr auto remove_rotation = [](const auto &m) {
-  glm::mat4 result(1.0f);
+  glm::mat4 result(1.F);
 
   result[0][0] = glm::length(glm::vec3(m[0]));
   result[1][1] = glm::length(glm::vec3(m[1]));
@@ -95,10 +95,10 @@ auto make_default_override_materials(u32 count) -> std::vector<GPUMaterial> {
   std::vector<GPUMaterial> output(count);
   for (auto &material : output) {
     material.albedo_factor[0] = material.albedo_factor[1] =
-        material.albedo_factor[2] = material.albedo_factor[3] = 1.0F;
-    material.roughness_factor = 1.0F;
-    material.normal_scale = 1.0F;
-    material.occlusion_strength = 1.0F;
+        material.albedo_factor[2] = material.albedo_factor[3] = 1.F;
+    material.roughness_factor = 1.F;
+    material.normal_scale = 1.F;
+    material.occlusion_strength = 1.F;
     material.albedo_index = 0U; // white fallback
   }
   return output;
@@ -127,16 +127,15 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
   auto &&[w, h] = ctx.window_extent;
 
-  editor_camera =
-      std::make_unique<EditorCamera>(get_window(), glm::vec3{0.0f, 5.0f, -6.0f},
-                                     glm::vec3{0.0f, 0.0f, 0.0f}, w, h);
+  editor_camera = std::make_unique<EditorCamera>(
+      get_window(), glm::vec3{0.F, 5.F, -6.F}, glm::vec3{0.F, 0.F, 0.F}, w, h);
 
   {
     imgui_renderer = std::make_unique<ImGuiRenderer>(
         get_window(), 16, *renderer,
         FontChoice{
             .font_path = VFSPath::create("fonts://RobotoMono-Regular.ttf"),
-            .size = 15.0F,
+            .size = 15.F,
         });
     imgui_renderer->set_app_name("Dockforge");
 
@@ -164,7 +163,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     auto &scene = *active_scene;
     const int grid_side = 10;
     const float spacing = std::numbers::sqrt2_v<float> + 0.5F;
-    const float offset = (grid_side - 1) * spacing / 2.0F;
+    const float offset = (grid_side - 1) * spacing / 2.F;
 
     auto parent = scene.make("Cubes");
 
@@ -257,8 +256,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   auto &df = frustum_entity.emplace<Components::DebugFrustum>();
   df.view = glm::lookAtLH(glm::vec3{5, -5, -10}, glm::vec3{0, 0, 0},
                           glm::vec3{0, 1, 0});
-  df.proj = glm::perspective(glm::radians(30.0f), 1.77f, 0.1f, 30.0f);
-  df.color = glm::vec4{1.0f, 1.0f, 0.0f, 1.0f};
+  df.proj = glm::perspective(glm::radians(30.F), 1.77f, 0.1f, 30.F);
+  df.color = glm::vec4{1.F, 1.F, 0.F, 1.F};
 }
 
 auto Dockforge::on_mouse_moved(const events::MouseMoved &e) -> void {
@@ -270,7 +269,7 @@ auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
     glfwSetWindowShouldClose(get_window(), GLFW_TRUE);
 
   if (e.key == GLFW_KEY_F2 && e.mods == GLFW_MOD_SHIFT)
-    editor_camera->save_keyframe(2.0f);
+    editor_camera->save_keyframe(2.F);
 
   if (e.key == GLFW_KEY_F3 && e.mods == GLFW_MOD_SHIFT) {
     editor_camera->use_path = !editor_camera->use_path;
@@ -353,7 +352,8 @@ void Dockforge::refresh_entity_cache() {
 
   // 2. Recursive lambda that respects the expansion state
   auto const add_to_cache_recursive =
-      [&](this auto &&self, entt::entity current, u32 current_depth) -> void {
+      [&, &s = state](this auto &&self, entt::entity current,
+                      u32 current_depth) -> void {
     // Find if this entity actually has any children to decide if it needs an
     // arrow
     bool has_children = false;
@@ -374,7 +374,7 @@ void Dockforge::refresh_entity_cache() {
 
     // CRUCIAL: If the parent isn't expanded, stop processing this branch
     // immediately!
-    if (has_children && state.expanded_entities.contains(current)) {
+    if (has_children && s.expanded_entities.contains(current)) {
       for (auto child : child_view) {
         if (child_view.get<Components::ParentOf>(child).parent == current) {
           self(child, current_depth + 1);
@@ -827,9 +827,10 @@ auto Dockforge::build_ui() -> void {
   canvas_renderer->render_2d();
 
   if (ImGui::Begin("Sun direction")) {
-    glm::vec3 copy = renderer->sun_direction;
-    if (ImGui::DragFloat3("Sun direction", glm::value_ptr(copy), 0.1F)) {
-      renderer->sun_direction = glm::normalize(copy);
+    glm::vec4 copy = renderer->sun_direction;
+    if (ImGui::DragFloat4("Sun direction", glm::value_ptr(copy), 0.1F)) {
+      renderer->sun_direction =
+          glm::vec4(glm::normalize(glm::vec3(copy)), 0.0F);
     }
     ImGui::End();
   }
@@ -1016,7 +1017,9 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
 
   const VkImageSubresourceRange color_range{
       .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+      .baseMipLevel = 0U,
       .levelCount = 1U,
+      .baseArrayLayer = 0U,
       .layerCount = 1U,
   };
   const VkExtent2D vp_extent = viewport_resources.extent();
@@ -1052,12 +1055,12 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         .height = shadow_map_cascade_resolution,
     };
     const VkViewport shadow_viewport{
-        .x = 0.0f,
-        .y = 0.0f,
+        .x = 0.F,
+        .y = 0.F,
         .width = static_cast<float>(shadow_map_cascade_resolution),
         .height = static_cast<float>(shadow_map_cascade_resolution),
-        .minDepth = 0.0f,
-        .maxDepth = 1.0f,
+        .minDepth = 0.F,
+        .maxDepth = 1.F,
     };
     const VkRect2D shadow_scissor{
         .offset =
@@ -1070,90 +1073,83 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
 
     for (u32 cascade_idx = 0U; cascade_idx < shadow_map_cascade_count;
          ++cascade_idx) {
-      const VkRenderingAttachmentInfo depth_att{
-          .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-          .imageView = renderer->csm.layer_views[cascade_idx],
-          .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-          .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-          .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-          .clearValue =
+      VkRenderingAttachmentInfo depth_att{};
+      depth_att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+      depth_att.imageView = renderer->csm.layer_views[cascade_idx];
+      depth_att.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+      depth_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+      depth_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+      depth_att.clearValue = {
+          .depthStencil =
               {
-                  .depthStencil =
-                      {
-                          .depth = 1.0F,
-                          .stencil = 0U,
-                      },
-              }, // conventional: 1=far
+                  .depth = 1.F,
+                  .stencil = 0U,
+              },
       };
-      const VkRenderingInfo ri{
-          .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-          .renderArea = shadow_scissor,
-          .layerCount = 1U,
-          .pDepthAttachment = &depth_att,
-      };
+      VkRenderingInfo ri{};
+      ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+      ri.renderArea = shadow_scissor;
+      ri.layerCount = 1U;
+      ri.pDepthAttachment = &depth_att;
 
       vkCmdBeginRendering(ctx.main_cb, &ri);
       vkCmdSetViewport(ctx.main_cb, 0u, 1u, &shadow_viewport);
       vkCmdSetScissor(ctx.main_cb, 0u, 1u, &shadow_scissor);
       vkCmdSetCullMode(ctx.main_cb, VK_CULL_MODE_FRONT_BIT);
-      vkCmdSetDepthBias(ctx.main_cb, 1.25f, 0.0f, 1.75f);
+      vkCmdSetDepthBias(ctx.main_cb, 1.25f, 0.F, 1.75f);
 
       renderer->render_shadow_cascade(ctx.main_cb, cascade_idx);
 
       vkCmdEndRendering(ctx.main_cb);
     }
 
-    const VkImageMemoryBarrier2 csm_to_sampled{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-        .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .image = renderer->csm.image,
-        .subresourceRange =
-            {
-                .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
-                .baseMipLevel = 0,
-                .levelCount = 1,
-                .baseArrayLayer = 0,
-                .layerCount = shadow_map_cascade_count,
-            },
+    VkImageMemoryBarrier2 csm_to_sampled{};
+    csm_to_sampled.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    csm_to_sampled.srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    csm_to_sampled.srcAccessMask =
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    csm_to_sampled.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    csm_to_sampled.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    csm_to_sampled.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    csm_to_sampled.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    csm_to_sampled.image = renderer->csm.image;
+    csm_to_sampled.subresourceRange = {
+        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+        .baseMipLevel = 0,
+        .levelCount = 1,
+        .baseArrayLayer = 0,
+        .layerCount = shadow_map_cascade_count,
     };
     emit_barrier(ctx.main_cb, csm_to_sampled);
   }
 
   // ── 2. Depth pre-pass ───────────────────────────────────────────────
   {
-    const VkRenderingAttachmentInfo depth_attachment{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = viewport_resources.depth_msaa.sampled_view,
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue =
+    VkRenderingAttachmentInfo depth_attachment{};
+    depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    depth_attachment.imageView = viewport_resources.depth_msaa.sampled_view;
+    depth_attachment.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depth_attachment.clearValue = {
+        .depthStencil =
             {
-                .depthStencil =
-                    {
-                        .depth = 0.0f,
-                        .stencil = 0u,
-                    },
+                .depth = 0.F,
+                .stencil = 0U,
             },
     };
-    const VkRenderingInfo prepass_ri{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea = scissor,
-        .layerCount = 1u,
-        .pDepthAttachment = &depth_attachment,
-    };
+    VkRenderingInfo prepass_ri{};
+    prepass_ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    prepass_ri.renderArea = scissor;
+    prepass_ri.layerCount = 1u;
+    prepass_ri.pDepthAttachment = &depth_attachment;
 
     vkCmdBeginRendering(ctx.main_cb, &prepass_ri);
     vkCmdSetViewport(ctx.main_cb, 0u, 1u, &viewport);
     vkCmdSetScissor(ctx.main_cb, 0u, 1u, &scissor);
     vkCmdSetCullMode(ctx.main_cb, VK_CULL_MODE_BACK_BIT);
     vkCmdSetFrontFace(ctx.main_cb, VK_FRONT_FACE_CLOCKWISE);
-    vkCmdSetDepthBias(ctx.main_cb, 1.25f, 0.0f, 1.75f);
+    vkCmdSetDepthBias(ctx.main_cb, 1.25f, 0.F, 1.75f);
     vkCmdBindIndexBuffer(ctx.main_cb,
                          renderer->geometry_pool->index_buffer->get_buffer(),
                          0U, VK_INDEX_TYPE_UINT32);
@@ -1164,32 +1160,30 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
 
   // ── 4. Forward MSAA pass ────────────────────────────────────────────
   {
-    const VkRenderingAttachmentInfo forward_color{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = viewport_resources.forward_target_msaa.sampled_view,
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT,
-        .resolveImageView = forward_texture.sampled_view,
-        .resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-        .clearValue = {.color = {{0.0F, 0.0F, 0.0F, 0.0F}}},
-    };
-    const VkRenderingAttachmentInfo forward_depth{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = viewport_resources.depth_msaa.sampled_view,
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-        .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-    };
-    const VkRenderingInfo forward_ri{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea = scissor,
-        .layerCount = 1u,
-        .colorAttachmentCount = 1u,
-        .pColorAttachments = &forward_color,
-        .pDepthAttachment = &forward_depth,
-    };
+    VkRenderingAttachmentInfo forward_color{};
+    forward_color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    forward_color.imageView =
+        viewport_resources.forward_target_msaa.sampled_view;
+    forward_color.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    forward_color.resolveMode = VK_RESOLVE_MODE_AVERAGE_BIT;
+    forward_color.resolveImageView = forward_texture.sampled_view;
+    forward_color.resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    forward_color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    forward_color.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    forward_color.clearValue = {.color = {{0.F, 0.F, 0.F, 0.F}}};
+    VkRenderingAttachmentInfo forward_depth{};
+    forward_depth.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    forward_depth.imageView = viewport_resources.depth_msaa.sampled_view;
+    forward_depth.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    forward_depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    forward_depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    VkRenderingInfo forward_ri{};
+    forward_ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    forward_ri.renderArea = scissor;
+    forward_ri.layerCount = 1u;
+    forward_ri.colorAttachmentCount = 1u;
+    forward_ri.pColorAttachments = &forward_color;
+    forward_ri.pDepthAttachment = &forward_depth,
 
     vkCmdBeginRendering(ctx.main_cb, &forward_ri);
     vkCmdSetViewport(ctx.main_cb, 0u, 1u, &viewport);
@@ -1212,20 +1206,18 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
 
   {
-    const VkRenderingAttachmentInfo display_color{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = display_texture.sampled_view,
-        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-    };
-    const VkRenderingInfo composite_ri{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea = scissor,
-        .layerCount = 1U,
-        .colorAttachmentCount = 1U,
-        .pColorAttachments = &display_color,
-    };
+    VkRenderingAttachmentInfo display_color{};
+    display_color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    display_color.imageView = display_texture.sampled_view;
+    display_color.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    display_color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    display_color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo composite_ri{};
+    composite_ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    composite_ri.renderArea = scissor;
+    composite_ri.layerCount = 1U;
+    composite_ri.colorAttachmentCount = 1U;
+    composite_ri.pColorAttachments = &display_color,
 
     vkCmdBeginRendering(ctx.main_cb, &composite_ri);
     renderer->composite_pass(ctx.main_cb);
@@ -1236,38 +1228,41 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     const std::array<VkImageMemoryBarrier2, 1> swapchain_barriers{
         VkImageMemoryBarrier2{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .pNext = nullptr,
+            .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+            .srcAccessMask = 0,
             .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
             .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
             .image = ctx.swapchain_image.image,
             .subresourceRange = color_range,
         },
     };
-    const VkDependencyInfo dep{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1U,
-        .pImageMemoryBarriers = swapchain_barriers.data(),
-    };
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 1U;
+    dep.pImageMemoryBarriers = swapchain_barriers.data();
     vkCmdPipelineBarrier2(ctx.main_cb, &dep);
 
-    const VkRenderingAttachmentInfo swapchain_color{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = ctx.swapchain_image.view,
-        .imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-    };
-    const VkRenderingInfo swapchain_ri{
-        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea =
-            {
-                .extent = ctx.swapchain_image.extent,
-            },
-        .layerCount = 1U,
-        .colorAttachmentCount = 1U,
-        .pColorAttachments = &swapchain_color,
-    };
+    VkRenderingAttachmentInfo swapchain_color{};
+    swapchain_color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    swapchain_color.imageView = ctx.swapchain_image.view;
+    swapchain_color.imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL;
+    swapchain_color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    swapchain_color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo swapchain_ri{};
+    swapchain_ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    swapchain_ri.renderArea =
+        {
+            .offset = {.x = 0, .y = 0},
+            .extent = ctx.swapchain_image.extent,
+        },
+    swapchain_ri.layerCount = 1U;
+    swapchain_ri.colorAttachmentCount = 1U;
+    swapchain_ri.pColorAttachments = &swapchain_color;
 
     vkCmdBeginRendering(ctx.main_cb, &swapchain_ri);
     imgui_renderer->render(ctx.main_cb);
@@ -1276,20 +1271,19 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
 
   // ── 7. Present barrier ──────────────────────────────────────────────
   {
-    const VkImageMemoryBarrier2 present_barrier{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-        .image = ctx.swapchain_image.image,
-        .subresourceRange = color_range,
-    };
-    const VkDependencyInfo dep{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1U,
-        .pImageMemoryBarriers = &present_barrier,
-    };
+    VkImageMemoryBarrier2 present_barrier{};
+    present_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    present_barrier.srcStageMask =
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    present_barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    present_barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    present_barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    present_barrier.image = ctx.swapchain_image.image;
+    present_barrier.subresourceRange = color_range;
+    VkDependencyInfo dep{};
+    dep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dep.imageMemoryBarrierCount = 1U;
+    dep.pImageMemoryBarriers = &present_barrier;
     vkCmdPipelineBarrier2(ctx.main_cb, &dep);
   }
 

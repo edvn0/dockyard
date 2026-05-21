@@ -39,60 +39,6 @@ auto bytes_per_texel(VkFormat fmt) -> u32 {
   }
 }
 
-// One-shot command buffer – submit, signal fence, wait, destroy.
-struct ScratchCmd {
-  VkCommandPool pool{};
-  VkCommandBuffer cmd{};
-
-  static auto begin(const VulkanContext &ctx, u32 queue_family) -> ScratchCmd {
-    const VkCommandPoolCreateInfo pool_ci{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
-        .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
-        .queueFamilyIndex = queue_family,
-    };
-    ScratchCmd s{};
-    vkCreateCommandPool(ctx.device, &pool_ci, nullptr, &s.pool);
-
-    const VkCommandBufferAllocateInfo alloc_ci{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
-        .commandPool = s.pool,
-        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-        .commandBufferCount = 1,
-    };
-    vkAllocateCommandBuffers(ctx.device, &alloc_ci, &s.cmd);
-
-    const VkCommandBufferBeginInfo begin_ci{
-        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-    };
-    vkBeginCommandBuffer(s.cmd, &begin_ci);
-    return s;
-  }
-
-  auto submit_and_wait(const VulkanContext &ctx, VkQueue queue) -> void {
-    vkEndCommandBuffer(cmd);
-
-    const VkFenceCreateInfo fence_ci{
-        .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-    };
-    VkFence fence{};
-    vkCreateFence(ctx.device, &fence_ci, nullptr, &fence);
-
-    const VkSubmitInfo submit{
-        .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-        .commandBufferCount = 1,
-        .pCommandBuffers = &cmd,
-    };
-    vkQueueSubmit(queue, 1, &submit, fence);
-    vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-
-    vkDestroyFence(ctx.device, fence, nullptr);
-    vkFreeCommandBuffers(ctx.device, pool, 1, &cmd);
-    vkDestroyCommandPool(ctx.device, pool, nullptr);
-  }
-};
-
-// Simple image barrier (synchronization2 style).
 auto image_barrier(VkCommandBuffer cmd, VkImage image, VkImageLayout old_layout,
                    VkImageLayout new_layout, VkPipelineStageFlags2 src_stage,
                    VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage,
@@ -128,15 +74,13 @@ auto image_barrier(VkCommandBuffer cmd, VkImage image, VkImageLayout old_layout,
   vkCmdPipelineBarrier2(cmd, &dep);
 }
 
-// Blit mip[src] -> mip[dst], halving dimensions.
 auto blit_mip(VkCommandBuffer cmd, VkImage image, VkExtent2D src_extent,
               u32 src_mip) -> VkExtent2D {
   const VkExtent2D dst_extent{
-      .width = std::max(1u, src_extent.width / 2),
-      .height = std::max(1u, src_extent.height / 2),
+      .width = std::max(1U, src_extent.width / 2),
+      .height = std::max(1U, src_extent.height / 2),
   };
 
-  // src mip: transfer_dst -> transfer_src  (was just written)
   image_barrier(
       cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
@@ -154,8 +98,16 @@ auto blit_mip(VkCommandBuffer cmd, VkImage image, VkExtent2D src_extent,
           },
       .srcOffsets =
           {
-              VkOffset3D{0, 0, 0},
-              VkOffset3D{(i32)src_extent.width, (i32)src_extent.height, 1},
+              VkOffset3D{
+                  .x = 0,
+                  .y = 0,
+                  .z = 0,
+              },
+              VkOffset3D{
+                  .x = static_cast<i32>(src_extent.width),
+                  .y = static_cast<i32>(src_extent.height),
+                  .z = 1,
+              },
           },
       .dstSubresource =
           {
@@ -166,8 +118,16 @@ auto blit_mip(VkCommandBuffer cmd, VkImage image, VkExtent2D src_extent,
           },
       .dstOffsets =
           {
-              VkOffset3D{0, 0, 0},
-              VkOffset3D{(i32)dst_extent.width, (i32)dst_extent.height, 1},
+              VkOffset3D{
+                  .x = 0,
+                  .y = 0,
+                  .z = 0,
+              },
+              VkOffset3D{
+                  .x = static_cast<i32>(dst_extent.width),
+                  .y = static_cast<i32>(dst_extent.height),
+                  .z = 1,
+              },
           },
   };
   const VkBlitImageInfo2 blit{

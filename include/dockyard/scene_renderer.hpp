@@ -121,11 +121,14 @@ struct FrameUBO {
   glm::mat4 inverse_projection;
   glm::mat4 inverse_view;
   glm::mat4 inverse_view_projection;
-  glm::vec4 camera_position;
   std::array<CascadeData, shadow_map_cascade_count> cascades{};
   std::array<glm::vec4, 6> frustum_planes{};
+  glm::vec4 camera_position;
+  glm::vec4 sun_direction;
   u32 shadow_array_index;
   u32 shadow_sampler_index;
+  u32 pad0;
+  u32 pad1;
 };
 static_assert(sizeof(FrameUBO) % 16 == 0);
 
@@ -202,8 +205,8 @@ struct SceneRenderer {
   u32 shadow_sampler_bindless_idx = 0u;
 
   std::array<CascadeData, shadow_map_cascade_count> cascade_cpu_data{};
-  glm::vec3 sun_direction =
-      glm::normalize(glm::vec3{0, 0, 0} - glm::vec3{3, -7, 5});
+  glm::vec4 sun_direction =
+      glm::normalize(glm::vec4{0, 0, 0, 0} - glm::vec4{3, -7, 5, 0});
 
   PipelineHandle shadow_pipeline;
 

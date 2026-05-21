@@ -77,7 +77,7 @@ V2F vertexMain(uint vertex_id: SV_VulkanVertexID, uint instance_id: SV_InstanceI
     output.bitangent = normalize(mul(normal_matrix, local_bitangent));
 
     float4 world_pos = mul(model_matrix, float4(v.position[0], v.position[1], v.position[2], 1.0f));
-    output.world_pos = world_pos.xyz; // <-- new
+    output.world_pos = world_pos.xyz;
     output.pos = mul(pc.frame_ubo.view_projection, world_pos);
 
     output.uv = unpackHalf2x16ToFloat(v.uvs);
@@ -129,8 +129,8 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target
     float3 f0 = lerp(float3(0.04f), albedo.rgb, metallic);
 
     // ── Directional sun light ────────────────────────────────────────────────
-    const float3 sun_dir = normalize(float3(0, 0, 0) - float3(3, -7, 5));
     const float3 sun_color = float3(1.0f, 0.95f, 0.8f);
+    const float3 sun_dir = normalize(pc.frame_ubo.sun_direction.xyz);
 
     float3 h = normalize(v + sun_dir);
     float ndotl = max(dot(n, sun_dir), 0.0f);

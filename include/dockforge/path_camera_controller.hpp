@@ -27,7 +27,7 @@ struct CameraKeyframe {
 
 struct PathCameraController {
   Components::Camera &camera;
-  std::vector<CameraKeyframe> path;
+  std::vector<CameraKeyframe> path{};
 
   usize current_index = 0;
   float segment_time = 0.0f;

@@ -12,7 +12,7 @@ struct FreeListPool {
   u32 next = 0;
   bool needs_grow = false;
 
-  std::vector<u32> free_slots;
+  std::vector<u32> free_slots{};
 
   [[nodiscard]] auto alloc() -> std::optional<u32> {
     if (!free_slots.empty()) {

@@ -81,15 +81,19 @@ struct TransientStage {
     ts.entry_name = std::move(ep.entry_point.name);
     ts.module_ci = {
         .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .pNext = nullptr,
+        .flags = 0,
         .codeSize = ts.code.size() * sizeof(u32),
         .pCode = ts.code.data(),
     };
     ts.stage_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .pNext = &ts.module_ci,
+        .flags = 0,
         .stage = to_vk_stage(ep.entry_point.stage),
         .module = VK_NULL_HANDLE,
         .pName = ts.entry_name.c_str(),
+        .pSpecializationInfo = nullptr,
     };
     return ts;
   }
@@ -151,94 +155,91 @@ auto build_graphics_pipeline(VkDevice device,
     blend_states.push_back(mode.to_vk());
   }
 
-  const VkPipelineVertexInputStateCreateInfo vertex_input{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
-  };
+  VkPipelineVertexInputStateCreateInfo vertex_input{};
+  vertex_input.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
   VkPipelineRasterizationLineStateCreateInfoKHR line_smoothness{};
   line_smoothness.sType =
       VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO;
   line_smoothness.stippledLineEnable =
-      desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
-      desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+      static_cast<VkBool32>(desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
+                            desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
   line_smoothness.lineRasterizationMode =
       VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH;
   line_smoothness.stippledLineEnable = VK_FALSE;
   line_smoothness.lineStipplePattern = 0xCC;
   line_smoothness.lineStippleFactor = 1;
 
-  const VkPipelineInputAssemblyStateCreateInfo input_assembly{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-      .topology = desc.topology,
-  };
-  const VkPipelineViewportStateCreateInfo viewport_state{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO,
-      .viewportCount = 1u,
-      .scissorCount = 1u,
-  };
-  const VkPipelineRasterizationStateCreateInfo rasterizer{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO,
-      .pNext = desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
-                       desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
-                   ? &line_smoothness
-                   : nullptr,
-      .polygonMode = desc.polygon_mode,
-      .cullMode = desc.cull_mode,
-      .frontFace = desc.front_face,
-      .lineWidth = desc.line_width,
-  };
-  const VkPipelineMultisampleStateCreateInfo multisampling{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-      .rasterizationSamples = desc.samples,
-  };
-  const VkPipelineDepthStencilStateCreateInfo depth_stencil{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
-      .depthTestEnable = desc.depth.test ? VK_TRUE : VK_FALSE,
-      .depthWriteEnable = desc.depth.write ? VK_TRUE : VK_FALSE,
-      .depthCompareOp = desc.depth.compare_op,
-  };
-  const VkPipelineColorBlendStateCreateInfo color_blending{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-      .attachmentCount = static_cast<u32>(blend_states.size()),
-      .pAttachments = blend_states.data(),
-  };
+  VkPipelineInputAssemblyStateCreateInfo input_assembly{};
+  input_assembly.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  input_assembly.topology = desc.topology;
+  VkPipelineViewportStateCreateInfo viewport_state{};
+  viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewport_state.viewportCount = 1u;
+  viewport_state.scissorCount = 1u;
+  VkPipelineRasterizationStateCreateInfo rasterizer{};
+  rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  rasterizer.pNext = desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
+                             desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP
+                         ? &line_smoothness
+                         : nullptr;
+  rasterizer.polygonMode = desc.polygon_mode;
+  rasterizer.cullMode = desc.cull_mode;
+  rasterizer.frontFace = desc.front_face;
+  rasterizer.lineWidth = desc.line_width;
+  VkPipelineMultisampleStateCreateInfo multisampling{};
+  multisampling.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisampling.rasterizationSamples = desc.samples;
+  VkPipelineDepthStencilStateCreateInfo depth_stencil{};
+  depth_stencil.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  depth_stencil.depthTestEnable = desc.depth.test ? VK_TRUE : VK_FALSE;
+  depth_stencil.depthWriteEnable = desc.depth.write ? VK_TRUE : VK_FALSE;
+  depth_stencil.depthCompareOp = desc.depth.compare_op;
+  VkPipelineColorBlendStateCreateInfo color_blending{};
+  color_blending.sType =
+      VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  color_blending.attachmentCount = static_cast<u32>(blend_states.size());
+  color_blending.pAttachments = blend_states.data();
   std::vector<VkDynamicState> dynamic_states{
       VK_DYNAMIC_STATE_VIEWPORT,
       VK_DYNAMIC_STATE_SCISSOR,
   };
   dynamic_states.insert(dynamic_states.end(), desc.extra_dynamic_states.begin(),
                         desc.extra_dynamic_states.end());
-  const VkPipelineDynamicStateCreateInfo dynamic_info{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-      .dynamicStateCount = static_cast<u32>(dynamic_states.size()),
-      .pDynamicStates = dynamic_states.data(),
-  };
-  const VkPipelineRenderingCreateInfo rendering_info{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-      .colorAttachmentCount = static_cast<u32>(n_color),
-      .pColorAttachmentFormats = desc.render_targets.color_formats.data(),
-      .depthAttachmentFormat = desc.render_targets.depth_format,
-      .stencilAttachmentFormat = desc.render_targets.stencil_format,
-  };
-  const VkGraphicsPipelineCreateInfo pipeline_ci{
-      .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-      .pNext = &rendering_info,
-      .stageCount = static_cast<u32>(stage_cis.size()),
-      .pStages = stage_cis.data(),
-      .pVertexInputState = &vertex_input,
-      .pInputAssemblyState = &input_assembly,
-      .pViewportState = &viewport_state,
-      .pRasterizationState = &rasterizer,
-      .pMultisampleState = &multisampling,
-      .pDepthStencilState = &depth_stencil,
-      .pColorBlendState = &color_blending,
-      .pDynamicState = &dynamic_info,
-      .layout = desc.layout,
-      .renderPass = VK_NULL_HANDLE,
-  };
+  VkPipelineDynamicStateCreateInfo dynamic_info{};
+  dynamic_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+  dynamic_info.dynamicStateCount = static_cast<u32>(dynamic_states.size());
+  dynamic_info.pDynamicStates = dynamic_states.data();
+  VkPipelineRenderingCreateInfo rendering_info{};
+  rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+  rendering_info.colorAttachmentCount = static_cast<u32>(n_color);
+  rendering_info.pColorAttachmentFormats =
+      desc.render_targets.color_formats.data();
+  rendering_info.depthAttachmentFormat = desc.render_targets.depth_format;
+  rendering_info.stencilAttachmentFormat = desc.render_targets.stencil_format;
+  VkGraphicsPipelineCreateInfo pipeline_ci{};
+  pipeline_ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  pipeline_ci.pNext = &rendering_info;
+  pipeline_ci.stageCount = static_cast<u32>(stage_cis.size());
+  pipeline_ci.pStages = stage_cis.data();
+  pipeline_ci.pVertexInputState = &vertex_input;
+  pipeline_ci.pInputAssemblyState = &input_assembly;
+  pipeline_ci.pViewportState = &viewport_state;
+  pipeline_ci.pRasterizationState = &rasterizer;
+  pipeline_ci.pMultisampleState = &multisampling;
+  pipeline_ci.pDepthStencilState = &depth_stencil;
+  pipeline_ci.pColorBlendState = &color_blending;
+  pipeline_ci.pDynamicState = &dynamic_info;
+  pipeline_ci.layout = desc.layout;
+  pipeline_ci.renderPass = VK_NULL_HANDLE;
 
   VkPipeline pipeline = VK_NULL_HANDLE;
-  const VkResult vr = vkCreateGraphicsPipelines(
-      device, VK_NULL_HANDLE, 1u, &pipeline_ci, nullptr, &pipeline);
+  const auto vr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1U,
+                                            &pipeline_ci, nullptr, &pipeline);
   if (vr != VK_SUCCESS)
     return std::unexpected(std::format("vkCreateGraphicsPipelines failed ({})",
                                        static_cast<i32>(vr)));
