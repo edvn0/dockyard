@@ -166,6 +166,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     const float spacing = std::numbers::sqrt2_v<float> + 0.5F;
     const float offset = (grid_side - 1) * spacing / 2.0F;
 
+    auto parent = scene.make("Cubes");
+
     for (int x = 0; x < grid_side; ++x) {
       for (int y = 0; y < grid_side; ++y) {
         for (int z = 0; z < grid_side; ++z) {
@@ -177,6 +179,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
               (static_cast<float>(z) * spacing) - offset,
           };
           entity.emplace<Components::Mesh>(mesh_handle);
+          entity.emplace<Components::ParentOf>(parent.handle());
         }
       }
     }
@@ -311,14 +314,17 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
   entt::entity best = entt::null;
   float best_t = std::numeric_limits<float>::max();
 
-  for (auto &&[e, xt, m] :
-       active_scene->view<Components::Transform, Components::Mesh>().each()) {
+  // 1. View LocalToWorld instead of Transform to get absolute world space
+  // positions
+  for (auto &&[e, ltw, m] :
+       active_scene->view<Components::LocalToWorld, Components::Mesh>()
+           .each()) {
     const MeshAsset *asset = renderer->get_mesh(m);
     if ((asset == nullptr) || !asset->mesh_aabb.is_valid())
       continue;
 
-    const AABB world_aabb = asset->mesh_aabb.transform(xt.matrix());
-    const float t = ray_aabb(ray, world_aabb.get_min(), world_aabb.get_max());
+    const auto world_aabb = asset->mesh_aabb.transform(ltw.matrix);
+    const auto t = ray_aabb(ray, world_aabb.get_min(), world_aabb.get_max());
 
     if (t >= 0.0F && t < best_t) {
       best_t = t;
@@ -331,10 +337,57 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
 
 void Dockforge::refresh_entity_cache() {
   state.entity_cache.clear();
-  auto tag_view = active_scene->view<Components::Tag>();
-  for (auto e : tag_view) {
-    state.entity_cache.push_back(e);
+  auto &registry = active_scene->registry();
+
+  // 1. Gather root entities
+  std::vector<entt::entity> roots;
+  auto tag_view = registry.view<Components::Tag>();
+  for (auto entity : tag_view) {
+    if (!registry.any_of<Components::ParentOf>(entity)) {
+      roots.push_back(entity);
+    }
   }
+
+  auto &cache = state.entity_cache;
+  auto child_view = registry.view<Components::ParentOf>();
+
+  // 2. Recursive lambda that respects the expansion state
+  auto const add_to_cache_recursive =
+      [&](this auto &&self, entt::entity current, u32 current_depth) -> void {
+    // Find if this entity actually has any children to decide if it needs an
+    // arrow
+    bool has_children = false;
+    for (auto child : child_view) {
+      if (child_view.get<Components::ParentOf>(child).parent == current) {
+        has_children = true;
+        break;
+      }
+    }
+
+    // Add to our flat linear display list
+    cache.push_back({
+        .entity = current,
+        .depth = current_depth,
+        .is_visible =
+            true // Every entity that makes it into the cache loop is visible
+    });
+
+    // CRUCIAL: If the parent isn't expanded, stop processing this branch
+    // immediately!
+    if (has_children && state.expanded_entities.contains(current)) {
+      for (auto child : child_view) {
+        if (child_view.get<Components::ParentOf>(child).parent == current) {
+          self(child, current_depth + 1);
+        }
+      }
+    }
+  };
+
+  // 3. Populate
+  for (auto root : roots) {
+    add_to_cache_recursive(root, 0);
+  }
+
   state.cache_dirty = false;
 }
 
@@ -348,7 +401,6 @@ void Dockforge::draw_scene_outliner() {
     return;
   }
 
-  // Optional: filter input
   static ImGuiTextFilter filter;
   filter.Draw("##filter", -1.0F);
 
@@ -361,10 +413,13 @@ void Dockforge::draw_scene_outliner() {
   ImGuiListClipper clipper;
   clipper.Begin(static_cast<int>(state.entity_cache.size()), item_height);
 
+  auto &registry = active_scene->registry();
+  auto child_view = registry.view<Components::ParentOf>();
+
   while (clipper.Step()) {
     for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-      auto e = state.entity_cache[static_cast<usize>(i)];
-      Entity entity{*active_scene, e};
+      const auto &cached = state.entity_cache[static_cast<usize>(i)];
+      Entity entity{*active_scene, cached.entity};
 
       auto *tag = entity.try_get<Components::Tag>();
       auto *mesh = entity.try_get<Components::Mesh>();
@@ -376,23 +431,65 @@ void Dockforge::draw_scene_outliner() {
       if (!filter.PassFilter(label.data(), std::cend(label)))
         continue;
 
-      // Build a display string without allocating when possible
-      std::array<char, 128> row_label{};
-      if (mesh != nullptr) {
-        std::snprintf(row_label.data(), std::size(row_label),
-                      "[M] %.*s  (%u)##%u", static_cast<int>(label.size()),
-                      label.data(), mesh->handle.index(),
-                      static_cast<uint32_t>(e));
-      } else {
-        std::snprintf(row_label.data(), std::size(row_label), "     %.*s##%u",
-                      static_cast<int>(label.size()), label.data(),
-                      static_cast<uint32_t>(e));
+      // 1. Handle Indentation
+      if (cached.depth > 0) {
+        ImGui::Indent(static_cast<float>(cached.depth) * 16.0f);
       }
 
-      const bool is_selected = (state.selected == e);
+      // 2. Check if this entity has children to determine if we show a dropdown
+      // arrow
+      bool has_children = false;
+      for (auto child : child_view) {
+        if (child_view.get<Components::ParentOf>(child).parent ==
+            cached.entity) {
+          has_children = true;
+          break;
+        }
+      }
+
+      bool is_expanded = state.expanded_entities.contains(cached.entity);
+
+      // 3. Draw Dropdown Arrow
+      ImGui::PushID(static_cast<int>(static_cast<uint32_t>(cached.entity)));
+      if (has_children) {
+        ImGuiDir arrow_dir = is_expanded ? ImGuiDir_Down : ImGuiDir_Right;
+        if (ImGui::ArrowButton("##toggle", arrow_dir)) {
+          if (is_expanded) {
+            state.expanded_entities.erase(cached.entity);
+          } else {
+            state.expanded_entities.insert(cached.entity);
+          }
+          state.cache_dirty =
+              true; // Rebuild cache on next frame since size changed!
+        }
+        ImGui::SameLine();
+      } else {
+        // Keep spacing aligned for leaf items without arrows
+        ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), 0));
+        ImGui::SameLine();
+      }
+
+      // 4. Draw Row Text Content
+      std::array<char, 128> row_label{};
+      if (mesh != nullptr) {
+        std::snprintf(row_label.data(), std::size(row_label), "[M] %.*s  (%u)",
+                      static_cast<int>(label.size()), label.data(),
+                      mesh->handle.index());
+      } else {
+        std::snprintf(row_label.data(), std::size(row_label), "%.*s",
+                      static_cast<int>(label.size()), label.data());
+      }
+
+      const bool is_selected = (state.selected == cached.entity);
       if (ImGui::Selectable(row_label.data(), is_selected,
                             ImGuiSelectableFlags_SpanAllColumns)) {
-        state.selected = e;
+        state.selected = cached.entity;
+      }
+
+      ImGui::PopID(); // entity ID
+
+      if (cached.depth > 0) {
+        ImGui::Unindent(static_cast<float>(cached.depth) * 16.0f);
       }
 
       if (is_selected) {
@@ -607,30 +704,49 @@ auto Dockforge::build_ui() -> void {
   if (state.selected != entt::null) {
     Entity selected_entity{*active_scene, state.selected};
     auto &transform = selected_entity.get<Components::Transform>();
+    auto &ltw = selected_entity.get<Components::LocalToWorld>();
     auto &&[view, proj] = resolve_camera();
 
-    auto matrix = selected_entity.get<Components::Transform>().matrix();
+    glm::mat4 world_matrix = ltw.matrix;
+
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj), gizmo_op,
-                         ImGuizmo::LOCAL, glm::value_ptr(matrix));
+                         ImGuizmo::LOCAL, glm::value_ptr(world_matrix));
 
     if (ImGuizmo::IsUsing()) {
+      glm::mat4 local_matrix = world_matrix;
+
+      if (auto *relation = selected_entity.try_get<Components::ParentOf>();
+          relation) {
+        auto &registry = active_scene->registry();
+        if (registry.valid(relation->parent)) {
+          if (auto *parent_ltw =
+                  registry.try_get<Components::LocalToWorld>(relation->parent);
+              parent_ltw) {
+            local_matrix = glm::inverse(parent_ltw->matrix) * world_matrix;
+          }
+        }
+      }
+
       glm::vec3 new_pos;
       glm::vec3 new_scale;
       glm::vec3 skew;
       glm::vec4 persp;
       glm::quat new_rot;
 
-      if (glm::decompose(matrix, new_scale, new_rot, new_pos, skew, persp)) {
+      if (glm::decompose(local_matrix, new_scale, new_rot, new_pos, skew,
+                         persp)) {
         auto &&[pos, rot, scale] = transform.mut();
         pos = new_pos;
         rot = glm::normalize(new_rot);
         scale = new_scale;
+
+        state.hierarchy_dirty = true;
       }
     }
 
     if (auto *mesh = selected_entity.try_get<Components::Mesh>()) {
       auto *resolved = renderer->get_mesh(*mesh);
-      canvas_renderer->box(remove_rotation(matrix), resolved->mesh_aabb,
+      canvas_renderer->box(remove_rotation(world_matrix), resolved->mesh_aabb,
                            glm::vec4{0.1, 0.9, 0.2, 1.0F});
 
       selected_entity_materials = renderer->get_material_view_mut(*mesh);
@@ -815,7 +931,47 @@ auto Dockforge::resolve_material_slot(Entity e) -> u32 {
   return material_override->gpu_slot;
 }
 
+void compute_world_matrices(entt::registry &registry) {
+  registry.sort<Components::ParentOf>(
+      [&registry](const entt::entity lhs, const entt::entity rhs) {
+        auto *lhs_parent = registry.try_get<Components::ParentOf>(lhs);
+        auto *rhs_parent = registry.try_get<Components::ParentOf>(rhs);
+
+        if (rhs_parent && rhs_parent->parent == lhs)
+          return true;
+        if (lhs_parent && lhs_parent->parent == rhs)
+          return false;
+
+        return lhs < rhs;
+      });
+
+  auto base_view =
+      registry.view<Components::Transform, Components::LocalToWorld>();
+  for (auto &&[entity, xt, ltw] : base_view.each()) {
+    ltw.matrix = xt.matrix(); // Or xt.to_mat4() based on your implementation
+  }
+
+  auto hierarchy_view =
+      registry.view<Components::ParentOf, Components::LocalToWorld>();
+
+  hierarchy_view.use<Components::ParentOf>();
+
+  for (auto &&[entity, relation, ltw] : hierarchy_view.each()) {
+    if (registry.valid(relation.parent)) {
+      if (auto *parent_ltw =
+              registry.try_get<Components::LocalToWorld>(relation.parent);
+          parent_ltw) {
+        ltw.matrix = parent_ltw->matrix * ltw.matrix;
+      }
+    }
+  }
+}
+
 auto Dockforge::render(RenderContext &ctx) -> u64 {
+  if (state.hierarchy_dirty) [[unlikely]] {
+    compute_world_matrices(active_scene->registry());
+  }
+
   if (pending_pick) [[unlikely]] {
     try_pick_entity(*pending_pick);
     pending_pick.reset();

@@ -519,7 +519,7 @@ void SceneRenderer::submit(MeshHandle handle, const glm::mat4 &t,
       // get_material_view(*asset).materials[prim.material_id];
 
       // each pass decides membership here
-      if (true) {
+      {
         u64 depth_key = static_cast<u64>(prim.mesh.first_index);
         auto &b = depth_prepass.buckets[depth_key];
         b.mesh = prim.mesh;

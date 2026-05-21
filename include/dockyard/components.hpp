@@ -155,4 +155,8 @@ struct DebugFrustum {
   glm::vec4 color{1.0F, 1.0F, 0.0F, 1.0F};
 };
 
+struct ParentOf {
+  entt::entity parent{entt::null};
+};
+
 } // namespace dy::Components
