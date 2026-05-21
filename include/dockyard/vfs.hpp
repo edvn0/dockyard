@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace dy {
@@ -63,6 +64,13 @@ public:
    */
   auto read_binary_async(std::string_view virtual_path)
       -> std::future<std::expected<std::vector<u32>, std::string>>;
+
+  struct Filter {
+    std::unordered_set<std::string_view> ignored_dirs;
+    std::unordered_set<std::string_view> included_extensions;
+  };
+  auto list(std::string_view virtual_path, const Filter &filter = {})
+      -> std::vector<std::filesystem::path>;
 
   auto initialised() const -> bool;
 

@@ -1,4 +1,5 @@
 #include <dockyard/canvas_renderer.hpp>
+#include <dockyard/scene_renderer.hpp>
 #include <dockyard/vk_check.hpp>
 
 #include <glm/ext/matrix_transform.hpp>

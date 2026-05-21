@@ -45,11 +45,11 @@ float4 fragmentMain(V2F input, uniform CompositePushConstants pc) : SV_Target
 
     float3 hdr = sample_2d(pc.forward_output, pc.sampler, input.uv).rgb;
 
-    float exposure = 0.1;
+    float exposure = 1;
     hdr *= exposure;
 
     // 1. Apply AgX
-    float3 ldr = tonemap_agx(hdr);
+    float3 ldr = tonemap_reinhard(hdr);
     // ldr = agx_look_punchy(ldr);
 
     return float4(ldr, 1.0);

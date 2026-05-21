@@ -4,9 +4,14 @@
 #include <dockyard/vfs_path.hpp>
 
 #include <expected>
+#include <future>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace dy {
+class App;
+}
 
 namespace dy::shader {
 
@@ -69,6 +74,10 @@ public:
       -> std::expected<CompiledShader, CompilationError>;
   auto compile(std::string_view)
       -> std::expected<CompiledShader, CompilationError>;
+
+  [[nodiscard]] auto precache_shaders(Badge<App>) -> std::future<void>;
+  auto invalidate(const VFSPath &) -> void;
+  auto clear_cache() -> void;
 
   ~Compiler();
 

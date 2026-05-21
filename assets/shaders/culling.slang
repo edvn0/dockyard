@@ -20,13 +20,21 @@ struct CullingPushConstants
     uint padding[3];
 };
 
-bool is_visible(float4x4 model_matrix, float radius, Array<float4, 6> frustum_planes, float3 camera_pos, float max_dist_sq)
+bool is_visible(float4x4 model_matrix, float local_radius, Array<float4, 6> frustum_planes, float3 camera_pos, float max_dist_sq)
 {
     float3 position = float3(model_matrix[0][3], model_matrix[1][3], model_matrix[2][3]);
 
+    float scale_x = length(float3(model_matrix[0][0], model_matrix[1][0], model_matrix[2][0]));
+    float scale_y = length(float3(model_matrix[0][1], model_matrix[1][1], model_matrix[2][1]));
+    float scale_z = length(float3(model_matrix[0][2], model_matrix[1][2], model_matrix[2][2]));
+
+    float max_scale = max(scale_x, max(scale_y, scale_z));
+    float world_radius = local_radius * max_scale;
+
+    [ForceUnroll]
     for (int i = 0; i < 6; ++i)
     {
-        if (dot(float4(position, 1.0f), frustum_planes[i]) < -radius)
+        if (dot(float4(position, 1.0f), frustum_planes[i]) < -world_radius)
         {
             return false;
         }
@@ -42,7 +50,6 @@ bool is_visible(float4x4 model_matrix, float radius, Array<float4, 6> frustum_pl
 
     return true;
 }
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID, uniform CullingPushConstants pc)
@@ -53,7 +60,7 @@ void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID, uniform CullingPus
 
     InstanceData instance = pc.instance_buffer[item_idx];
 
-    bool visible = is_visible(instance.transform, instance.bounding_radius, pc.frame_data.frustum_planes, pc.frame_data.camera_pos.xyz, 50.0f * 50.0f);
+    bool visible = is_visible(instance.transform, instance.bounding_radius, pc.frame_data.frustum_planes, pc.frame_data.camera_pos.xyz, 100.0f * 100.0f);
 
     if (visible)
     {

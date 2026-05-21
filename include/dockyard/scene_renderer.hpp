@@ -1,7 +1,5 @@
 #pragma once
 
-#include "dockyard/thread_safe_memory_cache.hpp"
-#include <deque>
 #include <dockyard/app.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/compiler.hpp>
@@ -11,11 +9,17 @@
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene.hpp>
+#include <dockyard/thread_safe_memory_cache.hpp>
 
+#include <deque>
 #include <glm/glm.hpp>
 #include <type_traits>
 
 namespace dy {
+
+namespace shader {
+class ShaderWatcher;
+}
 
 struct GpuPushConstants {
   const DeviceAddress vertex_buffer_ptr;
@@ -143,14 +147,6 @@ struct CsmResources {
   void destroy(VkDevice device, VmaAllocator allocator);
 };
 
-auto create_main_pipeline_layout(VkDevice device,
-                                 VkDescriptorSetLayout bindless_layout)
-    -> VkPipelineLayout;
-auto create_composite_pipeline(VkDevice device,
-                               VkDescriptorSetLayout bindless_layout,
-                               VkPipelineLayout &out_layout,
-                               VkPipeline &out_pipeline) -> void;
-
 struct SceneRenderer {
   VulkanContext &ctx;
   SwapchainResources &swapchain;
@@ -188,12 +184,11 @@ struct SceneRenderer {
 
   VkPipelineLayout pipeline_layout{VK_NULL_HANDLE};
   std::unique_ptr<PipelineRegistry> pipeline_registry{nullptr};
-
-  VkPipelineLayout composite_pipeline_layout{VK_NULL_HANDLE};
-  VkPipeline composite_pipeline{VK_NULL_HANDLE};
-
-  VkPipelineLayout culling_pipeline_layout{VK_NULL_HANDLE};
-  VkPipeline culling_pipeline{VK_NULL_HANDLE};
+  std::unique_ptr<shader::ShaderWatcher,
+                  decltype(+[](shader::ShaderWatcher *) {})>
+      shader_watcher;
+  std::mutex pending_reload_mutex{};
+  std::deque<VFSPath> pending_reloads{};
 
   CsmResources csm{};
   struct CsmFrameData {
@@ -209,6 +204,8 @@ struct SceneRenderer {
       glm::normalize(glm::vec4{0, 0, 0, 0} - glm::vec4{3, -7, 5, 0});
 
   PipelineHandle shadow_pipeline;
+  PipelineHandle composite_pipeline;
+  PipelineHandle culling_pipeline;
 
   Cache<StringMap<TextureHandle>> texture_cache{};
 

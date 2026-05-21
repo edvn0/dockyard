@@ -19,7 +19,6 @@ struct VertexOutput
 void vs_main(uint vertex_id: SV_VulkanVertexID, uniform PC pc, out VertexOutput out)
 {
     LineVertex vertex = pc.line_vertices[vertex_id];
-    printf("%d", vertex_id);
     out.pos = mul(pc.mvp, vertex.pos);
     out.color = vertex.color;
 }

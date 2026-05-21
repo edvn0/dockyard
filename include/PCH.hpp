@@ -3,6 +3,7 @@
 #include <volk.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -11,6 +12,8 @@
 #include <map>
 #include <memory>
 #include <ranges>
+#include <shared_mutex>
+#include <string>
 #include <string_view>
 #include <unordered_map>
 #include <vector>

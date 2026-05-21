@@ -1,3 +1,4 @@
+#include "dockyard/vk_check.hpp"
 #include <dockyard/pipeline_builder.hpp>
 
 #include <dockyard/log.hpp>
@@ -112,26 +113,50 @@ struct TransientStage {
   }
 };
 
-} // namespace
+auto create_layout_from_reflection(
+    VkDevice device, const shader::CompiledShader &compiled,
+    VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE)
+    -> std::expected<VkPipelineLayout, std::string> {
+  u32 push_range_count = 0;
+  VkPushConstantRange push_range{};
 
-// ── BlendMode
-// ─────────────────────────────────────────────────────────────────
+  if (compiled.push_constants.size > 0) {
+    VkShaderStageFlags active_stages = 0;
+    for (const auto &ep : compiled.entry_points) {
+      active_stages |= TransientStage::to_vk_stage(ep.entry_point.stage);
+    }
 
-auto BlendMode::to_vk() const -> VkPipelineColorBlendAttachmentState {
-  return {
-      .blendEnable = enabled ? VK_TRUE : VK_FALSE,
-      .srcColorBlendFactor = src_color,
-      .dstColorBlendFactor = dst_color,
-      .colorBlendOp = color_op,
-      .srcAlphaBlendFactor = src_alpha,
-      .dstAlphaBlendFactor = dst_alpha,
-      .alphaBlendOp = alpha_op,
-      .colorWriteMask = write_mask,
+    push_range = {
+        .stageFlags = active_stages,
+        .offset = compiled.push_constants.offset,
+        .size = compiled.push_constants.size,
+    };
+    push_range_count = 1;
+  }
+
+  const VkPipelineLayoutCreateInfo layout_ci{
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+      .setLayoutCount = descriptor_set_layout != VK_NULL_HANDLE ? 1U : 0U,
+      .pSetLayouts = descriptor_set_layout != VK_NULL_HANDLE
+                         ? &descriptor_set_layout
+                         : nullptr,
+      .pushConstantRangeCount = push_range_count,
+      .pPushConstantRanges = push_range_count > 0 ? &push_range : nullptr,
   };
+
+  VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+  if (vkCreatePipelineLayout(device, &layout_ci, nullptr, &pipeline_layout) !=
+      VK_SUCCESS) {
+    return std::unexpected(
+        "vkCreatePipelineLayout failed during push-constant layout creation");
+  }
+
+  return pipeline_layout;
 }
 
 auto build_graphics_pipeline(VkDevice device,
-                             const GraphicsPipelineDescription &desc)
+                             const GraphicsPipelineDescription &desc,
+                             VkPipelineLayout active_layout)
     -> std::expected<VkPipeline, std::string> {
 
   auto maybe_compiled = shader::Compiler::the().compile(desc.shader_path);
@@ -145,7 +170,6 @@ auto build_graphics_pipeline(VkDevice device,
   for (const auto &s : stages)
     stage_cis.push_back(s.stage_ci);
 
-  // Pad blend attachments with opaque() for any unspecified colour targets.
   const auto n_color = desc.render_targets.color_formats.size();
   std::vector<VkPipelineColorBlendAttachmentState> blend_states;
   blend_states.reserve(n_color);
@@ -234,7 +258,7 @@ auto build_graphics_pipeline(VkDevice device,
   pipeline_ci.pDepthStencilState = &depth_stencil;
   pipeline_ci.pColorBlendState = &color_blending;
   pipeline_ci.pDynamicState = &dynamic_info;
-  pipeline_ci.layout = desc.layout;
+  pipeline_ci.layout = active_layout;
   pipeline_ci.renderPass = VK_NULL_HANDLE;
 
   VkPipeline pipeline = VK_NULL_HANDLE;
@@ -244,14 +268,23 @@ auto build_graphics_pipeline(VkDevice device,
     return std::unexpected(std::format("vkCreateGraphicsPipelines failed ({})",
                                        static_cast<i32>(vr)));
 
+  VkDebugUtilsObjectNameInfoEXT name_info{};
+  name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+  name_info.objectType = VK_OBJECT_TYPE_PIPELINE;
+  name_info.objectHandle = reinterpret_cast<u64>(pipeline);
+  std::string resolved_name = std::format(
+      "{} ({} pipeline)", desc.shader_path.view(),
+      desc.layout != VK_NULL_HANDLE ? "with user-provided layout"
+                                    : "with auto-reflection layout");
+  name_info.pObjectName = resolved_name.c_str();
+  vk::check(vkSetDebugUtilsObjectNameEXT(device, &name_info));
+
   return pipeline;
 }
 
-// ── build_compute_pipeline
-// ────────────────────────────────────────────────────
-
 auto build_compute_pipeline(VkDevice device,
-                            const ComputePipelineDescription &desc)
+                            const ComputePipelineDescription &desc,
+                            VkPipelineLayout active_layout)
     -> std::expected<VkPipeline, std::string> {
 
   auto maybe_compiled = shader::Compiler::the().compile(desc.shader_path);
@@ -269,7 +302,7 @@ auto build_compute_pipeline(VkDevice device,
   const VkComputePipelineCreateInfo ci{
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
       .stage = stages[0].stage_ci,
-      .layout = desc.layout,
+      .layout = active_layout,
   };
 
   VkPipeline pipeline = VK_NULL_HANDLE;
@@ -279,61 +312,192 @@ auto build_compute_pipeline(VkDevice device,
     return std::unexpected(std::format("vkCreateComputePipelines failed ({})",
                                        static_cast<i32>(vr)));
 
+  VkDebugUtilsObjectNameInfoEXT name_info{};
+  name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+  name_info.objectType = VK_OBJECT_TYPE_PIPELINE;
+  name_info.objectHandle = reinterpret_cast<u64>(pipeline);
+  std::string resolved_name = std::format(
+      "{} ({} pipeline)", desc.shader_path.view(),
+      desc.layout != VK_NULL_HANDLE ? "with user-provided layout"
+                                    : "with auto-reflection layout");
+  name_info.pObjectName = resolved_name.c_str();
+  vk::check(vkSetDebugUtilsObjectNameEXT(device, &name_info));
+
   return pipeline;
 }
 
-// ── PipelineRegistry
-// ──────────────────────────────────────────────────────────
+} // namespace
+
+auto BlendMode::to_vk() const -> VkPipelineColorBlendAttachmentState {
+  return {
+      .blendEnable = enabled ? VK_TRUE : VK_FALSE,
+      .srcColorBlendFactor = src_color,
+      .dstColorBlendFactor = dst_color,
+      .colorBlendOp = color_op,
+      .srcAlphaBlendFactor = src_alpha,
+      .dstAlphaBlendFactor = dst_alpha,
+      .alphaBlendOp = alpha_op,
+      .colorWriteMask = write_mask,
+  };
+}
 
 auto PipelineRegistry::create_graphics(GraphicsPipelineDescription desc)
     -> std::expected<PipelineHandle, std::string> {
-  auto pipeline = build_graphics_pipeline(device, desc);
-  if (!pipeline)
+
+  auto maybe_compiled = shader::Compiler::the().compile(desc.shader_path);
+  if (!maybe_compiled)
+    return std::unexpected(maybe_compiled.error().message);
+
+  VkPipelineLayout active_layout = desc.layout;
+  bool owns_layout = false;
+
+  if (active_layout == VK_NULL_HANDLE) {
+    auto layout_res = create_layout_from_reflection(device, *maybe_compiled,
+                                                    desc.descriptor_set_layout);
+    if (!layout_res)
+      return std::unexpected(layout_res.error());
+    active_layout = *layout_res;
+    owns_layout = true;
+  }
+
+  auto pipeline = build_graphics_pipeline(device, desc, active_layout);
+  if (!pipeline) {
+    if (owns_layout)
+      vkDestroyPipelineLayout(device, active_layout, nullptr);
     return std::unexpected(std::move(pipeline.error()));
+  }
 
   const u32 id = static_cast<u32>(entries.size());
-  entries.push_back({*pipeline, std::move(desc)});
+  entries.push_back({.pipeline = *pipeline,
+                     .layout = active_layout,
+                     .owns_layout = owns_layout,
+                     .desc = std::move(desc)});
   return id;
 }
 
 auto PipelineRegistry::create_compute(ComputePipelineDescription desc)
     -> std::expected<PipelineHandle, std::string> {
-  auto pipeline = build_compute_pipeline(device, desc);
-  if (!pipeline)
+
+  auto maybe_compiled = shader::Compiler::the().compile(desc.shader_path);
+  if (!maybe_compiled)
+    return std::unexpected(maybe_compiled.error().message);
+
+  VkPipelineLayout active_layout = desc.layout;
+  bool owns_layout = false;
+
+  if (active_layout == VK_NULL_HANDLE) {
+    auto layout_res = create_layout_from_reflection(device, *maybe_compiled,
+                                                    desc.descriptor_set_layout);
+    if (!layout_res)
+      return std::unexpected(layout_res.error());
+    active_layout = *layout_res;
+    owns_layout = true;
+  }
+
+  auto pipeline = build_compute_pipeline(device, desc, active_layout);
+  if (!pipeline) {
+    if (owns_layout)
+      vkDestroyPipelineLayout(device, active_layout, nullptr);
     return std::unexpected(std::move(pipeline.error()));
+  }
 
   const u32 id = static_cast<u32>(entries.size());
-  entries.push_back({*pipeline, std::move(desc)});
+  entries.push_back({
+      .pipeline = *pipeline,
+      .layout = active_layout,
+      .owns_layout = owns_layout,
+      .desc = std::move(desc),
+  });
   return id;
 }
 
 auto PipelineRegistry::reload(PipelineHandle id)
     -> std::expected<void, std::string> {
+  if (!id.valid() || id.get() >= entries.size())
+    return std::unexpected{"invalid handle"};
+
   auto &entry = entries[id.get()];
 
-  auto rebuild =
+  auto path =
+      std::visit([](const auto &desc) { return desc.shader_path; }, entry.desc);
+  auto maybe_compiled = shader::Compiler::the().compile(path);
+  if (!maybe_compiled)
+    return std::unexpected(maybe_compiled.error().message);
+
+  VkPipelineLayout original_provided_layout =
+      std::visit([](const auto &desc) { return desc.layout; }, entry.desc);
+  VkDescriptorSetLayout descriptor_set_layout = std::visit(
+      [](const auto &desc) { return desc.descriptor_set_layout; }, entry.desc);
+
+  VkPipelineLayout new_layout = original_provided_layout;
+  bool new_owns_layout = false;
+
+  if (new_layout == VK_NULL_HANDLE) {
+    auto layout_res = create_layout_from_reflection(device, *maybe_compiled,
+                                                    descriptor_set_layout);
+    if (!layout_res)
+      return std::unexpected(layout_res.error());
+    new_layout = *layout_res;
+    new_owns_layout = true;
+  }
+
+  auto new_pipeline = std::visit(
       [&](const auto &desc) -> std::expected<VkPipeline, std::string> {
-    using T = std::decay_t<decltype(desc)>;
-    if constexpr (std::is_same_v<T, GraphicsPipelineDescription>)
-      return build_graphics_pipeline(device, desc);
-    else
-      return build_compute_pipeline(device, desc);
-  };
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, GraphicsPipelineDescription>)
+          return build_graphics_pipeline(device, desc, new_layout);
+        else
+          return build_compute_pipeline(device, desc, new_layout);
+      },
+      entry.desc);
 
-  auto new_pipeline = std::visit(rebuild, entry.desc);
-  if (!new_pipeline)
-    return std::unexpected(std::move(new_pipeline.error()));
+  if (!new_pipeline) {
+    if (new_owns_layout)
+      vkDestroyPipelineLayout(device, new_layout, nullptr);
+    return std::unexpected{new_pipeline.error()};
+  }
 
-  // Swap only after successful compile — old pipeline survives a failed reload.
-  vkDestroyPipeline(device, entry.pipeline, nullptr);
+  vkDeviceWaitIdle(device);
+
+  if (entry.pipeline != VK_NULL_HANDLE) {
+    vkDestroyPipeline(device, entry.pipeline, nullptr);
+  }
+
+  if (entry.owns_layout && entry.layout != VK_NULL_HANDLE) {
+    vkDestroyPipelineLayout(device, entry.layout, nullptr);
+  }
+
   entry.pipeline = *new_pipeline;
+  entry.layout = new_layout;
+  entry.owns_layout = new_owns_layout;
+
   return {};
 }
 
 auto PipelineRegistry::reload_all() -> void {
-  for (u32 i = 0u; i < static_cast<u32>(entries.size()); ++i) {
-    if (auto result = reload(i); !result)
-      error("pipeline {}: hot-reload failed: {}", i, result.error());
+  for (u32 i = 0; i < static_cast<u32>(entries.size()); ++i) {
+    if (auto r = reload(PipelineHandle{i}); !r)
+      error("reload_all: entry {}: {}", i, r.error());
+  }
+}
+
+auto PipelineRegistry::reload_by_shader(const VFSPath &path) -> void {
+  for (auto i = 0U; i < entries.size(); i++) {
+    auto &entry = entries.at(i);
+    const auto matches = std::visit(
+        [&](const auto &desc) {
+          return desc.shader_path.view() == path.view();
+        },
+        entry.desc);
+
+    if (!matches)
+      continue;
+
+    if (auto r = reload(PipelineHandle{static_cast<u32>(i)}); !r)
+      error("shader reload failed ({}) pipeline {}: {}", path.view(), i,
+            r.error());
+    else
+      info("reloaded pipeline {} ({})", i, path.view());
   }
 }
 

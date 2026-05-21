@@ -24,6 +24,7 @@ set(ASSETS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/assets" CACHE PATH
 
 find_package(Vulkan REQUIRED)
 find_package(X11 REQUIRED)
+find_package(PkgConfig REQUIRED) 
 
 include(cmake/CPM.cmake)
 
@@ -116,6 +117,11 @@ CPMAddPackage(
   URI "gh:spnda/fastgltf@0.9.0"
   GIT_SHALLOW YES
   OPTIONS "FASTGLTF_COMPILE_AS_CPP20 ON FASTGLTF_USE_CUSTOM_SMALLVECTOR ON FASTGLTF_DISABLE_CUSTOM_MEMORY_POOL ON"
+)
+CPMAddPackage(
+  NAME efsw
+  GITHUB_REPOSITORY SpartanJ/efsw
+  GIT_TAG master  
 )
 
 set(GLM_ENABLE_SIMD_SSE2 CACHE FORCE "Enable SSE2 optimizations" ON)
@@ -269,6 +275,7 @@ add_library(dockyard STATIC
   src/dockyard/pipeline_builder.cpp
   src/dockyard/mesh_loader.cpp
   src/dockyard/scene.cpp
+  src/dockyard/shader_watcher.cpp
   src/dockyard/canvas_renderer.cpp
 )
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
@@ -296,6 +303,7 @@ target_link_libraries(dockyard
     Taskflow::Taskflow
     ${CMAKE_DL_LIBS}
   PRIVATE
+    efsw-static
     spdlog::spdlog
     Vulkan::Headers
 )
@@ -322,6 +330,7 @@ add_executable(dockforge src/dockforge/main.cpp
   src/dockforge/path_camera_controller.cpp
   src/dockforge/editor_camera.cpp
   src/dockforge/editor_utils.cpp
+
   src/dockforge/matrix_cache.cpp)
 target_link_libraries(dockforge PRIVATE dockyard imgui)
 target_set_warnings(dockforge)

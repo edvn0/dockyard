@@ -35,9 +35,9 @@ Tuple<float, uint> compute_shadow(float3 world_pos, float3 n, float3 sun_dir,
     float shadow = 0.0;
     float2 texel = 1.0 / float2(shadow_map_resolution);
     [unroll]
-    for (int x = -2; x <= 2; ++x)
+    for (int x = -1; x <= 1; ++x)
         [unroll]
-    for (int y = -2; y <= 2; ++y)
+    for (int y = -1; y <= 1; ++y)
         {
             shadow += shadow_array.SampleCmpLevelZero(
                 shadow_sampler,
@@ -45,7 +45,7 @@ Tuple<float, uint> compute_shadow(float3 world_pos, float3 n, float3 sun_dir,
                 shadow_z);
         }
 
-    return makeTuple(shadow / 25.0, cascade_idx);
+    return makeTuple(shadow / 9.0, cascade_idx);
 }
 
 float3 debug_cascade_color(uint cascade_idx)

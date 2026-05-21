@@ -110,6 +110,9 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   vk::check(volkInitialize());
   DEFER(volkFinalize());
 
+  auto precache_future = shader::Compiler::the().precache_shaders({});
+  precache_future.wait();
+
   auto inst_ret =
       vkb::InstanceBuilder{}
           .set_app_name("Dockyard")

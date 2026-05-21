@@ -88,6 +88,7 @@ struct RenderTargetLayout {
 struct GraphicsPipelineDescription {
   VFSPath shader_path; // e.g. "shaders://forward.slang"
   VkPipelineLayout layout = VK_NULL_HANDLE;
+  VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
   RenderTargetLayout render_targets{};
 
   VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
@@ -106,23 +107,12 @@ struct GraphicsPipelineDescription {
 
 struct ComputePipelineDescription {
   VFSPath shader_path;
+  VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
   VkPipelineLayout layout = VK_NULL_HANDLE;
 };
 
 using PipelineDescription =
     std::variant<GraphicsPipelineDescription, ComputePipelineDescription>;
-
-// ── Build functions
-// ───────────────────────────────────────────────────────────
-
-[[nodiscard]] auto
-build_graphics_pipeline(VkDevice device,
-                        const GraphicsPipelineDescription &desc)
-    -> std::expected<VkPipeline, std::string>;
-
-[[nodiscard]] auto
-build_compute_pipeline(VkDevice device, const ComputePipelineDescription &desc)
-    -> std::expected<VkPipeline, std::string>;
 
 class PipelineHandle {
 public:
@@ -141,6 +131,11 @@ struct PipelineRegistry {
 
   struct Entry {
     VkPipeline pipeline = VK_NULL_HANDLE;
+    /* Will be the same as desc::layout IFF provided, else
+     owned by the registry and must be destroyed on
+     cleanup.*/
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    bool owns_layout = false;
     PipelineDescription desc;
   };
 
@@ -156,13 +151,17 @@ struct PipelineRegistry {
   [[nodiscard]] auto create_compute(ComputePipelineDescription desc)
       -> std::expected<PipelineHandle, std::string>;
 
-  [[nodiscard]] auto reload(PipelineHandle id)
-      -> std::expected<void, std::string>;
+  [[nodiscard]] auto reload(PipelineHandle) -> std::expected<void, std::string>;
+  auto reload_by_shader(const VFSPath &) -> void;
 
   auto reload_all() -> void;
 
   [[nodiscard]] auto get(PipelineHandle id) const -> const auto & {
     return entries[id.get()].pipeline;
+  }
+
+  [[nodiscard]] auto get_object(PipelineHandle id) const -> const auto & {
+    return entries[id.get()];
   }
 
   auto cleanup() -> void;

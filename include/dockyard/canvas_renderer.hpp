@@ -1,9 +1,9 @@
 #pragma once
 
+#include "dockyard/mesh.hpp"
 #include <dockyard/buffer.hpp>
 #include <dockyard/compiler.hpp>
 #include <dockyard/pipeline_builder.hpp>
-#include <dockyard/scene_renderer.hpp>
 #include <dockyard/types.hpp>
 #include <dockyard/vfs_path.hpp>
 
@@ -17,6 +17,8 @@
 #include <vector>
 
 namespace dy {
+
+struct SceneRenderer;
 
 class CanvasRenderer {
 public:

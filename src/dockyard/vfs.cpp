@@ -82,6 +82,39 @@ auto VFS::read_binary(const VFSPath &p)
   return read_binary(p.view());
 }
 
+/**struct Filter {
+    std::unordered_set<std::string_view> ignored_dirs;
+    std::unordered_set<std::string_view> included_extensions;
+  }; */
+auto VFS::list(std::string_view virtual_path, const Filter &filter)
+    -> std::vector<std::filesystem::path> {
+  std::filesystem::path physical = resolve(virtual_path);
+  std::vector<std::filesystem::path> paths;
+
+  if (!std::filesystem::exists(physical) ||
+      !std::filesystem::is_directory(physical)) {
+    warn("VFS: Path does not exist or is not a directory: {}",
+         physical.string());
+    return paths;
+  }
+
+  for (const auto &entry :
+       std::filesystem::recursive_directory_iterator(physical)) {
+    if (entry.is_regular_file()) {
+      if (!filter.ignored_dirs.contains(
+              entry.path().parent_path().filename().string())) {
+        if (filter.included_extensions.empty() ||
+            filter.included_extensions.contains(
+                entry.path().extension().string())) {
+          paths.push_back(entry.path());
+        }
+      }
+    }
+  }
+
+  return paths;
+}
+
 auto VFS::read_bytes(const VFSPath &p)
     -> std::expected<std::vector<u8>, std::string> {
   const std::filesystem::path physical = resolve(p.view());

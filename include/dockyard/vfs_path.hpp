@@ -1,9 +1,10 @@
 #pragma once
 
-#include "dockyard/log.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <dockyard/log.hpp>
+#include <dockyard/types.hpp>
 #include <string>
 #include <string_view>
 
@@ -34,7 +35,7 @@ public:
       std::abort();
     }
 
-    return VFSPath{raw};
+    return VFSPath{raw, sep};
   }
 
   template <typename... Args>
@@ -42,20 +43,21 @@ public:
     return create(std::format(fmt, std::forward<Args>(args)...));
   }
 
-  auto scheme() const -> std::string_view {
-    return std::string_view{path}.substr(0, path.find("://"));
+  [[nodiscard]] auto scheme() const -> std::string_view {
+    return std::string_view{path}.substr(0, sep);
   }
 
-  auto relative_path() const -> std::string_view {
-    const auto pos = path.find("://");
-    return std::string_view{path}.substr(pos + 3);
+  [[nodiscard]] auto relative_path() const -> std::string_view {
+    return std::string_view{path}.substr(sep + 3);
   }
 
-  auto view() const -> std::string_view { return path; }
+  [[nodiscard]] auto view() const -> std::string_view { return path; }
 
 private:
-  explicit VFSPath(std::string_view d) : path(d) {}
+  explicit VFSPath(std::string_view d, usize sep) : path(d), sep(sep) {}
+
   std::string path;
+  usize sep; // index of ':'
 };
 
 } // namespace dy

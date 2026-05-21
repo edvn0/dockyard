@@ -1,9 +1,11 @@
-#include "PCH.hpp"
 #include <dockyard/scene_renderer.hpp>
 
-#include <atomic>
 #include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
+#include <dockyard/shader_watcher.hpp>
+#include <dockyard/vfs.hpp>
+
+#include <atomic>
 #include <execution>
 #include <limits>
 #include <ranges>
@@ -162,75 +164,12 @@ auto create_main_pipeline_layout(VkDevice device,
   return layout;
 }
 
-auto create_composite_pipeline(VkDevice device,
-                               VkDescriptorSetLayout bindless_layout,
-                               VkPipelineLayout &out_layout,
-                               VkPipeline &out_pipeline) -> void {
-  const VkPushConstantRange push_range{
-      .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-      .offset = 0U,
-      .size = sizeof(CompositePushConstants),
-  };
-  const VkPipelineLayoutCreateInfo layout_ci{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1U,
-      .pSetLayouts = &bindless_layout,
-      .pushConstantRangeCount = 1U,
-      .pPushConstantRanges = &push_range,
-  };
-  vkCreatePipelineLayout(device, &layout_ci, nullptr, &out_layout);
-
-  auto result = build_graphics_pipeline(
-      device,
-      GraphicsPipelineDescription{
-          .shader_path = VFSPath::create("shaders://composite.slang"),
-          .layout = out_layout,
-          .render_targets = {.color_formats = {VK_FORMAT_R8G8B8A8_UNORM}},
-          .cull_mode = VK_CULL_MODE_NONE,
-          .blending = {BlendMode::opaque()},
-      });
-  if (!result) {
-    error("composite pipeline: {}", result.error());
-    std::abort();
-  }
-  out_pipeline = *result;
-}
-
-auto create_culling_pipeline(VkDevice device,
-                             VkDescriptorSetLayout bindless_layout,
-                             VkPipelineLayout &out_layout,
-                             VkPipeline &out_pipeline) -> void {
-  const VkPushConstantRange push_range{
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0U,
-      .size = sizeof(CullingPushConstants),
-  };
-  const VkPipelineLayoutCreateInfo layout_ci{
-      .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-      .setLayoutCount = 1U,
-      .pSetLayouts = &bindless_layout,
-      .pushConstantRangeCount = 1U,
-      .pPushConstantRanges = &push_range,
-  };
-  vkCreatePipelineLayout(device, &layout_ci, nullptr, &out_layout);
-
-  auto result = build_compute_pipeline(
-      device, ComputePipelineDescription{
-                  .shader_path = VFSPath::create("shaders://culling.slang"),
-                  .layout = out_layout,
-              });
-  if (!result) {
-    error("culling pipeline: {}", result.error());
-    std::abort();
-  }
-  out_pipeline = *result;
-}
-
 auto SceneRenderer::register_gltf(MeshAsset &&asset) -> MeshHandle {
   u32 id = static_cast<u32>(mesh_registry.size());
   mesh_registry.push_back(std::move(asset));
   return MeshHandle{id};
 }
+
 auto SceneRenderer::register_external_view(VkImageView view,
                                            VkImageViewType type)
     -> TextureHandle {
@@ -295,7 +234,19 @@ auto SceneRenderer::get_material_view_mut(const MeshAsset &mesh) const
 SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
     : ctx(c), swapchain(sc),
       depth_prepass(RenderPassType::DepthPrepass, ctx.allocator),
-      forward_pass(RenderPassType::Forward, ctx.allocator) {
+      forward_pass(RenderPassType::Forward, ctx.allocator),
+      shader_watcher(
+          new shader::ShaderWatcher(
+              VFS::get().resolve("shaders://"), "shaders",
+              [&reloads = this->pending_reloads,
+               &mutex = this->pending_reload_mutex](dy::VFSPath changed) {
+                dy::shader::Compiler::the().invalidate(changed);
+                std::scoped_lock lock{mutex};
+                reloads.push_back(std::move(changed));
+              }),
+          +[](shader::ShaderWatcher *w) { delete w; }) {
+  shader_watcher->start();
+
   constexpr auto vertex_count = 1'000'000;
   constexpr auto index_count = 10'000'000;
   constexpr auto material_count = 500;
@@ -381,15 +332,33 @@ auto SceneRenderer::initialise_bindless() -> void {
   pipeline_layout = create_main_pipeline_layout(ctx.device, bindless.layout);
   pipeline_registry = std::make_unique<PipelineRegistry>(ctx.device);
 
-  create_composite_pipeline(ctx.device, bindless.layout,
-                            composite_pipeline_layout, composite_pipeline);
-  DeletionQueue::the().destroy_at_exit(ctx.device, composite_pipeline,
-                                       composite_pipeline_layout);
+  {
+    auto result = pipeline_registry->create_graphics({
+        .shader_path = VFSPath::create("shaders://composite.slang"),
+        .descriptor_set_layout = bindless.layout,
+        .render_targets = {.color_formats = {VK_FORMAT_R8G8B8A8_UNORM}},
+        .cull_mode = VK_CULL_MODE_NONE,
+        .blending = {BlendMode::opaque()},
+    });
+    if (!result) {
+      error("composite pipeline initialization failed: {}", result.error());
+      std::abort();
+    }
+    composite_pipeline = *result;
+  }
 
-  create_culling_pipeline(ctx.device, bindless.layout, culling_pipeline_layout,
-                          culling_pipeline);
-  DeletionQueue::the().destroy_at_exit(ctx.device, culling_pipeline,
-                                       culling_pipeline_layout);
+  {
+    auto result = pipeline_registry->create_compute({
+        .shader_path = VFSPath::create("shaders://culling.slang"),
+        .descriptor_set_layout = bindless.layout,
+        .layout = VK_NULL_HANDLE,
+    });
+    if (!result) {
+      error("culling pipeline initialization failed: {}", result.error());
+      std::abort();
+    }
+    culling_pipeline = *result;
+  }
 
   const VkSamplerCreateInfo shadow_ci{
       .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -584,6 +553,16 @@ auto extract_frustum_planes(const glm::mat4 &vp)
 
 auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
                             const glm::mat4 &projection) -> bool {
+  {
+    std::scoped_lock lock{pending_reload_mutex};
+    if (!pending_reloads.empty()) {
+      auto &&popped = std::move(pending_reloads.front());
+      info("Reloading shader due to change in {}", popped.view());
+      pipeline_registry->reload_by_shader(popped);
+      pending_reloads.pop_front();
+    }
+  }
+
   current_frame_index = frame_index;
   if (submission_queue.empty())
     return false;
@@ -688,16 +667,17 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
 }
 
 void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, composite_pipeline);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          composite_pipeline_layout, 0u, 1u, &bindless.set, 0u,
-                          nullptr);
+  const auto &entry = pipeline_registry->get_object(composite_pipeline);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.layout,
+                          0u, 1u, &bindless.set, 0u, nullptr);
   const CompositePushConstants push{
       .forward_texture_index = forward_target_handle,
       .sampler = dummy_sampler_handle,
   };
-  vkCmdPushConstants(cmd, composite_pipeline_layout,
-                     VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(push), &push);
+  vkCmdPushConstants(cmd, entry.layout,
+                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                     0u, sizeof(push), &push);
   vkCmdDraw(cmd, 3U, 1u, 0u, 0u);
 }
 
@@ -781,12 +761,12 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
       .total_instance_count = static_cast<u32>(geometry_count),
   };
 
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, culling_pipeline);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                          culling_pipeline_layout, 0U, 1U, &bindless.set, 0U,
-                          nullptr);
-  vkCmdPushConstants(cmd, culling_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                     0U, sizeof(push), &push);
+  const auto &entry = pipeline_registry->get_object(culling_pipeline);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout, 0U,
+                          1U, &bindless.set, 0U, nullptr);
+  vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                     sizeof(push), &push);
 
   auto dispatch_count = (geometry_count + 63) / 64;
   vkCmdDispatch(cmd, dispatch_count, 1, 1);

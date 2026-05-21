@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <dockforge/dockforge.hpp>
 
 #include <dockforge/editor_camera.hpp>
@@ -10,15 +11,16 @@
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/scene_renderer.hpp>
+#include <dockyard/vfs.hpp>
 
 #include <GLFW/glfw3.h>
+#include <glm/gtc/random.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 
 #include <imgui.h>
 
 #include <ImGuizmo.h>
-#include <vulkan/vulkan_core.h>
 
 #include "./cube_vertices.inl"
 
@@ -338,7 +340,6 @@ void Dockforge::refresh_entity_cache() {
   state.entity_cache.clear();
   auto &registry = active_scene->registry();
 
-  // 1. Gather root entities
   std::vector<entt::entity> roots;
   auto tag_view = registry.view<Components::Tag>();
   for (auto entity : tag_view) {
@@ -350,12 +351,9 @@ void Dockforge::refresh_entity_cache() {
   auto &cache = state.entity_cache;
   auto child_view = registry.view<Components::ParentOf>();
 
-  // 2. Recursive lambda that respects the expansion state
   auto const add_to_cache_recursive =
       [&, &s = state](this auto &&self, entt::entity current,
                       u32 current_depth) -> void {
-    // Find if this entity actually has any children to decide if it needs an
-    // arrow
     bool has_children = false;
     for (auto child : child_view) {
       if (child_view.get<Components::ParentOf>(child).parent == current) {
@@ -364,16 +362,12 @@ void Dockforge::refresh_entity_cache() {
       }
     }
 
-    // Add to our flat linear display list
     cache.push_back({
         .entity = current,
         .depth = current_depth,
-        .is_visible =
-            true // Every entity that makes it into the cache loop is visible
+        .is_visible = true,
     });
 
-    // CRUCIAL: If the parent isn't expanded, stop processing this branch
-    // immediately!
     if (has_children && s.expanded_entities.contains(current)) {
       for (auto child : child_view) {
         if (child_view.get<Components::ParentOf>(child).parent == current) {
@@ -383,7 +377,6 @@ void Dockforge::refresh_entity_cache() {
     }
   };
 
-  // 3. Populate
   for (auto root : roots) {
     add_to_cache_recursive(root, 0);
   }
@@ -810,6 +803,12 @@ auto Dockforge::build_ui() -> void {
             auto &new_ov =
                 selected_entity.emplace<Components::MaterialOverride>();
             new_ov.material = mats.first();
+            auto random_color =
+                glm::linearRand(glm::vec4{0.5F, 0.5F, 0.5F, 1.0F},
+                                glm::vec4{1.0F, 1.0F, 1.0F, 1.0F});
+            std::ranges::copy(glm::value_ptr(random_color),
+                              glm::value_ptr(random_color) + 4,
+                              new_ov.material.albedo_factor);
           }
           if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Stamps a single-material override.");
@@ -971,6 +970,7 @@ void compute_world_matrices(entt::registry &registry) {
 auto Dockforge::render(RenderContext &ctx) -> u64 {
   if (state.hierarchy_dirty) [[unlikely]] {
     compute_world_matrices(active_scene->registry());
+    state.hierarchy_dirty = false;
   }
 
   if (pending_pick) [[unlikely]] {

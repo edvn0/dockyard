@@ -67,7 +67,6 @@ struct PositionOnlyVertex
     float position[3];
 };
 
-[vk::ext_scalar_block_layout]
 struct VkDrawIndexedIndirectCommand {
     uint indexCount;
     uint instanceCount;
