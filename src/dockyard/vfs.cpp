@@ -21,6 +21,7 @@ void VFS::initialize(const std::filesystem::path& assets_root) {
   mounts["scripts"] = root / "scripts";
   mounts["fonts"] = root / "fonts";
   mounts["editor"] = root / "editor";
+  mounts["textures"] = root / "textures";
   mounts["meshes"] = root / "meshes";
 
   info("[VFS] Initialized with root: {}", root);

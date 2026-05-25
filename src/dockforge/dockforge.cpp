@@ -7,6 +7,7 @@
 
 #include <dockyard/buffer.hpp>
 #include <dockyard/components.hpp>
+#include <dockyard/context.hpp>
 #include <dockyard/imgui_renderer.hpp>
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene.hpp>
@@ -21,6 +22,7 @@
 #include <imgui.h>
 
 #include <ImGuizmo.h>
+#include <vulkan/vulkan_core.h>
 
 #include "./cube_vertices.inl"
 
@@ -78,7 +80,7 @@ auto grow_pool(Dockforge &app) -> void {
   app.override_pool.base_slot = new_offset.start_index;
   app.override_pool.capacity = new_capacity;
   app.override_pool.needs_grow = false;
-  app.renderer->bindless.need_repopulate = true;
+  app.renderer->bindless.mark_dirty();
 }
 
 constexpr auto remove_rotation = [](const auto &m) {
@@ -119,7 +121,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   context = &ctx.context;
 
   editor_scene = std::make_shared<Scene>();
-  active_scene = editor_scene;
+  active_scene = editor_scene.get();
   active_scene->group<Components::Transform, Components::LocalToWorld,
                       Components::Mesh>();
   active_scene->on_construct<Components::Tag>()
@@ -145,7 +147,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
     viewport_resources = ViewportResources::create(*context, *renderer, w, h);
     renderer->update_output_texture(viewport_resources.forward_target);
-    renderer->bindless.need_repopulate = true;
     renderer->initialise_bindless();
 
     constexpr u32 override_material_count_initial = 16U;
@@ -164,7 +165,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
     auto &scene = *active_scene;
     const int grid_side = 10;
-    const float spacing = std::numbers::sqrt2_v<float> + 0.5F;
+    const float spacing = 0.5F;
     const float offset = (grid_side - 1) * spacing / 2.F;
 
     auto parent = scene.make("Cubes");
@@ -237,7 +238,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   }
 
   renderer->bindless.repopulate_if_needed(
-      renderer->textures, renderer->samplers, renderer->comparison_samplers);
+      renderer->textures, renderer->samplers, renderer->comparison_samplers,
+      renderer->subimages);
 
   auto loaded = mesh::load_from_path(
       VFSPath::create("meshes://DamagedHelmet.glb"), *renderer);
@@ -255,10 +257,16 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   }
 
   auto frustum_entity = active_scene->make("DebugFrustum");
+  auto &df_transform = frustum_entity.get<Components::Transform>();
+  df_transform.mut().position = glm::vec3{5, -5, -10};
   auto &df = frustum_entity.emplace<Components::DebugFrustum>();
-  df.view = glm::lookAtLH(glm::vec3{5, -5, -10}, glm::vec3{0, 0, 0},
-                          glm::vec3{0, 1, 0});
-  df.proj = glm::perspective(glm::radians(30.F), 1.77f, 0.1f, 30.F);
+  df.center = glm::vec3{0, 0, 0};
+  df.projection_config = {
+      .fov_degrees = 30.0F,
+      .aspect = 1.77F,
+      .near = 0.1F,
+      .far = 30.0F,
+  };
   df.color = glm::vec4{1.F, 1.F, 0.F, 1.F};
 }
 
@@ -384,6 +392,46 @@ void Dockforge::refresh_entity_cache() {
   state.cache_dirty = false;
 }
 
+void Dockforge::draw_component_editors() {
+  if (ImGui::Begin("Component Editor")) {
+    if (state.selected != entt::null) {
+      Entity entity{*active_scene, state.selected};
+
+      if (auto *tag = entity.try_get<Components::Tag>()) {
+        char buffer[128];
+        std::snprintf(buffer, sizeof(buffer), "%.*s",
+                      static_cast<int>(tag->tag.size()), tag->tag.data());
+        if (ImGui::InputText("Tag", buffer, sizeof(buffer))) {
+          tag->tag = buffer;
+        }
+      }
+
+      if (auto *mesh = entity.try_get<Components::Mesh>()) {
+        ImGui::Text("Mesh: %u", mesh->handle.index());
+      }
+
+      // Debug frustum
+      if (auto *frustum = entity.try_get<Components::DebugFrustum>()) {
+        ImGui::Text("Debug Frustum:");
+        ImGui::SliderFloat3("Center", glm::value_ptr(frustum->center), -20.F,
+                            20.F);
+        ImGui::SliderFloat("FOV", &frustum->projection_config.fov_degrees, 1.F,
+                           179.F);
+        ImGui::SliderFloat("Aspect", &frustum->projection_config.aspect, 0.1F,
+                           10.F);
+        ImGui::SliderFloat("Near", &frustum->projection_config.near, 0.01F,
+                           100.F);
+        ImGui::SliderFloat("Far", &frustum->projection_config.far, 0.1F,
+                           1000.F);
+        ImGui::ColorEdit4("Color", glm::value_ptr(frustum->color));
+      }
+    } else {
+      ImGui::Text("No entity selected");
+    }
+    ImGui::End();
+  }
+}
+
 void Dockforge::draw_scene_outliner() {
   if (state.cache_dirty) {
     refresh_entity_cache();
@@ -496,6 +544,51 @@ void Dockforge::draw_scene_outliner() {
   ImGui::End();
 }
 
+/**
+struct GPUMaterial {
+  alignas(16) float albedo_factor[4];
+  alignas(16) float emissive_factor[4];
+
+  // PBR factors + scales
+  float metallic_factor;
+  float roughness_factor;
+  float normal_scale;
+  float occlusion_strength;
+
+  // Alpha & mode
+  u32 alpha_mode;
+  float alpha_cutoff;
+
+  // Texture indices
+  u32 albedo_index;
+  u32 normal_index;
+  u32 metallic_roughness_index;
+  u32 emissive_index;
+  u32 occlusion_index;
+
+  // Flags for shader branching
+  MaterialFlags flags;
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Extensions & advanced features
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Transmission (glass refraction) — KHR_materials_transmission
+  float transmission_factor; // [0,1]: 0 = opaque, 1 = fully transmissive
+
+  // Anisotropy (brushed metals, etc) — KHR_materials_anisotropy
+  float anisotropy_factor;   // [0,1]: strength of anisotropic reflection
+  float anisotropy_rotation; // [0,1]: rotation angle (normalized to [0, 2π])
+
+  // Cull mode: determines which faces to render
+  u32 cull_mode;
+
+  // UV transformation (cheap variation without extra textures)
+  float uv_scale_x;
+  float uv_scale_y;
+  float uv_offset_x;
+  float uv_offset_y;
+}; */
 [[nodiscard]] auto draw_material_editor(GPUMaterial &mat) -> bool {
   bool changed = false;
   changed |= ImGui::ColorEdit4("Albedo Factor", mat.albedo_factor);
@@ -511,6 +604,12 @@ void Dockforge::draw_scene_outliner() {
   changed |= ImGui::SliderFloat("Occlusion Strength", &mat.occlusion_strength,
                                 0.0F, 1.0F);
   changed |= ImGui::SliderFloat("Alpha Cutoff", &mat.alpha_cutoff, 0.0F, 1.0F);
+  changed |=
+      ImGui::SliderFloat("Transmission", &mat.transmission_factor, 0.0F, 1.0F);
+  changed |=
+      ImGui::SliderFloat("Anisotropy", &mat.anisotropy_factor, 0.0F, 1.0F);
+  changed |= ImGui::SliderFloat("Anisotropy Rotation", &mat.anisotropy_rotation,
+                                0.0F, 1.0F);
 
   static constexpr std::array<const char *, 3> alpha_modes = {
       "Opaque",
@@ -551,10 +650,10 @@ void Dockforge::draw_scene_outliner() {
       ImGui::Dummy(icon_dim);
     }
 
-    ImGui::SameLine(0.0f, ImGui::GetStyle().ItemInnerSpacing.x);
+    ImGui::SameLine(0.0F, ImGui::GetStyle().ItemInnerSpacing.x);
     // vertically centre the InputInt against the icon
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                         (icon_size - ImGui::GetFrameHeight()) * 0.5f);
+                         ((icon_size - ImGui::GetFrameHeight()) * 0.5F));
     int idx = static_cast<int>(index);
     ImGui::InputInt(label, &idx, 0, 0, ImGuiInputTextFlags_ReadOnly);
   };
@@ -601,9 +700,11 @@ auto Dockforge::draw_debug_shapes() -> void {
                            plane.s1, plane.s2, plane.color, plane.outline);
   }
 
-  for (auto &&[e, frustum] :
-       active_scene->view<Components::DebugFrustum>().each()) {
-    canvas_renderer->frustum(frustum.view, frustum.proj, frustum.color);
+  for (auto &&[e, frustum, xt] :
+       active_scene->view<Components::DebugFrustum, Components::Transform>()
+           .each()) {
+    auto &&[view, proj] = frustum.matrices(xt.get().position);
+    canvas_renderer->frustum(view, proj, frustum.color);
   }
 }
 
@@ -670,30 +771,7 @@ auto Dockforge::build_ui() -> void {
     pending_pick = glm::vec2(mp.x, mp.y);
   }
 
-  /*
-    auto [view, proj] = resolve_camera();
-    glm::mat4 view_matrix = view; // local copy so ViewManipulate can write back
-
-    ImVec2 gizmo_size = {128.f, 128.f};
-    ImVec2 gizmo_pos = {viewport_screen_pos.x + panel_size.x - gizmo_size.x,
-                        viewport_screen_pos.y};
-
-    ImGuizmo::ViewManipulate(glm::value_ptr(view_matrix), 8.f, gizmo_pos,
-                             gizmo_size, 0x10101010);
-
-    if (std::memcmp(glm::value_ptr(view), glm::value_ptr(view_matrix),
-                    sizeof(glm::mat4)) != 0) {
-      const glm::mat3 rot = glm::mat3(view_matrix);
-      const glm::vec3 trans = glm::vec3(view_matrix[3]);
-      const glm::vec3 new_pos = -glm::transpose(rot) * trans;
-      // Third row of view matrix is -forward in LH
-      const glm::vec3 forward =
-          glm::vec3(view_matrix[0][2], view_matrix[1][2], view_matrix[2][2]);
-      editor_camera->set_pose(new_pos, new_pos + forward);
-    } */
-
   MutableMaterialView selected_entity_materials{};
-
   if (state.selected != entt::null) {
     Entity selected_entity{*active_scene, state.selected};
     auto &transform = selected_entity.get<Components::Transform>();
@@ -836,6 +914,8 @@ auto Dockforge::build_ui() -> void {
 
   draw_scene_outliner();
 
+  draw_component_editors();
+
   if (viewport_hovered || viewport_focused) {
     ImGui::GetIO().WantCaptureMouse = false;
     ImGui::GetIO().WantCaptureKeyboard = false;
@@ -852,7 +932,6 @@ auto Dockforge::destroy() -> void {
   editor_camera.reset();
   editor_scene.reset();
   runtime_scene.reset();
-  active_scene.reset();
   renderer.reset();
 }
 
@@ -994,7 +1073,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
                           Components::Mesh>();
 
   for (auto &&[e, xt, ltw, m] : render_group.each()) {
-    renderer->submit(m.handle, ltw.matrix, forward_pipeline.get(),
+    renderer->submit(m.handle, ltw.matrix, forward_pipeline.index(),
                      resolve_material_slot({*active_scene, e}));
   }
   auto [view, projection] = resolve_camera();
@@ -1004,9 +1083,9 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     return ctx.next_frame_wait_value();
   }
 
-  if (renderer->bindless.repopulate_if_needed(renderer->textures,
-                                              renderer->samplers,
-                                              renderer->comparison_samplers)) {
+  if (renderer->bindless.repopulate_if_needed(
+          renderer->textures, renderer->samplers, renderer->comparison_samplers,
+          renderer->subimages)) {
     return ctx.next_frame_wait_value();
   }
 
@@ -1183,14 +1262,23 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     forward_ri.layerCount = 1u;
     forward_ri.colorAttachmentCount = 1u;
     forward_ri.pColorAttachments = &forward_color;
-    forward_ri.pDepthAttachment = &forward_depth,
+    forward_ri.pDepthAttachment = &forward_depth;
 
     vkCmdBeginRendering(ctx.main_cb, &forward_ri);
     vkCmdSetViewport(ctx.main_cb, 0u, 1u, &viewport);
     vkCmdSetScissor(ctx.main_cb, 0u, 1u, &scissor);
+    {
+      vkCmdSetDepthWriteEnable(ctx.main_cb, VK_FALSE);
+      vkCmdSetDepthTestEnable(ctx.main_cb, VK_FALSE);
+      vkCmdSetDepthCompareOp(ctx.main_cb, VK_COMPARE_OP_EQUAL);
+      vkCmdSetCullMode(ctx.main_cb, VK_CULL_MODE_NONE);
+      renderer->skybox_pass(ctx.main_cb);
+    }
+
     vkCmdSetCullMode(ctx.main_cb, VK_CULL_MODE_BACK_BIT);
-    vkCmdSetDepthCompareOp(ctx.main_cb, VK_COMPARE_OP_EQUAL);
+    vkCmdSetDepthCompareOp(ctx.main_cb, VK_COMPARE_OP_GREATER_OR_EQUAL);
     vkCmdSetDepthWriteEnable(ctx.main_cb, VK_FALSE);
+    vkCmdSetDepthTestEnable(ctx.main_cb, VK_TRUE);
     vkCmdSetFrontFace(ctx.main_cb, VK_FRONT_FACE_CLOCKWISE);
     vkCmdBindIndexBuffer(ctx.main_cb,
                          renderer->geometry_pool->index_buffer->get_buffer(),

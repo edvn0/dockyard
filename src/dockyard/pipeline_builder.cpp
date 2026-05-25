@@ -1,9 +1,8 @@
 #include "dockyard/vk_check.hpp"
-#include <dockyard/pipeline_builder.hpp>
-
 #include <dockyard/log.hpp>
-
+#include <dockyard/pipeline_builder.hpp>
 #include <ranges>
+#include <unordered_set>
 
 namespace dy {
 
@@ -72,6 +71,8 @@ struct TransientStage {
       return VK_SHADER_STAGE_TASK_BIT_EXT;
     case shader::Stage::Compute:
       return VK_SHADER_STAGE_COMPUTE_BIT;
+    case shader::Stage::None:
+      std::abort();
     }
   }
 
@@ -117,14 +118,14 @@ auto create_layout_from_reflection(
     VkDevice device, const shader::CompiledShader &compiled,
     VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE)
     -> std::expected<VkPipelineLayout, std::string> {
+
   u32 push_range_count = 0;
   VkPushConstantRange push_range{};
 
   if (compiled.push_constants.size > 0) {
     VkShaderStageFlags active_stages = 0;
-    for (const auto &ep : compiled.entry_points) {
+    for (const auto &ep : compiled.entry_points)
       active_stages |= TransientStage::to_vk_stage(ep.entry_point.stage);
-    }
 
     push_range = {
         .stageFlags = active_stages,
@@ -146,10 +147,9 @@ auto create_layout_from_reflection(
 
   VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
   if (vkCreatePipelineLayout(device, &layout_ci, nullptr, &pipeline_layout) !=
-      VK_SUCCESS) {
+      VK_SUCCESS)
     return std::unexpected(
         "vkCreatePipelineLayout failed during push-constant layout creation");
-  }
 
   return pipeline_layout;
 }
@@ -199,10 +199,12 @@ auto build_graphics_pipeline(VkDevice device,
   input_assembly.sType =
       VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
   input_assembly.topology = desc.topology;
+
   VkPipelineViewportStateCreateInfo viewport_state{};
   viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
   viewport_state.viewportCount = 1u;
   viewport_state.scissorCount = 1u;
+
   VkPipelineRasterizationStateCreateInfo rasterizer{};
   rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
   rasterizer.pNext = desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
@@ -213,31 +215,37 @@ auto build_graphics_pipeline(VkDevice device,
   rasterizer.cullMode = desc.cull_mode;
   rasterizer.frontFace = desc.front_face;
   rasterizer.lineWidth = desc.line_width;
+
   VkPipelineMultisampleStateCreateInfo multisampling{};
   multisampling.sType =
       VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
   multisampling.rasterizationSamples = desc.samples;
+
   VkPipelineDepthStencilStateCreateInfo depth_stencil{};
   depth_stencil.sType =
       VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
   depth_stencil.depthTestEnable = desc.depth.test ? VK_TRUE : VK_FALSE;
   depth_stencil.depthWriteEnable = desc.depth.write ? VK_TRUE : VK_FALSE;
   depth_stencil.depthCompareOp = desc.depth.compare_op;
+
   VkPipelineColorBlendStateCreateInfo color_blending{};
   color_blending.sType =
       VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
   color_blending.attachmentCount = static_cast<u32>(blend_states.size());
   color_blending.pAttachments = blend_states.data();
+
   std::vector<VkDynamicState> dynamic_states{
       VK_DYNAMIC_STATE_VIEWPORT,
       VK_DYNAMIC_STATE_SCISSOR,
   };
   dynamic_states.insert(dynamic_states.end(), desc.extra_dynamic_states.begin(),
                         desc.extra_dynamic_states.end());
+
   VkPipelineDynamicStateCreateInfo dynamic_info{};
   dynamic_info.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
   dynamic_info.dynamicStateCount = static_cast<u32>(dynamic_states.size());
   dynamic_info.pDynamicStates = dynamic_states.data();
+
   VkPipelineRenderingCreateInfo rendering_info{};
   rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
   rendering_info.colorAttachmentCount = static_cast<u32>(n_color);
@@ -245,6 +253,7 @@ auto build_graphics_pipeline(VkDevice device,
       desc.render_targets.color_formats.data();
   rendering_info.depthAttachmentFormat = desc.render_targets.depth_format;
   rendering_info.stencilAttachmentFormat = desc.render_targets.stencil_format;
+
   VkGraphicsPipelineCreateInfo pipeline_ci{};
   pipeline_ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
   pipeline_ci.pNext = &rendering_info;
@@ -367,12 +376,12 @@ auto PipelineRegistry::create_graphics(GraphicsPipelineDescription desc)
     return std::unexpected(std::move(pipeline.error()));
   }
 
-  const u32 id = static_cast<u32>(entries.size());
-  entries.push_back({.pipeline = *pipeline,
-                     .layout = active_layout,
-                     .owns_layout = owns_layout,
-                     .desc = std::move(desc)});
-  return id;
+  return pool.create({
+      .pipeline = *pipeline,
+      .layout = active_layout,
+      .owns_layout = owns_layout,
+      .desc = std::move(desc),
+  });
 }
 
 auto PipelineRegistry::create_compute(ComputePipelineDescription desc)
@@ -401,33 +410,156 @@ auto PipelineRegistry::create_compute(ComputePipelineDescription desc)
     return std::unexpected(std::move(pipeline.error()));
   }
 
-  const u32 id = static_cast<u32>(entries.size());
-  entries.push_back({
+  return pool.create({
       .pipeline = *pipeline,
       .layout = active_layout,
       .owns_layout = owns_layout,
       .desc = std::move(desc),
   });
-  return id;
 }
 
-auto PipelineRegistry::reload(PipelineHandle id)
+auto PipelineRegistry::poll_and_update_dirty_pipelines() -> void {
+  // 1. Gather all unique paths that are actually out of date on disk
+  std::unordered_set<std::string> dirty_paths;
+
+  for (u32 i = 0u; i < pool.capacity(); ++i) {
+    if (!pool.is_live(i))
+      continue;
+
+    const auto h = pool.handle_at(i);
+    auto *entry = pool.get(h);
+
+    if (std::holds_alternative<std::monostate>(entry->desc))
+      continue;
+
+    const auto shader_path = std::visit(
+        [](const auto &desc) -> std::string_view {
+          using T = std::decay_t<decltype(desc)>;
+          if constexpr (std::is_same_v<T, std::monostate>)
+            return {};
+          else
+            return desc.shader_path.view();
+        },
+        entry->desc);
+
+    if (shader_path.empty())
+      continue;
+
+    std::string path_str{shader_path};
+    if (!dirty_paths.contains(path_str)) {
+      if (shader::Compiler::the().is_dirty(shader_path)) {
+        dirty_paths.insert(path_str);
+      }
+    }
+  }
+
+  if (dirty_paths.empty())
+    return;
+
+  for (const auto &path_str : dirty_paths) {
+    auto vfs_path = VFSPath::create(path_str);
+    info("Detected file modification in {}, refreshing compiler cache...",
+         path_str);
+
+    auto compile_result = shader::Compiler::the().compile(vfs_path);
+    if (!compile_result) {
+      error("Failed to compile updated shader {}: {}", path_str,
+            compile_result.error().message);
+    }
+  }
+
+  for (u32 i = 0u; i < pool.capacity(); ++i) {
+    if (!pool.is_live(i))
+      continue;
+
+    const auto h = pool.handle_at(i);
+    auto *entry = pool.get(h);
+
+    if (std::holds_alternative<std::monostate>(entry->desc))
+      continue;
+
+    const std::string shader_path = std::visit(
+        [](const auto &desc) -> std::string {
+          using T = std::decay_t<decltype(desc)>;
+          if constexpr (std::is_same_v<T, std::monostate>)
+            return "";
+          else
+            return std::string(desc.shader_path.view());
+        },
+        entry->desc);
+
+    if (dirty_paths.contains(shader_path)) {
+      if (auto r = reload(h); !r) {
+        error("Synchronous hot-reload failed for slot {}: {}", i, r.error());
+      } else {
+        info("Successfully reloaded pipeline slot {}", i);
+      }
+    }
+  }
+}
+
+auto PipelineRegistry::destroy(PipelineHandle h) -> void {
+  auto *e = pool.get(h);
+  if (!e)
+    return;
+
+  vkDestroyPipeline(device, e->pipeline, nullptr);
+  if (e->owns_layout)
+    vkDestroyPipelineLayout(device, e->layout, nullptr);
+
+  pool.destroy(h);
+}
+
+auto PipelineRegistry::reload(PipelineHandle h)
     -> std::expected<void, std::string> {
-  if (!id.valid() || id.get() >= entries.size())
+  if (h.empty())
     return std::unexpected{"invalid handle"};
 
-  auto &entry = entries[id.get()];
+  auto *entry = pool.get(h); // asserts on stale in debug
 
-  auto path =
-      std::visit([](const auto &desc) { return desc.shader_path; }, entry.desc);
-  auto maybe_compiled = shader::Compiler::the().compile(path);
+  if (std::holds_alternative<std::monostate>(entry->desc)) {
+    return std::unexpected{"cannot reload an uninitialized pipeline"};
+  }
+
+  auto maybe_path = std::visit(
+      [](const auto &desc) -> std::expected<VFSPath, std::string> {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, std::monostate>)
+          return std::unexpected<std::string>{"Could not find"};
+        else
+          return std::expected<VFSPath, std::string>{
+              std::in_place,
+              desc.shader_path,
+          };
+      },
+      entry->desc);
+
+  if (!maybe_path)
+    return std::unexpected(maybe_path.error());
+
+  auto maybe_compiled = shader::Compiler::the().compile(maybe_path.value());
   if (!maybe_compiled)
     return std::unexpected(maybe_compiled.error().message);
 
-  VkPipelineLayout original_provided_layout =
-      std::visit([](const auto &desc) { return desc.layout; }, entry.desc);
+  VkPipelineLayout original_provided_layout = std::visit(
+      [](const auto &desc) {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, std::monostate>)
+          return VkPipelineLayout{VK_NULL_HANDLE};
+        else
+          return desc.layout;
+      },
+      entry->desc);
+
   VkDescriptorSetLayout descriptor_set_layout = std::visit(
-      [](const auto &desc) { return desc.descriptor_set_layout; }, entry.desc);
+      [](const auto &desc) {
+        using T = std::decay_t<decltype(desc)>;
+        if constexpr (std::is_same_v<T, std::monostate>)
+          return VkDescriptorSetLayout{VK_NULL_HANDLE};
+        else
+          return desc.descriptor_set_layout;
+      },
+      entry->desc);
 
   VkPipelineLayout new_layout = original_provided_layout;
   bool new_owns_layout = false;
@@ -446,10 +578,12 @@ auto PipelineRegistry::reload(PipelineHandle id)
         using T = std::decay_t<decltype(desc)>;
         if constexpr (std::is_same_v<T, GraphicsPipelineDescription>)
           return build_graphics_pipeline(device, desc, new_layout);
-        else
+        else if constexpr (std::is_same_v<T, ComputePipelineDescription>)
           return build_compute_pipeline(device, desc, new_layout);
+        else
+          return std::unexpected{"invalid pipeline type"};
       },
-      entry.desc);
+      entry->desc);
 
   if (!new_pipeline) {
     if (new_owns_layout)
@@ -459,52 +593,66 @@ auto PipelineRegistry::reload(PipelineHandle id)
 
   vkDeviceWaitIdle(device);
 
-  if (entry.pipeline != VK_NULL_HANDLE) {
-    vkDestroyPipeline(device, entry.pipeline, nullptr);
-  }
+  if (entry->pipeline != VK_NULL_HANDLE)
+    vkDestroyPipeline(device, entry->pipeline, nullptr);
 
-  if (entry.owns_layout && entry.layout != VK_NULL_HANDLE) {
-    vkDestroyPipelineLayout(device, entry.layout, nullptr);
-  }
+  if (entry->owns_layout && entry->layout != VK_NULL_HANDLE)
+    vkDestroyPipelineLayout(device, entry->layout, nullptr);
 
-  entry.pipeline = *new_pipeline;
-  entry.layout = new_layout;
-  entry.owns_layout = new_owns_layout;
+  entry->pipeline = *new_pipeline;
+  entry->layout = new_layout;
+  entry->owns_layout = new_owns_layout;
+
+  info("Reloaded {} successfully", h.index());
 
   return {};
 }
 
 auto PipelineRegistry::reload_all() -> void {
-  for (u32 i = 0; i < static_cast<u32>(entries.size()); ++i) {
-    if (auto r = reload(PipelineHandle{i}); !r)
-      error("reload_all: entry {}: {}", i, r.error());
+  for (u32 i = 0u; i < pool.capacity(); ++i) {
+    if (!pool.is_live(i))
+      continue;
+    const auto h = pool.handle_at(i);
+    if (auto r = reload(h); !r)
+      error("reload_all: slot {}: {}", i, r.error());
   }
 }
 
 auto PipelineRegistry::reload_by_shader(const VFSPath &path) -> void {
-  for (auto i = 0U; i < entries.size(); i++) {
-    auto &entry = entries.at(i);
-    const auto matches = std::visit(
+  for (u32 i = 0u; i < pool.capacity(); ++i) {
+    if (!pool.is_live(i))
+      continue;
+    const auto h = pool.handle_at(i);
+    const auto *entry = pool.get(h);
+
+    const bool matches = std::visit(
         [&](const auto &desc) {
-          return desc.shader_path.view() == path.view();
+          using T = std::decay_t<decltype(desc)>;
+          if constexpr (std::is_same_v<T, std::monostate>) {
+            return false;
+          } else {
+            return desc.shader_path.view() == path.view();
+          }
         },
-        entry.desc);
+        entry->desc);
 
     if (!matches)
       continue;
 
-    if (auto r = reload(PipelineHandle{static_cast<u32>(i)}); !r)
-      error("shader reload failed ({}) pipeline {}: {}", path.view(), i,
-            r.error());
+    if (auto r = reload(h); !r)
+      error("shader reload failed ({}) slot {}: {}", path.view(), i, r.error());
     else
-      info("reloaded pipeline {} ({})", i, path.view());
+      info("reloaded pipeline slot {} ({})", i, path.view());
   }
 }
 
 auto PipelineRegistry::cleanup() -> void {
-  for (auto &entry : entries)
-    vkDestroyPipeline(device, entry.pipeline, nullptr);
-  entries.clear();
+  for (u32 i = 0u; i < pool.capacity(); ++i) {
+    if (!pool.is_live(i))
+      continue;
+    destroy(pool.handle_at(i));
+  }
+  pool.clear();
 }
 
 } // namespace dy

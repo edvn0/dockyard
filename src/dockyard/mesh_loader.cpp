@@ -166,7 +166,10 @@ struct DecodedImage {
   img.pixels.resize(static_cast<usize>(w * h));
   std::memcpy(img.pixels.data(), raw, img.pixels.size() * sizeof(u32));
   stbi_image_free(raw);
-  return img;
+  return std::expected<DecodedImage, std::string>{
+      std::in_place,
+      std::move(img),
+  };
 }
 
 [[nodiscard]] auto load_image(const fastgltf::Asset &asset,
@@ -321,6 +324,36 @@ constexpr u32 k_fb_emissive = 4u;
   gpu.occlusion_index =
       resolve_tex(asset, handles, mat.occlusionTexture, k_fb_occlusion);
 
+  // Base flags: depth prepass for opaque/masked
+  gpu.flags = MaterialFlags::depth_prepass;
+  if (mat.alphaMode == fastgltf::AlphaMode::Mask)
+    set_flag(gpu.flags, MaterialFlags::alpha_mask);
+
+  // Two-sided rendering
+  if (mat.doubleSided)
+    set_flag(gpu.flags, MaterialFlags::two_sided);
+
+  if (auto *ext = mat.transmission.get(); ext != nullptr) {
+    gpu.transmission_factor = ext->transmissionFactor;
+    if (gpu.transmission_factor > 0.0F)
+      set_flag(gpu.flags, MaterialFlags::has_transmission);
+  }
+
+  if (auto *ext = mat.anisotropy.get(); ext != nullptr) {
+    gpu.anisotropy_factor = ext->anisotropyStrength;
+    gpu.anisotropy_rotation = ext->anisotropyRotation;
+    if (gpu.anisotropy_factor > 0.0F)
+      set_flag(gpu.flags, MaterialFlags::has_anisotropy);
+  }
+
+  gpu.uv_scale_x = 1.0F;
+  gpu.uv_scale_y = 1.0F;
+  gpu.uv_offset_x = 0.0F;
+  gpu.uv_offset_y = 0.0F;
+
+  gpu.cull_mode = mat.doubleSided ? static_cast<u32>(CullMode::None)
+                                  : static_cast<u32>(CullMode::Back);
+
   return gpu;
 }
 
@@ -405,10 +438,7 @@ constexpr u32 k_fb_emissive = 4u;
       return std::unexpected(res.error());
   }
 
-  return PrimitiveResult{
-      .data = std::move(out),
-      .aabb = std::move(aabb),
-  };
+  return std::expected<PrimitiveResult, std::string>{std::in_place, out, aabb};
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -438,7 +468,7 @@ constexpr u32 k_fb_emissive = 4u;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Node hierarchy flattening — pure output into GltfAsset::nodes
+// Node hierarchy flattening — pure output into MeshAsset::nodes
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct NodeStackFrame {
@@ -448,35 +478,6 @@ struct NodeStackFrame {
 
 void flatten_nodes(const fastgltf::Asset &asset,
                    std::span<const std::size_t> root_indices, MeshAsset &out) {
-  std::vector<NodeStackFrame> stack;
-  stack.reserve(root_indices.size());
-
-  for (const auto idx : root_indices) {
-    out.root_node_indices.push_back(
-        static_cast<u32>(out.nodes.size() + stack.size()));
-    stack.push_back({
-        .node_idx = idx,
-        .parent_flat_idx = -1,
-    });
-  }
-
-  out.nodes.clear();
-  out.root_node_indices.clear();
-  stack.clear();
-
-  for (const auto idx : root_indices) {
-    out.root_node_indices.push_back(
-        static_cast<u32>(out.nodes.size() + stack.size()));
-    stack.push_back({
-        .node_idx = idx,
-        .parent_flat_idx = -1,
-    });
-  }
-
-  out.nodes.clear();
-  out.root_node_indices.clear();
-  stack.clear();
-
   struct Frame {
     usize node_idx;
     i32 parent_flat_idx;
@@ -595,26 +596,6 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
 
   return renderer.register_gltf(std::move(result));
 }
-
-struct NanoProfiler {
-  std::string scope;
-  std::chrono::high_resolution_clock::time_point start;
-
-  // Use string_view to avoid unnecessary string allocations
-  explicit NanoProfiler(std::string_view name)
-      : scope(name), start(std::chrono::high_resolution_clock::now()) {}
-
-  ~NanoProfiler() {
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double, std::milli> elapsed = end - start;
-    trace("[{}]: {}ms", scope, elapsed.count());
-  }
-};
-
-#define PROFILE_CONCAT_INNER(a, b) a##b
-#define PROFILE_CONCAT(a, b) PROFILE_CONCAT_INNER(a, b)
-#define PROFILE_SCOPE(name)                                                    \
-  NanoProfiler PROFILE_CONCAT(profiler_, __COUNTER__)(name)
 
 struct GeometryRequirements {
   size_t total_vertices = 0;
@@ -757,7 +738,7 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
 
     auto mat_offset = pool.allocate_materials(gpu_mats);
     result->material_base_slot = mat_offset.start_index;
-    result->material_count = static_cast<u32>(gpu_mats.size()); // ← was missing
+    result->material_count = static_cast<u32>(gpu_mats.size());
     for (usize i = 0; i < gpu_mats.size(); ++i)
       result->material_slots[i] = result->material_base_slot + (u32)i;
   }

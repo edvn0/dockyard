@@ -277,6 +277,7 @@ add_library(dockyard STATIC
   src/dockyard/scene.cpp
   src/dockyard/shader_watcher.cpp
   src/dockyard/canvas_renderer.cpp
+  src/dockyard/components.cpp
 )
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
 target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

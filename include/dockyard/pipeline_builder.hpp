@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dockyard/bindless_handle.hpp"
 #include <dockyard/compiler.hpp>
 #include <dockyard/types.hpp>
 #include <dockyard/vfs_path.hpp>
@@ -112,37 +113,25 @@ struct ComputePipelineDescription {
 };
 
 using PipelineDescription =
-    std::variant<GraphicsPipelineDescription, ComputePipelineDescription>;
+    std::variant<std::monostate, GraphicsPipelineDescription,
+                 ComputePipelineDescription>;
 
-class PipelineHandle {
-public:
-  PipelineHandle() = default;
-  PipelineHandle(u32 v) : index{v} {}
-  auto get() const { return index; }
-
-  auto valid() const { return index != 0xFFFFFFFF; }
-
-private:
-  u32 index{0xFFFFFFFF};
-};
+struct PipelineTag {};
+using PipelineHandle = dy::Handle<PipelineTag>;
 
 struct PipelineRegistry {
   VkDevice device = VK_NULL_HANDLE;
 
   struct Entry {
     VkPipeline pipeline = VK_NULL_HANDLE;
-    /* Will be the same as desc::layout IFF provided, else
-     owned by the registry and must be destroyed on
-     cleanup.*/
     VkPipelineLayout layout = VK_NULL_HANDLE;
     bool owns_layout = false;
-    PipelineDescription desc;
+    PipelineDescription desc{std::monostate{}};
   };
 
-  std::vector<Entry> entries{};
+  dy::Pool<PipelineTag, Entry> pool{};
 
   explicit PipelineRegistry(VkDevice d) : device(d) {}
-
   PipelineRegistry(const PipelineRegistry &) = delete;
   PipelineRegistry &operator=(const PipelineRegistry &) = delete;
 
@@ -151,19 +140,33 @@ struct PipelineRegistry {
   [[nodiscard]] auto create_compute(ComputePipelineDescription desc)
       -> std::expected<PipelineHandle, std::string>;
 
-  [[nodiscard]] auto reload(PipelineHandle) -> std::expected<void, std::string>;
-  auto reload_by_shader(const VFSPath &) -> void;
+  auto poll_and_update_dirty_pipelines() -> void;
 
+  [[nodiscard]] auto reload(PipelineHandle h)
+      -> std::expected<void, std::string>;
+  auto reload_by_shader(const VFSPath &path) -> void;
   auto reload_all() -> void;
 
-  [[nodiscard]] auto get(PipelineHandle id) const -> const auto & {
-    return entries[id.get()].pipeline;
+  [[nodiscard]] auto get(PipelineHandle h) const -> VkPipeline {
+    const auto *e = pool.get(h);
+    assert(e && "invalid pipeline handle");
+    return e->pipeline;
   }
 
-  [[nodiscard]] auto get_object(PipelineHandle id) const -> const auto & {
-    return entries[id.get()];
+  [[nodiscard]] auto get_unsafe(u32 h) const -> VkPipeline {
+    const auto *e = pool.get(pool.handle_at(h));
+    assert(e && "invalid pipeline handle");
+    return e->pipeline;
   }
 
+  [[nodiscard]] auto get_entry(PipelineHandle h) const -> const Entry & {
+    const auto *e = pool.get(h);
+    assert(e && "invalid pipeline handle");
+    return *e;
+  }
+
+  auto destroy(PipelineHandle) -> void;
+  auto destroy(auto &&...h) { (destroy(h), ...); }
   auto cleanup() -> void;
 };
 

@@ -14,6 +14,8 @@ TextureCube<float4> sampled_cubemaps[];
 Texture3D<float4> sampled_3d_images[];
 [[vk::binding(7, 0)]] [vk::image_format("r32f")]
 Texture2DArray<float> sampled_2d_arrays[];
+[[vk::binding(8, 0)]]
+RWTexture2DArray<float4> rw_sub_images[];
 
 float4 sample_2d(TextureHandle tex, SamplerHandle samp, float2 uv)
 {
@@ -41,6 +43,12 @@ float4 sample_cube(TextureHandle tex, SamplerHandle samp, float3 dir)
 {
     return sampled_cubemaps[NonUniformResourceIndex(tex.index)]
         .Sample(samplers[NonUniformResourceIndex(samp.index)], dir);
+}
+
+float4 sample_cube(uint tex, uint samp, float3 dir)
+{
+    return sampled_cubemaps[NonUniformResourceIndex(tex)]
+        .Sample(samplers[NonUniformResourceIndex(samp)], dir);
 }
 
 float4 sample_3d(TextureHandle tex, SamplerHandle samp, float3 uvw)

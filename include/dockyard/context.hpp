@@ -1,10 +1,12 @@
 #pragma once
 
+#include "dockyard/bindless_handle.hpp"
 #include <dockyard/bindless_descriptor.hpp>
 #include <dockyard/events.hpp>
 #include <dockyard/texture.hpp>
 #include <dockyard/types.hpp>
 
+#include <source_location>
 #include <volk.h>
 
 #include <VkBootstrap.h>
@@ -28,10 +30,13 @@ struct VulkanContext {
   auto present_queue() const -> VkQueue;
   auto destroy() -> void;
 
-  auto one_time_submit(std::function<void(VkCommandBuffer)> &&func) const
+  auto
+  one_time_submit(std::function<void(VkCommandBuffer)> &&func,
+                  std::source_location = std::source_location::current()) const
       -> void;
-  auto transition_to_general(VkImage, VkImageAspectFlags aspect, u32 mip_count,
-                             u32 layer_count) const -> void;
+  auto transition_to_general(
+      VkImage, VkImageAspectFlags aspect, u32 mip_count, u32 layer_count,
+      std::source_location = std::source_location::current()) const -> void;
 
   static auto create(vkb::Instance &&inst, VkSurfaceKHR &&s) -> VulkanContext;
 };
@@ -95,6 +100,20 @@ struct ViewportResources {
   static auto create(const VulkanContext &ctx, SceneRenderer &, u32 width,
                      u32 height) -> ViewportResources;
 };
+
+struct IblProbe {
+  TextureHandle env_map;     // raw equirect → cubemap (512³, 1 mip)
+  TextureHandle irradiance;  // diffuse integral (32³, 1 mip)
+  TextureHandle prefiltered; // specular mip-chain (256³, N mips)
+  TextureHandle brdf_lut;    // 2D RG16F (512×512)
+
+  u32 prefiltered_mip_count{};
+
+  static auto create(const VulkanContext &, SceneRenderer &, TextureHandle)
+      -> IblProbe;
+  auto destroy(const VulkanContext &, SceneRenderer &) -> void;
+};
+
 struct SwapchainResources {
   vkb::Swapchain swapchain{};
   std::vector<VkImage> images;

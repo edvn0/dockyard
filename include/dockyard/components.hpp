@@ -150,9 +150,18 @@ struct DebugPlane {
 };
 
 struct DebugFrustum {
-  glm::mat4 view{1.0F};
-  glm::mat4 proj{1.0F};
+  struct ProjectionConfiguration {
+    float fov_degrees{30.0F};
+    float aspect{1.77F};
+    float near{0.1F};
+    float far{30.0F};
+  };
+  glm::vec3 center{1.0F};
+  ProjectionConfiguration projection_config{};
   glm::vec4 color{1.0F, 1.0F, 0.0F, 1.0F};
+
+  [[nodiscard]] auto matrices(const glm::vec3 &) const
+      -> std::pair<glm::mat4, glm::mat4>;
 };
 
 struct ParentOf {

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <ranges>
 #include <span>
 #include <vector>
@@ -21,6 +22,7 @@
 #include <VkBootstrap.h>
 #include <entt/entt.hpp>
 #include <vk_mem_alloc.h>
+#include <vulkan/vulkan_core.h>
 
 struct TimeStep {
   double last_time{glfwGetTime()};
@@ -218,7 +220,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   glfwShowWindow(window);
 
   TimeStep ts{};
-  while (running && !glfwWindowShouldClose(window)) {
+  while (running && (glfwWindowShouldClose(window) != VK_TRUE)) {
     glfwPollEvents();
     poll_pending_events();
     dispatcher.update();

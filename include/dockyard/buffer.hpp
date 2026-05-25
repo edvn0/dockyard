@@ -2,6 +2,7 @@
 
 #include <volk.h>
 
+#include <cassert>
 #include <cstring>
 #include <ranges>
 #include <vk_mem_alloc.h>
@@ -23,6 +24,32 @@ class Buffer {
 
 public:
   ~Buffer();
+
+  template <typename T> [[nodiscard]] auto read() const -> T {
+    return read_with_offset<T>(0);
+  }
+
+  template <typename T>
+  [[nodiscard]] auto read_with_offset(usize byte_offset) const -> T {
+    assert(
+        mapped_data != nullptr &&
+        "Attempted to read from a buffer that is not host-visible or mapped");
+
+    assert(byte_offset + sizeof(T) <= allocation_info.size &&
+           "Buffer overflow: read extent exceeds total allocation size");
+
+    assert(reinterpret_cast<uintptr_t>(static_cast<const u8 *>(mapped_data) +
+                                       byte_offset) %
+                   alignof(T) ==
+               0 &&
+           "Misaligned read: memory address is not a multiple of the requested "
+           "type alignment");
+
+    T value;
+    std::memcpy(&value, static_cast<const u8 *>(mapped_data) + byte_offset,
+                sizeof(T));
+    return value;
+  }
 
   auto upload(std::ranges::contiguous_range auto &&range) {
     const auto bytes = std::ranges::size(range) *

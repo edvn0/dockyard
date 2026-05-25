@@ -1,5 +1,7 @@
 #pragma once
 
+#include <dockyard/log.hpp>
+
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -66,15 +68,48 @@ using StringMap =
 template <typename T>
 using OrderedStringMap = std::map<std::string, T, detail::StringCompare>;
 
-#define MAKE_BITFIELD(T)                                                       \
-  inline constexpr T operator|(T lhs, T rhs) {                                 \
-    return static_cast<T>(static_cast<std::underlying_type_t<T>>(lhs) |        \
-                          static_cast<std::underlying_type_t<T>>(rhs));        \
+struct NanoProfiler {
+  std::string scope;
+  std::chrono::high_resolution_clock::time_point start;
+
+  // Use string_view to avoid unnecessary string allocations
+  explicit NanoProfiler(std::string_view name)
+      : scope(name), start(std::chrono::high_resolution_clock::now()) {}
+
+  ~NanoProfiler() {
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double, std::milli> elapsed = end - start;
+    trace("[{}]: {}ms", scope, elapsed.count());
+  }
+};
+
+#define PROFILE_CONCAT_INNER(a, b) a##b
+#define PROFILE_CONCAT(a, b) PROFILE_CONCAT_INNER(a, b)
+#define PROFILE_SCOPE(name)                                                    \
+  NanoProfiler PROFILE_CONCAT(profiler_, __COUNTER__)(name)
+
+#define MAKE_BITFIELD(X)                                                       \
+  constexpr auto operator|(X a, X b)->X {                                      \
+    return static_cast<X>(std::to_underlying(a) | std::to_underlying(b));      \
   }                                                                            \
-  inline constexpr T &operator|=(T &lhs, T rhs) { return lhs = (lhs | rhs); }  \
-  inline constexpr T operator&(T lhs, T rhs) {                                 \
-    return static_cast<T>(static_cast<std::underlying_type_t<T>>(lhs) &        \
-                          static_cast<std::underlying_type_t<T>>(rhs));        \
+  constexpr auto operator&(X a, X b)->X {                                      \
+    return static_cast<X>(std::to_underlying(a) & std::to_underlying(b));      \
+  }                                                                            \
+  constexpr bool operator!(X f) { return f == X::None; }                       \
+  constexpr auto operator|=(X &a, X b)->X & {                                  \
+    a = a | b;                                                                 \
+    return a;                                                                  \
+  }                                                                            \
+  constexpr auto operator&=(X &a, X b)->X & {                                  \
+    a = a & b;                                                                 \
+    return a;                                                                  \
+  }                                                                            \
+  constexpr auto has_flag(X flags, X flag) -> bool {                           \
+    return (flags & flag) == flag;                                             \
+  }                                                                            \
+  constexpr auto set_flag(X &flags, X flag) -> void { flags |= flag; }         \
+  constexpr auto clear_flag(X &flags, X flag) -> void {                        \
+    flags &= static_cast<X>(~std::to_underlying(flag));                        \
   }
 
 } // namespace dy

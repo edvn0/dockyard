@@ -8,24 +8,46 @@ struct InstanceData {
     uint pad2;
 };
 
+enum class MaterialFlags {
+    None = 0,
+    depth_prepass = 1 << 0,    // Render in depth prepass (opaque/masked)
+    alpha_mask = 1 << 1,       // Alpha testing enabled
+    has_transmission = 1 << 2, // Shader: check before sampling transmission
+    has_anisotropy = 1 << 3,   // Shader: check before using anisotropy
+    two_sided = 1 << 4,        // Backface rendering enabled
+};
+
 struct GPUMaterial {
     float4 albedo_factor;
     float4 emissive_factor;
-    float metallic_factor;
 
+    float metallic_factor;
     float roughness_factor;
     float normal_scale;
     float occlusion_strength;
-    uint alpha_mode;
 
+    uint alpha_mode;
     float alpha_cutoff;
+
     uint albedo_index;
     uint normal_index;
     uint metallic_roughness_index;
-
     uint emissive_index;
     uint occlusion_index;
-    uint pad0;
+
+    MaterialFlags flags;
+
+    float transmission_factor; // [0,1]: 0 = opaque, 1 = fully transmissive
+
+    float anisotropy_factor;   // [0,1]: strength of anisotropic reflection
+    float anisotropy_rotation; // [0,1]: rotation angle (normalized to [0, 2π])
+
+    uint cull_mode;
+
+    float uv_scale_x;
+    float uv_scale_y;
+    float uv_offset_x;
+    float uv_offset_y;
 };
 
 static const int shadow_map_cascade_count = 6;
@@ -50,7 +72,12 @@ struct FrameUBO
     float4 sun_direction;                                  // 16 bytes
     uint shadow_array_index;                               // 4 bytes
     uint shadow_sampler_index;                             // 4 bytes
-    uint _pad[2];                                          // padding to make size a multiple of 16 bytes
+    uint ibl_irradiance_index;                             // binding 4 (sampled_cubemaps)
+    uint ibl_prefiltered_index;                            // binding 4 (sampled_cubemaps)
+    uint ibl_brdf_lut_index;                               // binding 0 (sampled_images)
+    uint ibl_sampler_index;                                // binding 1 (samplers) — linear + mip
+    uint ibl_prefiltered_mips;                             // needed for roughness LOD selection
+    uint _pad[3];                                          // pad to 16-byte multiple                                        // padding to make size a multiple of 16 bytes
 }
 
 struct Vertex

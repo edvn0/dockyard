@@ -1,3 +1,4 @@
+#include "glm/ext/matrix_float4x4.hpp"
 #include <dockyard/scene_renderer.hpp>
 
 #include <dockyard/device_geometry.hpp>
@@ -182,9 +183,6 @@ auto SceneRenderer::register_external_view(VkImageView view,
       .sampled_view_type = type,
   };
   TextureHandle handle = textures.create(std::move(entry));
-
-  bindless.queue_texture_write(handle.index(), view, VK_NULL_HANDLE, type);
-  bindless.need_repopulate = true;
   return handle;
 }
 
@@ -234,19 +232,7 @@ auto SceneRenderer::get_material_view_mut(const MeshAsset &mesh) const
 SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
     : ctx(c), swapchain(sc),
       depth_prepass(RenderPassType::DepthPrepass, ctx.allocator),
-      forward_pass(RenderPassType::Forward, ctx.allocator),
-      shader_watcher(
-          new shader::ShaderWatcher(
-              VFS::get().resolve("shaders://"), "shaders",
-              [&reloads = this->pending_reloads,
-               &mutex = this->pending_reload_mutex](dy::VFSPath changed) {
-                dy::shader::Compiler::the().invalidate(changed);
-                std::scoped_lock lock{mutex};
-                reloads.push_back(std::move(changed));
-              }),
-          +[](shader::ShaderWatcher *w) { delete w; }) {
-  shader_watcher->start();
-
+      forward_pass(RenderPassType::Forward, ctx.allocator) {
   constexpr auto vertex_count = 1'000'000;
   constexpr auto index_count = 10'000'000;
   constexpr auto material_count = 500;
@@ -327,7 +313,8 @@ auto SceneRenderer::initialise_bindless() -> void {
                 /*initial_samplers            =*/64u,
                 /*initial_comparison_samplers =*/8u,
                 /*initial_storage_images      =*/512u,
-                /*initial_accel_structs       =*/0u);
+                /*initial_accel_structs       =*/0u,
+                /*initial_sub_images       =*/512u);
 
   pipeline_layout = create_main_pipeline_layout(ctx.device, bindless.layout);
   pipeline_registry = std::make_unique<PipelineRegistry>(ctx.device);
@@ -345,6 +332,27 @@ auto SceneRenderer::initialise_bindless() -> void {
       std::abort();
     }
     composite_pipeline = *result;
+  }
+
+  {
+    auto result = pipeline_registry->create_graphics({
+        .shader_path = VFSPath::create("shaders://skybox.slang"),
+        .descriptor_set_layout = bindless.layout,
+        .render_targets =
+            {
+                .color_formats = {VK_FORMAT_R16G16B16A16_SFLOAT},
+                .depth_format = VK_FORMAT_D32_SFLOAT,
+            },
+        .cull_mode = VK_CULL_MODE_NONE,
+        .samples = VK_SAMPLE_COUNT_4_BIT,
+        .blending = {BlendMode::opaque()},
+    });
+
+    if (!result) {
+      error("skybox pipeline initialization failed: {}", result.error());
+      std::abort();
+    }
+    skybox_pipeline = *result;
   }
 
   {
@@ -406,6 +414,18 @@ auto SceneRenderer::initialise_bindless() -> void {
     }
     shadow_pipeline = *result;
   }
+
+  {
+    auto equirect_tex = Texture::load_hdr_texture(
+        ctx, VFSPath::create("textures://env/sunset.hdr"));
+
+    auto equirect = textures.create(TextureEntry{
+        .texture = std::move(equirect_tex),
+        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+    });
+
+    ibl_probe = IblProbe::create(ctx, *this, equirect);
+  }
 }
 auto SceneRenderer::upload_texture(std::span<const u32> data,
                                    std::string_view name, u32 w, u32 h,
@@ -421,7 +441,7 @@ auto SceneRenderer::upload_texture(std::span<const u32> data,
                                      .storage_view = storage,
                                  });
 
-  bindless.need_repopulate = true;
+  bindless.mark_dirty();
   return textures.create(TextureEntry{
       .texture = std::move(tex),
       .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
@@ -433,7 +453,6 @@ auto SceneRenderer::resize() -> void {
     frame_ubo_buffers.emplace_back(Buffer::create(
         ctx.allocator, sizeof(FrameUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT));
   }
-  bindless.need_repopulate = true;
 }
 auto SceneRenderer::destroy() -> void {
   csm.destroy(ctx.device, ctx.allocator);
@@ -554,13 +573,7 @@ auto extract_frustum_planes(const glm::mat4 &vp)
 auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
                             const glm::mat4 &projection) -> bool {
   {
-    std::scoped_lock lock{pending_reload_mutex};
-    if (!pending_reloads.empty()) {
-      auto &&popped = std::move(pending_reloads.front());
-      info("Reloading shader due to change in {}", popped.view());
-      pipeline_registry->reload_by_shader(popped);
-      pending_reloads.pop_front();
-    }
+    pipeline_registry->poll_and_update_dirty_pipelines();
   }
 
   current_frame_index = frame_index;
@@ -594,6 +607,11 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
       .sun_direction = sun_direction,
       .shadow_array_index = csm_frame_data.shadow_array_index,
       .shadow_sampler_index = csm_frame_data.shadow_sampler_index,
+      .ibl_irradiance_index = ibl_probe.irradiance.index(),
+      .ibl_prefiltered_index = ibl_probe.prefiltered.index(),
+      .ibl_brdf_lut_index = ibl_probe.brdf_lut.index(),
+      .ibl_sampler_index = dummy_sampler_handle.index(),
+      .ibl_prefiltered_mips = ibl_probe.prefiltered_mip_count,
   };
 
   frame_ubo_buffers.at(frame_index)->upload(std::span(&ubo, 1));
@@ -652,9 +670,10 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
   };
 
   for (const auto &batch : pass.batches) {
-    const VkPipeline pipe = override_pipeline != VK_NULL_HANDLE
-                                ? override_pipeline
-                                : pipeline_registry->get(batch.pipeline_id);
+    const VkPipeline pipe =
+        override_pipeline != VK_NULL_HANDLE
+            ? override_pipeline
+            : pipeline_registry->get_unsafe(batch.pipeline_id);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_ALL, 0u,
                        sizeof(GpuPushConstants), &push_constants);
@@ -666,8 +685,38 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
   }
 }
 
+void SceneRenderer::skybox_pass(VkCommandBuffer cmd) {
+  const auto &entry = pipeline_registry->get_entry(skybox_pipeline);
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.layout,
+                          0u, 1u, &bindless.set, 0u, nullptr);
+
+  struct SkyboxPushConstants {
+    u32 env_map_index;
+    u32 sampler_index;
+    glm::mat4 inv_view_proj;
+  };
+
+  const auto frame_data =
+      frame_ubo_buffers.at(current_frame_index)->read<FrameUBO>();
+  const auto inv_view_projection_no_translation = glm::inverse(
+      frame_data.projection * glm::mat4(glm::mat3(frame_data.view)));
+
+  const SkyboxPushConstants push{
+      .env_map_index = ibl_probe.env_map.index(),
+      .sampler_index = dummy_sampler_handle.index(),
+      .inv_view_proj = inv_view_projection_no_translation,
+  };
+
+  vkCmdPushConstants(cmd, entry.layout,
+                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                     0u, sizeof(push), &push);
+  vkCmdDraw(cmd, 3u, 1u, 0u, 0u);
+}
+
 void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
-  const auto &entry = pipeline_registry->get_object(composite_pipeline);
+  const auto &entry = pipeline_registry->get_entry(composite_pipeline);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.pipeline);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.layout,
                           0u, 1u, &bindless.set, 0u, nullptr);
@@ -761,7 +810,7 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
       .total_instance_count = static_cast<u32>(geometry_count),
   };
 
-  const auto &entry = pipeline_registry->get_object(culling_pipeline);
+  const auto &entry = pipeline_registry->get_entry(culling_pipeline);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout, 0U,
                           1U, &bindless.set, 0U, nullptr);
@@ -1062,8 +1111,6 @@ void SceneRenderer::init_csm() {
 
   csm.bindless_handle =
       register_external_view(csm.array_view, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
-  info("CSM handle: {}", csm.bindless_handle.index());
-  bindless.need_repopulate = true;
 
   ctx.transition_to_general(csm.image, VK_IMAGE_ASPECT_DEPTH_BIT, 1,
                             shadow_map_cascade_count);

@@ -6,12 +6,10 @@ static const int shadow_map_resolution = 2048;
 Tuple<float, uint> compute_shadow(float3 world_pos, float3 n, float3 sun_dir,
                                   float view_depth, FrameUBO frame)
 {
-    // Find the tightest cascade whose far boundary exceeds the fragment depth.
-    // Default to the farthest cascade for anything beyond all splits.
     uint cascade_idx = shadow_map_cascade_count - 1u;
     for (uint i = 0u; i < shadow_map_cascade_count; ++i)
     {
-        if (view_depth < frame.cascades[i].split_depth)
+        if (view_depth <= frame.cascades[i].split_depth)
         {
             cascade_idx = i;
             break;

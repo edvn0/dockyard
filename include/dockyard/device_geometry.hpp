@@ -31,84 +31,157 @@ static_assert(std::is_trivially_copyable_v<PositionOnlyVertex>);
 static_assert(sizeof(PositionOnlyVertex) == 12);
 
 enum class MaterialFlags : u32 {
-  none = 0,
-  depth_prepass = 1 << 0,
-  alpha_mask = 1 << 1,
+  None = 0,
+  depth_prepass = 1 << 0,    // Render in depth prepass (opaque/masked)
+  alpha_mask = 1 << 1,       // Alpha testing enabled
+  has_transmission = 1 << 2, // Shader: check before sampling transmission
+  has_anisotropy = 1 << 3,   // Shader: check before using anisotropy
+  two_sided = 1 << 4,        // Backface rendering enabled
 };
-constexpr auto operator|(MaterialFlags a, MaterialFlags b) -> MaterialFlags {
-  return static_cast<MaterialFlags>(std::to_underlying(a) |
-                                    std::to_underlying(b));
-}
-constexpr auto operator&(MaterialFlags a, MaterialFlags b) -> MaterialFlags {
-  return static_cast<MaterialFlags>(std::to_underlying(a) &
-                                    std::to_underlying(b));
-}
-constexpr bool operator!(MaterialFlags f) { return f == MaterialFlags::none; }
-constexpr auto operator|=(MaterialFlags &a, MaterialFlags b)
-    -> MaterialFlags & {
-  a = a | b;
-  return a;
-}
-constexpr auto operator&=(MaterialFlags &a, MaterialFlags b)
-    -> MaterialFlags & {
-  a = a & b;
-  return a;
-}
-constexpr auto has_flag(MaterialFlags flags, MaterialFlags flag) -> bool {
-  return (flags & flag) == flag;
-}
-constexpr auto set_flag(MaterialFlags &flags, MaterialFlags flag) -> void {
-  flags |= flag;
-}
-constexpr auto clear_flag(MaterialFlags &flags, MaterialFlags flag) -> void {
-  flags &= static_cast<MaterialFlags>(~std::to_underlying(flag));
-}
+MAKE_BITFIELD(MaterialFlags)
+
+enum class AlphaMode : u32 { Opaque = 0, Mask = 1, Blend = 2 };
+enum class CullMode : u32 {
+  Back = 0,  // Cull backfaces (default)
+  Front = 1, // Cull frontfaces
+  None = 2,  // No culling (two-sided)
+};
 
 struct GPUMaterial {
   alignas(16) float albedo_factor[4];
   alignas(16) float emissive_factor[4];
-  float metallic_factor;
 
+  // PBR factors + scales
+  float metallic_factor;
   float roughness_factor;
   float normal_scale;
   float occlusion_strength;
-  u32 alpha_mode;
 
+  // Alpha & mode
+  u32 alpha_mode;
   float alpha_cutoff;
+
+  // Texture indices
   u32 albedo_index;
   u32 normal_index;
   u32 metallic_roughness_index;
-
   u32 emissive_index;
   u32 occlusion_index;
-  MaterialFlags flags{MaterialFlags::depth_prepass};
-};
-static_assert(std::is_trivially_copyable_v<GPUMaterial>);
-static_assert(sizeof(GPUMaterial) % 16 == 0);
 
-enum class AlphaMode : u32 { Opaque = 0, Mask = 1, Blend = 2 };
+  // Flags for shader branching
+  MaterialFlags flags;
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Extensions & advanced features
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Transmission (glass refraction) — KHR_materials_transmission
+  float transmission_factor; // [0,1]: 0 = opaque, 1 = fully transmissive
+
+  // Anisotropy (brushed metals, etc) — KHR_materials_anisotropy
+  float anisotropy_factor;   // [0,1]: strength of anisotropic reflection
+  float anisotropy_rotation; // [0,1]: rotation angle (normalized to [0, 2π])
+
+  // Cull mode: determines which faces to render
+  u32 cull_mode;
+
+  // UV transformation (cheap variation without extra textures)
+  float uv_scale_x;
+  float uv_scale_y;
+  float uv_offset_x;
+  float uv_offset_y;
+};
+
+static_assert(std::is_trivially_copyable_v<GPUMaterial>);
+static_assert(sizeof(GPUMaterial) % 16 == 0,
+              "GPUMaterial must be 16-byte aligned");
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CPU-side material asset — mirror of GPU, plus resolve function
+// Useful for: editor workflows, material instantiation, per-instance variants
+// ─────────────────────────────────────────────────────────────────────────────
 
 struct MaterialAsset {
   std::string name;
 
+  // PBR base
   float albedo_factor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-  float emissive_factor[4] = {0.0f, 0.0f, 0.0f, 0.0F};
+  float emissive_factor[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   float metallic_factor = 1.0f;
   float roughness_factor = 1.0f;
-
   float normal_scale = 1.0f;
   float occlusion_strength = 1.0f;
 
+  // Alpha control
   AlphaMode alpha_mode = AlphaMode::Opaque;
   float alpha_cutoff = 0.5f;
 
+  // Textures
   TextureHandle albedo_texture;
   TextureHandle normal_texture;
   TextureHandle metallic_roughness_texture;
   TextureHandle emissive_texture;
   TextureHandle occlusion_texture;
 
-  auto resolve_to_gpu() const -> GPUMaterial;
+  // glTF 2.0 extensions
+  float transmission_factor = 0.0f; // KHR_materials_transmission
+  float anisotropy_factor = 0.0f;   // KHR_materials_anisotropy
+  float anisotropy_rotation = 0.0f;
+
+  // Rendering control
+  bool double_sided = false;
+  CullMode cull_mode = CullMode::Back;
+
+  // UV manipulation
+  float uv_scale_x = 1.0f;
+  float uv_scale_y = 1.0f;
+  float uv_offset_x = 0.0f;
+  float uv_offset_y = 0.0f;
+
+  [[nodiscard]] auto resolve_to_gpu() const -> GPUMaterial {
+    GPUMaterial gpu{};
+
+    std::copy_n(albedo_factor, 4, gpu.albedo_factor);
+    std::copy_n(emissive_factor, 4, gpu.emissive_factor);
+
+    gpu.metallic_factor = metallic_factor;
+    gpu.roughness_factor = roughness_factor;
+    gpu.normal_scale = normal_scale;
+    gpu.occlusion_strength = occlusion_strength;
+
+    gpu.alpha_mode = static_cast<u32>(alpha_mode);
+    gpu.alpha_cutoff = alpha_cutoff;
+
+    gpu.albedo_index = albedo_texture.index();
+    gpu.normal_index = normal_texture.index();
+    gpu.metallic_roughness_index = metallic_roughness_texture.index();
+    gpu.emissive_index = emissive_texture.index();
+    gpu.occlusion_index = occlusion_texture.index();
+
+    gpu.flags = MaterialFlags::depth_prepass;
+    if (alpha_mode == AlphaMode::Mask)
+      set_flag(gpu.flags, MaterialFlags::alpha_mask);
+    if (double_sided)
+      set_flag(gpu.flags, MaterialFlags::two_sided);
+    if (transmission_factor > 0.0F)
+      set_flag(gpu.flags, MaterialFlags::has_transmission);
+    if (anisotropy_factor > 0.0F)
+      set_flag(gpu.flags, MaterialFlags::has_anisotropy);
+
+    gpu.transmission_factor = transmission_factor;
+    gpu.anisotropy_factor = anisotropy_factor;
+    gpu.anisotropy_rotation = anisotropy_rotation;
+
+    gpu.cull_mode = double_sided ? static_cast<u32>(CullMode::None)
+                                 : static_cast<u32>(cull_mode);
+
+    gpu.uv_scale_x = uv_scale_x;
+    gpu.uv_scale_y = uv_scale_y;
+    gpu.uv_offset_x = uv_offset_x;
+    gpu.uv_offset_y = uv_offset_y;
+
+    return gpu;
+  }
 };
 
 struct AllocatedOffset {

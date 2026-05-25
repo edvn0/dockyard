@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dockyard/texture.hpp"
 #include <dockyard/app.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/compiler.hpp>
@@ -14,6 +15,7 @@
 #include <deque>
 #include <glm/glm.hpp>
 #include <type_traits>
+#include <vulkan/vulkan_core.h>
 
 namespace dy {
 
@@ -131,8 +133,13 @@ struct FrameUBO {
   glm::vec4 sun_direction;
   u32 shadow_array_index;
   u32 shadow_sampler_index;
+  u32 ibl_irradiance_index;  // binding 4 (sampled_cubemaps)
+  u32 ibl_prefiltered_index; // binding 4 (sampled_cubemaps)
+  u32 ibl_brdf_lut_index;    // binding 0 (sampled_images)
+  u32 ibl_sampler_index;     // binding 1 (samplers) — linear + mip
+  u32 ibl_prefiltered_mips;  // needed for roughness LOD selection
   u32 pad0;
-  u32 pad1;
+  u32 pad1; // pad to 16-byte multiple
 };
 static_assert(sizeof(FrameUBO) % 16 == 0);
 
@@ -157,6 +164,7 @@ struct SceneRenderer {
   TexturePool textures;
   SamplerPool samplers;
   ComparisonSamplerPool comparison_samplers;
+  SubImagePool subimages;
   BindlessSet bindless;
   std::unique_ptr<GeometryPool> geometry_pool;
 
@@ -184,12 +192,6 @@ struct SceneRenderer {
 
   VkPipelineLayout pipeline_layout{VK_NULL_HANDLE};
   std::unique_ptr<PipelineRegistry> pipeline_registry{nullptr};
-  std::unique_ptr<shader::ShaderWatcher,
-                  decltype(+[](shader::ShaderWatcher *) {})>
-      shader_watcher;
-  std::mutex pending_reload_mutex{};
-  std::deque<VFSPath> pending_reloads{};
-
   CsmResources csm{};
   struct CsmFrameData {
     std::array<CascadeData, shadow_map_cascade_count> cascades{};
@@ -199,12 +201,15 @@ struct SceneRenderer {
   VkSampler shadow_comparison_sampler_vk = VK_NULL_HANDLE;
   u32 shadow_sampler_bindless_idx = 0u;
 
+  IblProbe ibl_probe;
+
   std::array<CascadeData, shadow_map_cascade_count> cascade_cpu_data{};
   glm::vec4 sun_direction =
       glm::normalize(glm::vec4{0, 0, 0, 0} - glm::vec4{3, -7, 5, 0});
 
   PipelineHandle shadow_pipeline;
   PipelineHandle composite_pipeline;
+  PipelineHandle skybox_pipeline;
   PipelineHandle culling_pipeline;
 
   Cache<StringMap<TextureHandle>> texture_cache{};
@@ -238,6 +243,7 @@ struct SceneRenderer {
                    VkPipeline override_pipeline = VK_NULL_HANDLE);
   void composite_pass(VkCommandBuffer);
   void culling_pass(VkCommandBuffer);
+  void skybox_pass(VkCommandBuffer);
 
   auto register_gltf(MeshAsset &&asset) -> MeshHandle;
   auto register_external_view(VkImageView view, VkImageViewType type)

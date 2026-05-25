@@ -4,217 +4,12 @@
 #include <vector>
 #include <volk.h>
 
+#include <dockyard/bindless_pool_entries.hpp>
 #include <dockyard/log.hpp>
-#include <dockyard/texture.hpp>
 #include <dockyard/types.hpp>
 #include <dockyard/vk_check.hpp>
 
-// ---------------------------------------------------------------------------
-// Handle<Tag>
-//
-// Packs a 20-bit slot index and a 12-bit generation into a single u32.
-// Adjust the split via k_index_bits if you need >1M slots.
-//
-//   bits [0 .. k_index_bits)        → slot index  (max 1 048 575 live objects)
-//   bits [k_index_bits .. 32)       → generation  (wraps at 4096)
-//
-// Generation 0 is reserved for the "empty" sentinel so that a zero-initialised
-// handle is always invalid regardless of what slot 0 contains.
-// ---------------------------------------------------------------------------
-
 namespace dy {
-
-template <typename Tag> struct Handle {
-  static constexpr u32 k_index_bits = 20u;
-  static constexpr u32 k_gen_bits = 32u - k_index_bits;
-  static constexpr u32 k_index_mask = (1u << k_index_bits) - 1u;
-  static constexpr u32 k_gen_mask = (1u << k_gen_bits) - 1u;
-
-  Handle() = default;
-
-  Handle(u32 index, u32 gen)
-      : handle_value((gen & k_gen_mask) << k_index_bits |
-                     (index & k_index_mask)) {
-    assert(gen != 0u && "generation 0 is reserved for the empty sentinel");
-    assert(index <= k_index_mask);
-  }
-
-  [[nodiscard]] auto index() const -> u32 {
-    return handle_value & k_index_mask;
-  }
-  [[nodiscard]] auto gen() const -> u32 { return handle_value >> k_index_bits; }
-  [[nodiscard]] auto empty() const -> bool { return handle_value == 0u; }
-  [[nodiscard]] auto valid() const -> bool { return !empty(); }
-
-  auto operator==(const Handle &) const -> bool = default;
-
-private:
-  u32 handle_value = 0u;
-};
-
-// ---------------------------------------------------------------------------
-// Pool<Tag, Impl>
-//
-// Generation contract:
-//   odd  generation  → slot is live
-//   even generation  → slot is dead / on free-list
-//   0                → impossible in a live handle (reserved for empty)
-//
-// Slot gen starts at 1 (live after first create).
-// destroy() increments to 2 (dead).
-// Next create() increments to 3 (live again), and so on.
-// ---------------------------------------------------------------------------
-
-template <typename Tag, typename Impl> class Pool {
-  static constexpr u32 k_sentinel = 0xffff'ffffU;
-
-public:
-  using handle_type = Handle<Tag>;
-
-  struct Slot {
-    Impl object = {};
-    u32 gen = 0u; // 0 = never used; 1 = first live
-    u32 next_free = k_sentinel;
-  };
-
-  // -----------------------------------------------------------------------
-  // Mutation
-  // -----------------------------------------------------------------------
-
-  auto create(Impl obj) -> handle_type {
-    u32 idx = 0u;
-
-    if (freelist_head != k_sentinel) {
-      idx = freelist_head;
-      freelist_head = pool_slots[idx].next_free;
-      pool_slots[idx].next_free = k_sentinel;
-      pool_slots[idx].gen += 1u; // even → odd: mark live
-      pool_slots[idx].object = std::move(obj);
-    } else {
-      idx = static_cast<u32>(pool_slots.size());
-      auto &slot = pool_slots.emplace_back();
-      slot.gen = 1u; // first use
-      slot.object = std::move(obj);
-    }
-
-    ++number_alive;
-    return handle_type{idx, pool_slots[idx].gen};
-  }
-
-  auto destroy(handle_type h) -> void {
-    if (h.empty())
-      return;
-
-    const u32 idx = h.index();
-    assert(idx < pool_slots.size() && "index out of range");
-    assert((pool_slots[idx].gen & 1u) == 1u && "slot is already dead");
-    assert(h.gen() == pool_slots[idx].gen && "stale handle / double-destroy");
-
-    pool_slots[idx].object = Impl{};
-    pool_slots[idx].gen += 1u; // odd → even: mark dead
-    pool_slots[idx].next_free = freelist_head;
-    freelist_head = idx;
-    --number_alive;
-  }
-
-  // -----------------------------------------------------------------------
-  // Access
-  // -----------------------------------------------------------------------
-
-  [[nodiscard]] auto get(handle_type h) -> Impl * {
-    if (h.empty())
-      return nullptr;
-    const u32 idx = h.index();
-    assert(idx < pool_slots.size() && "index out of range");
-    assert(h.gen() == pool_slots[idx].gen && "stale handle");
-    return &pool_slots[idx].object;
-  }
-
-  [[nodiscard]] auto get(handle_type h) const -> const Impl * {
-    if (h.empty())
-      return nullptr;
-    const u32 idx = h.index();
-    assert(idx < pool_slots.size() && "index out of range");
-    assert(h.gen() == pool_slots[idx].gen && "stale handle");
-    return &pool_slots[idx].object;
-  }
-
-  // Reconstruct a valid handle from a raw slot index.
-  // Only safe to call when you know the slot is live (e.g. iterating data()
-  // after an is_live() check, or fetching the dummy slot at index 0).
-  [[nodiscard]] auto handle_at(u32 idx) const -> handle_type {
-    assert(idx < pool_slots.size() && "index out of range");
-    assert(is_live(idx) && "slot is not live");
-    return handle_type{idx, pool_slots[idx].gen};
-  }
-
-  [[nodiscard]] auto is_live(u32 idx) const -> bool {
-    return idx < pool_slots.size() && (pool_slots[idx].gen & 1u) == 1u;
-  }
-
-  [[nodiscard]] auto data() const -> const std::span<const Slot> {
-    return pool_slots;
-  }
-  [[nodiscard]] auto mutable_data() -> std::span<Slot> {
-    return std::span(pool_slots);
-  }
-  [[nodiscard]] auto num_objects() const -> u32 { return number_alive; }
-  [[nodiscard]] auto capacity() const -> u32 {
-    return static_cast<u32>(pool_slots.size());
-  }
-
-  auto clear() -> void {
-    pool_slots.clear();
-    freelist_head = k_sentinel;
-    number_alive = 0u;
-  }
-
-private:
-  std::vector<Slot> pool_slots;
-  u32 freelist_head = k_sentinel;
-  u32 number_alive = 0u;
-};
-
-// ---------------------------------------------------------------------------
-// Entry shapes stored inside pool slots
-//
-// operator== is required by Pool::Slot to reset on destroy().
-// ---------------------------------------------------------------------------
-
-struct TextureEntry {
-  Texture texture{};
-  VkImageViewType sampled_view_type{VK_IMAGE_VIEW_TYPE_2D};
-  auto operator==(const TextureEntry &) const -> bool = default;
-};
-
-struct SamplerEntry {
-  VkSampler sampler = VK_NULL_HANDLE;
-  auto operator==(const SamplerEntry &) const -> bool = default;
-};
-
-// ---------------------------------------------------------------------------
-// Tag types and typed handles
-// ---------------------------------------------------------------------------
-
-struct TextureTag {};
-struct SamplerTag {};
-struct ComparisonSamplerTag {};
-
-using TextureHandle = Handle<TextureTag>;
-using SamplerHandle = Handle<SamplerTag>;
-using ComparisonSamplerHandle = Handle<ComparisonSamplerTag>;
-
-// ---------------------------------------------------------------------------
-// Pool aliases
-// ---------------------------------------------------------------------------
-
-using TexturePool = Pool<TextureTag, TextureEntry>;
-using SamplerPool = Pool<SamplerTag, SamplerEntry>;
-using ComparisonSamplerPool = Pool<ComparisonSamplerTag, SamplerEntry>;
-
-// ---------------------------------------------------------------------------
-// BindlessCaps + query
-// ---------------------------------------------------------------------------
 
 struct BindlessCaps {
   u32 max_textures;
@@ -225,74 +20,48 @@ struct BindlessCaps {
 
 auto query_bindless_caps(VkPhysicalDevice pd) -> BindlessCaps;
 
-struct PendingTextureWrite {
-  u32 pool_index;
-  VkImageView sampled_view;
-  VkImageView storage_view;
-  VkImageViewType view_type;
-};
-
-// ---------------------------------------------------------------------------
-// Descriptor set bindings
-//
-//  0 — SAMPLED_IMAGE                (2D textures)
-//  1 — SAMPLER                      (samplers)
-//  2 — STORAGE_IMAGE                (storage images)
-//  3 — SAMPLER                      (comparison samplers)
-//  4 — SAMPLED_IMAGE                (cubemaps)
-//  5 — SAMPLED_IMAGE                (3D images)
-//  6 — ACCELERATION_STRUCTURE_KHR   (optional, only when max_accel_structs > 0)
-// ---------------------------------------------------------------------------
-
 struct BindlessSet {
+private:
+  bool need_repopulate = false;
+
+public:
   VkDescriptorSetLayout layout = VK_NULL_HANDLE;
   VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
   VkDescriptorPool pool = VK_NULL_HANDLE;
   VkDescriptorSet set = VK_NULL_HANDLE;
 
-  u32 max_textures = 1u;
-  u32 max_samplers = 1u;
-  u32 max_comparison_samplers = 1u;
-  u32 max_storage_images = 1u;
-  u32 max_accel_structs = 0u;
-  u32 max_cubemaps = 1u;
-  u32 max_3d_images = 1u;
-  u32 max_2d_arrays = 1u;
-
-  bool need_repopulate = false;
+  u32 max_textures = 1U;
+  u32 max_samplers = 1U;
+  u32 max_comparison_samplers = 1U;
+  u32 max_storage_images = 1U;
+  u32 max_accel_structs = 0U;
+  u32 max_cubemaps = 1U;
+  u32 max_3d_images = 1U;
+  u32 max_2d_arrays = 1U;
+  u32 max_sub_images = 1U;
 
   VkDevice device = VK_NULL_HANDLE;
   BindlessCaps caps{};
 
-  std::vector<PendingTextureWrite> pending_texture_writes;
-
   auto init(VkDevice dev, BindlessCaps const &caps_init, u32 initial_textures,
             u32 initial_samplers, u32 initial_comparison_samplers,
-            u32 initial_storage_images, u32 initial_accel_structs) -> void;
+            u32 initial_storage_images, u32 initial_accel_structs,
+            u32 initial_sub_images) -> void;
 
   auto destroy() -> void;
 
-  auto repopulate_if_needed(TexturePool &textures, SamplerPool &samplers,
-                            ComparisonSamplerPool &comparison_samplers) -> bool;
-
-  auto queue_texture_write(u32 pool_index, VkImageView sampled_view,
-                           VkImageView storage_view, VkImageViewType view_type)
-      -> void {
-    pending_texture_writes.push_back({
-        .pool_index = pool_index,
-        .sampled_view = sampled_view,
-        .storage_view = storage_view,
-        .view_type = view_type,
-    });
-  }
+  // Rebuilds the descriptor set from the live pools. Returns true if the
+  // set was recreated (layouts changed), in which case the caller must skip
+  // the current frame and re-record command buffers.
+  auto repopulate_if_needed(TexturePool &, SamplerPool &,
+                            ComparisonSamplerPool &, SubImagePool &) -> bool;
 
   auto grow_if_needed(u32 req_textures, u32 req_samplers, u32 req_storage,
-                      u32 req_accel) -> bool;
+                      u32 req_accel, u32 req_sub_images) -> bool;
+
+  auto mark_dirty() -> void { need_repopulate = true; }
 
 private:
-  auto flush_pending_writes(VkImageView dummy_sampled,
-                            VkImageView dummy_storage) -> void;
-
   auto recreate() -> void;
 };
 

@@ -25,7 +25,7 @@ struct EditorCamera;
 struct Dockforge : App {
   std::shared_ptr<Scene> editor_scene;
   std::shared_ptr<Scene> runtime_scene;
-  std::shared_ptr<Scene> active_scene;
+  Scene *active_scene;
 
   GLFWwindow *main_window = nullptr;
 
@@ -70,6 +70,7 @@ struct Dockforge : App {
   auto try_pick_entity(glm::vec2 mouse_screen) -> void;
   void refresh_entity_cache();
   void draw_scene_outliner();
+  void draw_component_editors();
   auto build_ui() -> void;
   auto draw_debug_shapes() -> void;
   auto remove_override(Entity) -> void;

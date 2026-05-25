@@ -3,6 +3,7 @@
 #include <dockyard/vfs.hpp>
 #include <dockyard/vfs_path.hpp>
 
+#include <filesystem>
 #include <slang-com-helper.h>
 #include <slang-com-ptr.h>
 #include <slang.h>
@@ -73,7 +74,8 @@ struct SlangVFSAdapter final : ISlangFileSystem {
   SLANG_NO_THROW uint32_t SLANG_MCALL release() SLANG_OVERRIDE {
     const auto n = --reference_count;
     if (n == 0) {
-      // Stack-allocated; caller manages lifetime via ComPtr.
+      // Heap-allocated, owned by Impl::permanent_fs unique_ptr.
+      // Lifetime is managed externally; do not delete here.
     }
     return n;
   }
@@ -82,12 +84,27 @@ struct SlangVFSAdapter final : ISlangFileSystem {
   loadFile(char const *path, ISlangBlob **out_blob) SLANG_OVERRIDE {
     const auto vfs_path = VFSPath::create(std::format("{}://{}", mount, path));
     auto result = VFS::get().read_bytes(vfs_path);
+
+    if (!result) {
+      const auto fallback_path =
+          VFSPath::create(std::format("shaders://include/{}", path));
+      result = VFS::get().read_bytes(fallback_path);
+
+      if (result) {
+        info("found file in fallback: {}", fallback_path.view());
+      }
+    }
+
     if (!result) {
       const std::string_view sv{path};
-      if (!sv.ends_with(".slang-module"))
-        warn("could not find file: {}", vfs_path.view());
+      if (!sv.ends_with(".slang-module")) {
+        warn("could not find file in primary ({}) or fallback "
+             "(shaders://include/{})",
+             vfs_path.view(), path);
+      }
       return SLANG_E_NOT_FOUND;
     }
+
     *out_blob = new OwnedBlob{std::move(*result)};
     return SLANG_OK;
   }
@@ -139,8 +156,7 @@ static auto to_descriptor_type(slang::TypeReflection *type) -> DescriptorType {
 static auto extract_program_reflection(slang::IComponentType *linked)
     -> std::pair<std::vector<DescriptorBinding>, PushConstantRange> {
   std::vector<DescriptorBinding> bindings;
-  PushConstantRange push_constants{
-      .offset = 0xFFFFFFFF, .size = 0}; // Initialize properly for min/max
+  PushConstantRange push_constants{.offset = 0xFFFFFFFF, .size = 0};
 
   slang::ProgramLayout *layout = linked->getLayout();
 
@@ -166,7 +182,7 @@ static auto extract_program_reflection(slang::IComponentType *linked)
 
       push_constants.offset = std::min(push_constants.offset, offset);
       push_constants.size = std::max(push_constants.size, offset + size);
-      return true; // Handled as push constant
+      return true;
     }
     return false;
   };
@@ -205,7 +221,6 @@ static auto extract_program_reflection(slang::IComponentType *linked)
     for (u32 p_i = 0; p_i < ep_param_count; ++p_i) {
       slang::VariableLayoutReflection *param =
           ep_layout->getParameterByIndex(p_i);
-
       process_parameter(param);
     }
   }
@@ -246,17 +261,20 @@ constexpr u64 k_cache_config_seed = (static_cast<u64>(debug_level) << 32) |
                                     static_cast<u64>(optimisation_level);
 
 static auto hash_source(std::span<const u8> bytes) -> u64 {
-  u64 h = 14695981039346656037ULL; // FNV offset basis
+  u64 h = 14695981039346656037ULL;
   for (const u8 b : bytes) {
     h ^= b;
-    h *= 1099511628211ULL; // FNV prime
+    h *= 1099511628211ULL;
   }
   return h ^ k_cache_config_seed;
 }
 
 struct Compiler::Impl {
   Slang::ComPtr<slang::IGlobalSession> global_session;
-  std::mutex global_session_mutex;
+  Slang::ComPtr<slang::ISession> session;
+
+  std::unique_ptr<SlangVFSAdapter> permanent_fs;
+  std::mutex session_mutex;
 
   struct CacheEntry {
     u64 content_hash;
@@ -269,11 +287,61 @@ struct Compiler::Impl {
   Impl() {
     if (SLANG_FAILED(slang::createGlobalSession(global_session.writeRef())))
       std::abort();
+
+    slang::CompilerOptionEntry session_options[] = {
+        {slang::CompilerOptionName::MatrixLayoutColumn,
+         {slang::CompilerOptionValueKind::Int, 1}},
+        {slang::CompilerOptionName::GLSLForceScalarLayout,
+         {slang::CompilerOptionValueKind::Int, 1}},
+    };
+
+    slang::CompilerOptionEntry target_options[] = {
+        {slang::CompilerOptionName::VulkanUseEntryPointName,
+         {slang::CompilerOptionValueKind::Int, 1}},
+        {slang::CompilerOptionName::DebugInformation,
+         {slang::CompilerOptionValueKind::Int, debug_level}},
+        {slang::CompilerOptionName::Optimization,
+         {slang::CompilerOptionValueKind::Int, optimisation_level}},
+        {slang::CompilerOptionName::GLSLForceScalarLayout,
+         {slang::CompilerOptionValueKind::Int, 1}},
+        {slang::CompilerOptionName::MatrixLayoutColumn,
+         {slang::CompilerOptionValueKind::Int, 1}},
+        {slang::CompilerOptionName::GLSLForceScalarLayout,
+         {slang::CompilerOptionValueKind::Int, 1}},
+    };
+
+    slang::TargetDesc target{};
+    target.format = SLANG_SPIRV;
+    target.profile = global_session->findProfile("spirv_1_6");
+    target.compilerOptionEntries = target_options;
+    target.compilerOptionEntryCount =
+        static_cast<u32>(std::size(target_options));
+
+    permanent_fs = std::make_unique<SlangVFSAdapter>("shaders");
+
+    slang::SessionDesc session_desc{};
+    session_desc.targets = &target;
+    session_desc.targetCount = 1;
+    session_desc.fileSystem = permanent_fs.get();
+    session_desc.compilerOptionEntries = session_options;
+    session_desc.compilerOptionEntryCount =
+        static_cast<u32>(std::size(session_options));
+
+    if (SLANG_FAILED(
+            global_session->createSession(session_desc, session.writeRef()))) {
+      std::abort();
+    }
   }
 };
 
 Compiler::Compiler() : impl(std::make_unique<Impl>()) {}
-Compiler::~Compiler() = default;
+
+Compiler::~Compiler() {
+  if (impl) {
+    impl->session = nullptr;
+    impl->global_session = nullptr;
+  }
+}
 
 auto Compiler::the() -> Compiler & {
   static Compiler instance;
@@ -290,152 +358,142 @@ auto Compiler::compile(const VFSPath &vfs_path)
     -> std::expected<CompiledShader, CompilationError> {
   using enum CompilationError::Type;
 
-  // ------------------------------------------------------------------
-  // 1. Read source bytes for cache key computation.
-  //    This also lets us detect a missing file before spinning up a
-  //    Slang session.
-  // ------------------------------------------------------------------
-  auto source_bytes = VFS::get().read_bytes(vfs_path);
-  if (!source_bytes)
-    return std::unexpected{CompilationError{
-        .type = FileNotFound, .message = std::string(vfs_path.view())}};
-
-  const u64 source_hash = hash_source(*source_bytes);
   const std::string cache_key{vfs_path.view()};
+  const std::string path_str{VFS::get().resolve(vfs_path)};
+  auto absolute_path = std::filesystem::path{path_str};
 
-  // ------------------------------------------------------------------
-  // 2. Cache lookup (shared lock — multiple readers are fine).
-  // ------------------------------------------------------------------
+  // 1. Instantly read the last write time from the OS file system
+  std::error_code ec{};
+  auto last_write = std::filesystem::last_write_time(absolute_path, ec);
+  u64 current_timestamp = 0;
+
+  if (!ec) {
+    current_timestamp =
+        static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                             last_write.time_since_epoch())
+                             .count());
+  } else {
+    return std::unexpected{CompilationError{
+        .type = FileNotFound,
+        .message = std::format("Could not query stats for path: {}", path_str),
+    }};
+  }
+
+  // 2. Early out if the file is cached and the timestamp hasn't nudged
   {
     std::shared_lock read_lock{impl->cache_mutex};
     if (auto it = impl->cache.find(cache_key); it != impl->cache.end()) {
-      if (it->second.content_hash == source_hash) {
-        return it->second.shader; // copy — CompiledShader owns its vectors
+      // Use timestamp validation instead of hashing file bytes!
+      if (it->second.content_hash == current_timestamp) {
+        return it->second.shader;
       }
     }
   }
 
-  // ------------------------------------------------------------------
-  // 3. Cache miss: run the full Slang pipeline.
-  // ------------------------------------------------------------------
-  slang::CompilerOptionEntry target_options[] = {
-      {
-          slang::CompilerOptionName::VulkanUseEntryPointName,
-          {slang::CompilerOptionValueKind::Int, 1},
-      },
-      {
-          slang::CompilerOptionName::DebugInformation,
-          {slang::CompilerOptionValueKind::Int, debug_level},
-      },
-      {
-          slang::CompilerOptionName::Optimization,
-          {slang::CompilerOptionValueKind::Int, optimisation_level},
-      },
-      {
-          slang::CompilerOptionName::GLSLForceScalarLayout,
-          {slang::CompilerOptionValueKind::Int, 1},
-      },
-  };
-
-  slang::CompilerOptionEntry session_options[] = {
-      {slang::CompilerOptionName::MatrixLayoutColumn,
-       {slang::CompilerOptionValueKind::Int, 1}},
-      {
-          slang::CompilerOptionName::GLSLForceScalarLayout,
-          {slang::CompilerOptionValueKind::Int, 1},
-      },
-  };
-
-  slang::TargetDesc target{};
-  target.format = SLANG_SPIRV;
-  target.compilerOptionEntries = target_options;
-  target.compilerOptionEntryCount = static_cast<u32>(std::size(target_options));
-
-  SlangVFSAdapter fs{vfs_path.scheme()};
-  slang::SessionDesc session_desc{};
-  session_desc.targets = &target;
-  session_desc.targetCount = 1;
-  session_desc.fileSystem = &fs;
-  session_desc.compilerOptionEntries = session_options;
-  session_desc.compilerOptionEntryCount =
-      static_cast<u32>(std::size(session_options));
-
-  Slang::ComPtr<slang::ISession> session;
-  {
-    std::scoped_lock lock(impl->global_session_mutex);
-    target.profile = impl->global_session->findProfile("spirv_1_6");
-    if (SLANG_FAILED(impl->global_session->createSession(session_desc,
-                                                         session.writeRef()))) {
-      return std::unexpected{CompilationError{
-          .type = Compilation, .message = "failed to create slang session"}};
-    }
-  }
+  // 3. Cache missed or file changed: Proceed to read file bytes safely
+  auto source_bytes = VFS::get().read_bytes(vfs_path);
+  if (!source_bytes)
+    return std::unexpected{
+        CompilationError{
+            .type = FileNotFound,
+            .message = std::string(vfs_path.view()),
+        },
+    };
 
   auto stem = std::filesystem::path{vfs_path.relative_path()}.stem().string();
-  Slang::ComPtr<ISlangBlob> diag;
-  slang::IModule *mod = session->loadModule(stem.c_str(), diag.writeRef());
+  const std::string source_str(source_bytes->begin(), source_bytes->end());
 
-  if (mod == nullptr)
-    return std::unexpected{CompilationError{.type = FileNotFound,
-                                            .message = blob_to_string(diag)}};
-
-  const i32 ep_count = mod->getDefinedEntryPointCount();
-  if (ep_count == 0)
-    return std::unexpected{CompilationError{
-        .type = Compilation, .message = "module defines no entry points"}};
-
-  std::vector<Slang::ComPtr<slang::IEntryPoint>> entry_points(
-      static_cast<usize>(ep_count));
-
-  for (i32 i = 0; i < ep_count; ++i) {
-    if (SLANG_FAILED(mod->getDefinedEntryPoint(i, entry_points[i].writeRef())))
-      return std::unexpected{CompilationError{
-          .type = Compilation,
-          .message = std::format("failed to retrieve entry point {}", i)}};
-  }
-
-  std::vector<slang::IComponentType *> components;
-  components.reserve(1 + static_cast<usize>(ep_count));
-  components.push_back(mod);
-  for (auto &ep : entry_points)
-    components.push_back(ep.get());
-
-  Slang::ComPtr<slang::IComponentType> composite;
-  if (SLANG_FAILED(session->createCompositeComponentType(
-          components.data(), static_cast<SlangInt>(components.size()),
-          composite.writeRef(), diag.writeRef())))
-    return std::unexpected{
-        CompilationError{.type = Compilation, .message = blob_to_string(diag)}};
-
-  Slang::ComPtr<slang::IComponentType> linked;
-  if (SLANG_FAILED(composite->link(linked.writeRef(), diag.writeRef())))
-    return std::unexpected{
-        CompilationError{.type = Compilation, .message = blob_to_string(diag)}};
-
-  auto [bindings, push_constants] = extract_program_reflection(linked.get());
-
-  slang::ProgramLayout *layout = linked->getLayout();
+  // Use a high-precision steady token for Slang's query-string bypass
+  const auto unique_token =
+      std::chrono::steady_clock::now().time_since_epoch().count();
+  std::string unique_module_name = std::format("{}_{}", stem, unique_token);
+  std::string unique_path_str = std::format("{}?{}", path_str, unique_token);
 
   std::vector<CompiledEntryPoint> compiled_entry_points;
-  compiled_entry_points.reserve(static_cast<usize>(ep_count));
+  std::vector<DescriptorBinding> bindings;
+  PushConstantRange push_constants{};
 
-  for (i32 i = 0; i < ep_count; ++i) {
-    Slang::ComPtr<ISlangBlob> code;
-    if (SLANG_FAILED(
-            linked->getEntryPointCode(i, 0, code.writeRef(), diag.writeRef())))
+  {
+    std::scoped_lock lock(impl->session_mutex);
+
+    Slang::ComPtr<ISlangBlob> diag;
+    slang::IModule *mod = impl->session->loadModuleFromSourceString(
+        unique_module_name.c_str(), unique_path_str.c_str(), source_str.c_str(),
+        diag.writeRef());
+    if (mod == nullptr)
+      return std::unexpected{CompilationError{
+          .type =
+              Compilation, // Change to Compilation if load fails syntax/linking
+          .message = blob_to_string(diag),
+      }};
+
+    const i32 ep_count = mod->getDefinedEntryPointCount();
+    if (ep_count == 0)
+      return std::unexpected{CompilationError{
+          .type = Compilation, .message = "module defines no entry points"}};
+
+    std::vector<Slang::ComPtr<slang::IEntryPoint>> entry_points(
+        static_cast<usize>(ep_count));
+    for (i32 i = 0; i < ep_count; ++i) {
+      if (SLANG_FAILED(
+              mod->getDefinedEntryPoint(i, entry_points[i].writeRef())))
+        return std::unexpected{CompilationError{
+            .type = Compilation,
+            .message = std::format("failed to retrieve entry point {}", i)}};
+    }
+
+    std::vector<slang::IComponentType *> components;
+    components.reserve(1 + static_cast<usize>(ep_count));
+    components.push_back(mod);
+    for (auto &ep : entry_points)
+      components.push_back(ep.get());
+
+    Slang::ComPtr<slang::IComponentType> composite;
+    if (SLANG_FAILED(impl->session->createCompositeComponentType(
+            components.data(), static_cast<SlangInt>(components.size()),
+            composite.writeRef(), diag.writeRef())))
       return std::unexpected{
-          CompilationError{.type = Compilation,
-                           .message = std::format("entry point {}: {}", i,
-                                                  blob_to_string(diag))}};
+          CompilationError{
+              .type = Compilation,
+              .message = blob_to_string(diag),
+          },
+      };
 
-    const auto *words = static_cast<const u32 *>(code->getBufferPointer());
-    const usize word_count = code->getBufferSize() / sizeof(u32);
+    Slang::ComPtr<slang::IComponentType> linked;
+    if (SLANG_FAILED(composite->link(linked.writeRef(), diag.writeRef())))
+      return std::unexpected{
+          CompilationError{
+              .type = Compilation,
+              .message = blob_to_string(diag),
+          },
+      };
 
-    CompiledEntryPoint cep{};
-    cep.spirv.assign(words, words + word_count);
-    cep.entry_point = extract_entry_point_info(layout->getEntryPointByIndex(i));
+    auto &&[b, pc] = extract_program_reflection(linked.get());
+    bindings = std::move(b);
+    push_constants = pc;
 
-    compiled_entry_points.push_back(std::move(cep));
+    slang::ProgramLayout *layout = linked->getLayout();
+    compiled_entry_points.reserve(static_cast<usize>(ep_count));
+
+    for (i32 i = 0; i < ep_count; ++i) {
+      Slang::ComPtr<ISlangBlob> code;
+      if (SLANG_FAILED(linked->getEntryPointCode(i, 0, code.writeRef(),
+                                                 diag.writeRef())))
+        return std::unexpected{
+            CompilationError{.type = Compilation,
+                             .message = std::format("entry point {}: {}", i,
+                                                    blob_to_string(diag))}};
+
+      const auto *words = static_cast<const u32 *>(code->getBufferPointer());
+      const usize word_count = code->getBufferSize() / sizeof(u32);
+
+      CompiledEntryPoint cep{};
+      cep.spirv.assign(words, words + word_count);
+      cep.entry_point =
+          extract_entry_point_info(layout->getEntryPointByIndex(i));
+
+      compiled_entry_points.push_back(std::move(cep));
+    }
   }
 
   CompiledShader result{
@@ -444,19 +502,52 @@ auto Compiler::compile(const VFSPath &vfs_path)
       .push_constants = push_constants,
   };
 
+  // 4. Update memory cache associating the unique OS write timestamp
   {
     std::unique_lock write_lock{impl->cache_mutex};
     impl->cache.insert_or_assign(
         cache_key,
-        Impl::CacheEntry{.content_hash = source_hash, .shader = result});
+        Impl::CacheEntry{.content_hash = current_timestamp, .shader = result});
   }
 
   return result;
 }
 
+auto Compiler::is_dirty(const std::string_view vfs_path) -> bool {
+  const std::string cache_key{vfs_path};
+  const std::string path_str = VFS::get().resolve(vfs_path);
+
+  std::error_code ec{};
+  auto last_write = std::filesystem::last_write_time(path_str, ec);
+  if (ec)
+    return false;
+
+  u64 current_timestamp =
+      static_cast<u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                           last_write.time_since_epoch())
+                           .count());
+
+  std::shared_lock read_lock{impl->cache_mutex};
+  if (auto it = impl->cache.find(cache_key); it != impl->cache.end()) {
+    // If the timestamp on disk doesn't match what's in our cache, it's dirty!
+    return it->second.content_hash != current_timestamp;
+  }
+
+  // If it's not even in the cache yet, treat it as dirty so it compiles
+  // initially
+  return true;
+}
+
 auto Compiler::invalidate(const VFSPath &vfs_path) -> void {
   std::unique_lock write_lock{impl->cache_mutex};
-  impl->cache.erase(std::string{vfs_path.view()});
+  if (impl->cache.erase(std::string{vfs_path.view()}) == 0) {
+    trace("Could not find {} in cache.", vfs_path.view());
+  } else {
+    for (auto &&[k, v] : impl->cache) {
+      trace("{}:{}", k, v.content_hash);
+    }
+    trace("Invalidated {}", vfs_path.view());
+  }
 }
 
 auto Compiler::clear_cache() -> void {

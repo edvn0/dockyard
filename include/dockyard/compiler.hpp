@@ -7,6 +7,7 @@
 #include <future>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace dy {
@@ -21,13 +22,7 @@ enum class DescriptorType : u8 {
   ComparisonSampler,
 };
 
-enum class Stage : u8 {
-  Vertex,
-  Fragment,
-  Mesh,
-  Task,
-  Compute,
-};
+enum class Stage : u8 { Vertex, Fragment, Mesh, Task, Compute, None };
 MAKE_BITFIELD(Stage);
 
 struct DescriptorBinding {
@@ -78,6 +73,8 @@ public:
   [[nodiscard]] auto precache_shaders(Badge<App>) -> std::future<void>;
   auto invalidate(const VFSPath &) -> void;
   auto clear_cache() -> void;
+  auto is_dirty(std::string_view) -> bool;
+  auto is_dirty(const VFSPath &path) -> bool { return is_dirty(path.view()); }
 
   ~Compiler();
 

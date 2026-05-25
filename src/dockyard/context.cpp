@@ -1,3 +1,4 @@
+#include "dockyard/bindless_handle.hpp"
 #include <dockyard/context.hpp>
 
 #include <volk.h>
@@ -5,6 +6,7 @@
 #include <dockyard/app.hpp>
 #include <dockyard/events.hpp>
 #include <dockyard/log.hpp>
+#include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/vk_check.hpp>
 
@@ -137,9 +139,7 @@ auto ViewportResources::resize(const VulkanContext &ctx,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_STORAGE_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT);
-    renderer.bindless.queue_texture_write(
-        forward_target.index(), entry->texture.sampled_view,
-        entry->texture.storage_view, entry->sampled_view_type);
+    renderer.bindless.mark_dirty();
   } else {
     auto tex = Texture::create(
         ctx, "forward_target", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -163,9 +163,8 @@ auto ViewportResources::resize(const VulkanContext &ctx,
         ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_UNORM,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT);
-    renderer.bindless.queue_texture_write(
-        display_target.index(), entry->texture.sampled_view,
-        entry->texture.storage_view, entry->sampled_view_type);
+    renderer.bindless.mark_dirty();
+
   } else {
     auto tex = Texture::create(
         ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_UNORM,
@@ -430,44 +429,46 @@ auto CommandBuffer::create(const VulkanContext &ctx) -> CommandBuffer {
 
 auto VulkanContext::transition_to_general(VkImage image,
                                           VkImageAspectFlags aspect,
-                                          u32 mip_count, u32 layer_count) const
+                                          u32 mip_count, u32 layer_count,
+                                          std::source_location loc) const
     -> void {
-  one_time_submit([img = image, aspect, mip_count,
-                   layer_count](VkCommandBuffer cmd) {
-    const VkImageMemoryBarrier2 barrier{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
-        .srcAccessMask = VK_ACCESS_2_NONE,
-        .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-        .dstAccessMask =
-            VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = img,
-        .subresourceRange =
-            {
-                .aspectMask = aspect,
-                .baseMipLevel = 0,
-                .levelCount = mip_count,
-                .baseArrayLayer = 0,
-                .layerCount = layer_count,
-            },
-    };
+  one_time_submit(
+      [img = image, aspect, mip_count, layer_count](VkCommandBuffer cmd) {
+        const VkImageMemoryBarrier2 barrier{
+            .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+            .srcAccessMask = VK_ACCESS_2_NONE,
+            .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            .dstAccessMask =
+                VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+            .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = img,
+            .subresourceRange =
+                {
+                    .aspectMask = aspect,
+                    .baseMipLevel = 0,
+                    .levelCount = mip_count,
+                    .baseArrayLayer = 0,
+                    .layerCount = layer_count,
+                },
+        };
 
-    const VkDependencyInfo dep_info{
-        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-        .imageMemoryBarrierCount = 1,
-        .pImageMemoryBarriers = &barrier,
-    };
+        const VkDependencyInfo dep_info{
+            .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers = &barrier,
+        };
 
-    vkCmdPipelineBarrier2(cmd, &dep_info);
-  });
+        vkCmdPipelineBarrier2(cmd, &dep_info);
+      },
+      loc);
 }
 
-auto VulkanContext::one_time_submit(
-    std::function<void(VkCommandBuffer)> &&func) const -> void {
+auto VulkanContext::one_time_submit(std::function<void(VkCommandBuffer)> &&func,
+                                    std::source_location loc) const -> void {
   VkCommandPoolCreateInfo pool_info{
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
       .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
@@ -495,27 +496,385 @@ auto VulkanContext::one_time_submit(
 
   vkEndCommandBuffer(cmd);
 
+  VkCommandBufferSubmitInfo cbsi{};
+  cbsi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+  cbsi.commandBuffer = cmd;
   VkSubmitInfo2 submit_info{
       .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
       .commandBufferInfoCount = 1,
-      .pCommandBufferInfos =
-          new VkCommandBufferSubmitInfo{
-              .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
-              .commandBuffer = cmd,
-          },
+      .pCommandBufferInfos = &cbsi,
   };
 
-  /* VkFence fence;
-   vkCreateFence(device, &fence_info, nullptr, &fence);
-   vkQueueSubmit2(graphics_queue(), 1, &submit_info, fence);
-   vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-   vkDestroyFence(device, fence, nullptr); */
+  PROFILE_SCOPE(std::format("{}", loc.function_name()));
+  VkFence fence{};
+  VkFenceCreateInfo fence_info{};
+  fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+  vkCreateFence(device, &fence_info, nullptr, &fence);
+  vkResetFences(device, 1, &fence);
+  vkQueueSubmit2(graphics_queue(), 1, &submit_info, fence);
+  vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+  vkDestroyFence(device, fence, nullptr);
 
-  vkQueueSubmit2(graphics_queue(), 1, &submit_info, VK_NULL_HANDLE);
-  vkQueueWaitIdle(graphics_queue()); // Wait here
-
-  delete submit_info.pCommandBufferInfos;
   vkDestroyCommandPool(device, pool, nullptr);
+}
+
+auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
+                      TextureHandle equirect) -> IblProbe {
+  IblProbe probe{};
+
+  struct PushConstants {
+    u32 equirect_index;
+    u32 face;
+    u32 mip;
+    u32 max_mip;
+    u32 size;
+    u32 sampler_index;
+    u32 out_index;
+  };
+
+  const u32 prefiltered_size = 512u;
+  const u32 prefiltered_mips =
+      static_cast<u32>(std::bit_width(prefiltered_size));
+  probe.prefiltered_mip_count = prefiltered_mips;
+
+  auto register_tex = [&](Texture tex,
+                          VkImageViewType view_type) -> TextureHandle {
+    return renderer.textures.create(TextureEntry{
+        .texture = std::move(tex),
+        .sampled_view_type = view_type,
+    });
+  };
+
+  probe.env_map = register_tex(
+      Texture::create_cubemap(ctx, "ibl/env_map",
+                              {
+                                  .size = 512u,
+                                  .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+                                  .mip_levels = 1u,
+                                  .storage_view = true,
+                              }),
+      VK_IMAGE_VIEW_TYPE_CUBE);
+
+  probe.irradiance = register_tex(
+      Texture::create_cubemap(ctx, "ibl/irradiance",
+                              {
+                                  .size = 64u,
+                                  .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+                                  .mip_levels = 1u,
+                                  .storage_view = true,
+                              }),
+      VK_IMAGE_VIEW_TYPE_CUBE);
+
+  probe.prefiltered = register_tex(
+      Texture::create_cubemap(ctx, "ibl/prefiltered",
+                              {
+                                  .size = prefiltered_size,
+                                  .format = VK_FORMAT_R16G16B16A16_SFLOAT,
+                                  .mip_levels = prefiltered_mips,
+                                  .storage_view = true,
+                              }),
+      VK_IMAGE_VIEW_TYPE_CUBE);
+
+  auto bytes = std::vector<u32>(512u * 512u, {});
+  probe.brdf_lut =
+      register_tex(Texture::from_bytes(ctx, "ibl/brdf_lut",
+                                       {
+                                           .bytes = std::span(bytes),
+                                           .width = 512u,
+                                           .height = 512u,
+                                           .format = VK_FORMAT_R16G16_SFLOAT,
+                                           .storage_view = true,
+                                       }),
+                   VK_IMAGE_VIEW_TYPE_2D);
+
+  auto register_cube_sub_views = [&](TextureHandle h) {
+    auto &tex = renderer.textures.get(h)->texture;
+    tex.register_sub_views(ctx, renderer.subimages, renderer.bindless,
+                           {
+                               .view_type = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
+                               .layer_count = 6u,
+                           });
+  };
+  register_cube_sub_views(probe.env_map);
+  register_cube_sub_views(probe.irradiance);
+  register_cube_sub_views(probe.prefiltered);
+
+  {
+    auto &tex = renderer.textures.get(probe.brdf_lut)->texture;
+    tex.register_sub_views(ctx, renderer.subimages, renderer.bindless,
+                           {
+                               .view_type = VK_IMAGE_VIEW_TYPE_2D,
+                               .layer_count = 1u,
+                           });
+  }
+
+  renderer.bindless.repopulate_if_needed(renderer.textures, renderer.samplers,
+                                         renderer.comparison_samplers,
+                                         renderer.subimages);
+
+  auto make_pipeline = [&, desc_layout =
+                               renderer.bindless.layout](const VFSPath &path) {
+    auto could =
+        renderer.pipeline_registry->create_compute(ComputePipelineDescription{
+            .shader_path = path,
+            .descriptor_set_layout = desc_layout,
+            .layout = VK_NULL_HANDLE,
+        });
+    if (!could)
+      std::abort();
+    return could.value();
+  };
+
+  auto compile_all = [](auto factory, auto... paths) {
+    std::array pipelines{factory(VFSPath::create(paths))...};
+
+    return std::apply(
+        [](auto... elems) { return std::make_tuple(std::move(elems)...); },
+        std::move(pipelines));
+  };
+
+  auto [pipe_equirect, pipe_irradiance, pipe_prefilter, pipe_brdf_lut] =
+      compile_all(make_pipeline, "shaders://equirect_to_cubemap.slang",
+                  "shaders://irradiance_convolve.slang",
+                  "shaders://specular_prefilter.slang",
+                  "shaders://brdf_lut_gen.slang");
+
+  auto cube_barrier =
+      [](VkImage image, u32 mip_levels, VkPipelineStageFlags2 src_stage,
+         VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage,
+         VkAccessFlags2 dst_access, VkImageLayout old_layout,
+         VkImageLayout new_layout) -> VkImageMemoryBarrier2 {
+    return {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = src_stage,
+        .srcAccessMask = src_access,
+        .dstStageMask = dst_stage,
+        .dstAccessMask = dst_access,
+        .oldLayout = old_layout,
+        .newLayout = new_layout,
+        .image = image,
+        .subresourceRange =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = mip_levels,
+                .baseArrayLayer = 0,
+                .layerCount = 6,
+            },
+    };
+  };
+
+  auto image_barrier_2d =
+      [](VkImage image, VkPipelineStageFlags2 src_stage,
+         VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage,
+         VkAccessFlags2 dst_access, VkImageLayout old_layout,
+         VkImageLayout new_layout) -> VkImageMemoryBarrier2 {
+    return {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = src_stage,
+        .srcAccessMask = src_access,
+        .dstStageMask = dst_stage,
+        .dstAccessMask = dst_access,
+        .oldLayout = old_layout,
+        .newLayout = new_layout,
+        .image = image,
+        .subresourceRange =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .baseMipLevel = 0,
+                .levelCount = 1,
+                .baseArrayLayer = 0,
+                .layerCount = 1,
+            },
+    };
+  };
+
+  auto submit_barriers = [](VkCommandBuffer cmd,
+                            std::span<const VkImageMemoryBarrier2> barriers) {
+    const VkDependencyInfo dep{
+        .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .imageMemoryBarrierCount = static_cast<u32>(barriers.size()),
+        .pImageMemoryBarriers = barriers.data(),
+    };
+    vkCmdPipelineBarrier2(cmd, &dep);
+  };
+
+  // ── Dispatch ─────────────────────────────────────────────────────────────
+
+  PROFILE_SCOPE("Full compute");
+  ctx.one_time_submit([&](VkCommandBuffer cmd) {
+    PROFILE_SCOPE("Inner submission");
+
+    const auto env_entry = renderer.textures.get(probe.env_map);
+    const auto irr_entry = renderer.textures.get(probe.irradiance);
+    const auto pref_entry = renderer.textures.get(probe.prefiltered);
+    const auto lut_entry = renderer.textures.get(probe.brdf_lut);
+
+    // ── [1] Transition all outputs UNDEFINED → GENERAL ───────────────────
+    {
+      const VkImageMemoryBarrier2 init_barriers[] = {
+          cube_barrier(env_entry->texture.image, 1u, VK_PIPELINE_STAGE_2_NONE,
+                       VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                       VK_IMAGE_LAYOUT_GENERAL),
+          cube_barrier(irr_entry->texture.image, 1u, VK_PIPELINE_STAGE_2_NONE,
+                       VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                       VK_IMAGE_LAYOUT_GENERAL),
+          cube_barrier(pref_entry->texture.image, prefiltered_mips,
+                       VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
+                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_WRITE_BIT, VK_IMAGE_LAYOUT_UNDEFINED,
+                       VK_IMAGE_LAYOUT_GENERAL),
+          image_barrier_2d(lut_entry->texture.image, VK_PIPELINE_STAGE_2_NONE,
+                           VK_ACCESS_2_NONE,
+                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                           VK_ACCESS_2_SHADER_WRITE_BIT,
+                           VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL),
+      };
+      submit_barriers(cmd, init_barriers);
+    }
+
+    // ── equirect → env cubemap ────────────────────────────────────────────
+    {
+      const auto &entry = renderer.pipeline_registry->get_entry(pipe_equirect);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
+                              0u, 1u, &renderer.bindless.set, 0u, nullptr);
+
+      const PushConstants pc{
+          .equirect_index = equirect.index(),
+          .size = 512u,
+          .sampler_index = renderer.dummy_sampler_handle.index(),
+          .out_index = env_entry->texture.sub_view_handle(0u, 0u).index(),
+      };
+      vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
+                         sizeof(pc), &pc);
+
+      // 512 / 8 = 64 groups per dim, z = 6 faces
+      vkCmdDispatch(cmd, 64u, 64u, 6u);
+    }
+
+    // ── [2] env_map write → irradiance + prefilter read ───────────────────
+    {
+      const VkImageMemoryBarrier2 b = cube_barrier(
+          env_entry->texture.image, 1u, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+          VK_IMAGE_LAYOUT_GENERAL);
+      submit_barriers(cmd, {&b, 1});
+    }
+
+    // ── irradiance convolution ────────────────────────────────────────────
+    {
+      const auto &entry =
+          renderer.pipeline_registry->get_entry(pipe_irradiance);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
+                              0u, 1u, &renderer.bindless.set, 0u, nullptr);
+
+      const PushConstants pc{
+          .equirect_index = probe.env_map.index(),
+          .size = 32u,
+          .sampler_index = renderer.dummy_sampler_handle.index(),
+          .out_index = irr_entry->texture.sub_view_handle(0u, 0u).index(),
+      };
+      vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
+                         sizeof(pc), &pc);
+
+      // 32 / 8 = 4 groups per dim, z = 6 faces
+      vkCmdDispatch(cmd, 4u, 4u, 6u);
+    }
+
+    // ── specular prefilter — one dispatch per mip ─────────────────────────
+    {
+      const auto &entry = renderer.pipeline_registry->get_entry(pipe_prefilter);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
+                              0u, 1u, &renderer.bindless.set, 0u, nullptr);
+
+      for (u32 mip = 0u; mip < prefiltered_mips; ++mip) {
+        const u32 mip_size = std::max(1u, prefiltered_size >> mip);
+        const u32 groups = std::max(1u, mip_size / 8u);
+
+        const PushConstants pc{
+            .equirect_index = probe.env_map.index(),
+            .mip = mip,
+            .max_mip = prefiltered_mips - 1u,
+            .size = mip_size,
+            .sampler_index = renderer.dummy_sampler_handle.index(),
+            .out_index = pref_entry->texture.sub_view_handle(mip, 0u).index(),
+        };
+        vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
+                           sizeof(pc), &pc);
+
+        vkCmdDispatch(cmd, groups, groups, 6u);
+      }
+    }
+
+    // ── BRDF LUT ──────────────────────────────────────────────────────────
+    {
+      const auto &entry = renderer.pipeline_registry->get_entry(pipe_brdf_lut);
+      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
+                              0u, 1u, &renderer.bindless.set, 0u, nullptr);
+
+      const PushConstants pc{
+          .size = 512u,
+          .out_index = probe.brdf_lut.index(),
+      };
+      vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
+                         sizeof(pc), &pc);
+
+      // 512 / 8 = 64 groups per dim
+      vkCmdDispatch(cmd, 64u, 64u, 1u);
+    }
+
+    // ── [3] Final barrier: compute writes → fragment shader reads ─────────
+    {
+      const VkImageMemoryBarrier2 final_barriers[] = {
+          cube_barrier(irr_entry->texture.image, 1u,
+                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                       VK_IMAGE_LAYOUT_GENERAL),
+          cube_barrier(pref_entry->texture.image, prefiltered_mips,
+                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                       VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                       VK_IMAGE_LAYOUT_GENERAL),
+          image_barrier_2d(lut_entry->texture.image,
+                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                           VK_ACCESS_2_SHADER_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                           VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+                           VK_IMAGE_LAYOUT_GENERAL),
+      };
+      submit_barriers(cmd, final_barriers);
+    }
+  });
+
+  renderer.pipeline_registry->destroy(pipe_equirect, pipe_irradiance,
+                                      pipe_prefilter, pipe_brdf_lut);
+
+  return probe;
+}
+
+auto IblProbe::destroy(const VulkanContext &ctx, SceneRenderer &renderer)
+    -> void {
+  if (auto *e = renderer.textures.get(prefiltered))
+    e->texture.destroy(ctx, &renderer.subimages);
+
+  for (auto h : {env_map, irradiance, brdf_lut}) {
+    if (auto *e = renderer.textures.get(h))
+      e->texture.destroy(ctx);
+    renderer.textures.destroy(h);
+  }
+  renderer.textures.destroy(prefiltered);
+
+  *this = {};
 }
 
 } // namespace dy
