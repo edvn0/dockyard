@@ -1,5 +1,6 @@
 #pragma once
 
+#include <dockyard/bindless_handle.hpp>
 #include <dockyard/types.hpp>
 #include <glm/glm.hpp>
 #include <limits>
@@ -20,6 +21,7 @@ public:
   static auto create(const glm::vec3 &in_min, const glm::vec3 &in_max) -> AABB {
     return AABB{in_min, in_max};
   }
+  AABB() = default;
 
   auto update(const glm::vec3 &v) -> void {
     min = glm::min(min, v);
@@ -50,9 +52,6 @@ public:
     }
     return result;
   }
-
-private:
-  AABB() = default;
 };
 
 struct Mesh {
@@ -62,11 +61,64 @@ struct Mesh {
   auto operator<=>(const Mesh &) const = default;
 };
 
-struct MeshHandle {
-  u32 value{~0u};
-  [[nodiscard]] auto index() const -> u32 { return value; }
-  [[nodiscard]] auto valid() const -> bool { return value != ~0u; }
-  auto operator<=>(const MeshHandle &) const = default;
+struct SceneRenderer;
+
+struct MeshLod {
+  u32 index_count = 0;
+  u32 first_index = 0;
+};
+
+static constexpr auto k_lod_min_triangles = 300UZ;
+static constexpr auto max_lods = 6UZ;
+[[nodiscard]] constexpr auto should_generate_lods(const auto &prim) -> bool {
+  return (prim.indices.size() / 3) >= k_lod_min_triangles;
+}
+
+struct MeshLodGroup {
+  i32 vertex_offset = 0;
+  u8 lod_count = 1;
+  std::array<MeshLod, max_lods> lods{};
+
+  [[nodiscard]] Mesh resolve(u8 idx) const noexcept {
+    idx = std::min(idx, static_cast<u8>(lod_count - 1));
+    return {
+        .index_count = lods[idx].index_count,
+        .first_index = lods[idx].first_index,
+        .vertex_offset = vertex_offset,
+    };
+  }
+};
+
+struct MeshPrimitiveReference {
+  MeshLodGroup lod_group;
+  u32 material_id;
+  AABB aabb;
+};
+
+struct MeshNodeDescription {
+  std::string name;
+  glm::mat4 local_transform{1.f};
+  i32 parent_index{-1};
+  std::vector<MeshPrimitiveReference> primitives;
+};
+
+struct MeshAsset {
+  std::vector<TextureHandle> texture_handles; // [gltf_image_idx]
+  std::vector<u32> material_slots;            // [gltf_material_idx]
+  std::vector<std::vector<MeshLodGroup>> meshes;
+
+  std::vector<std::vector<AABB>> submesh_aabbs;
+  AABB mesh_aabb;
+
+  usize vertex_base_offset{};
+  usize shadow_vertex_base_offset{};
+  usize index_base_offset{};
+
+  u32 material_base_slot{};
+  u32 material_count{};
+
+  std::vector<MeshNodeDescription> nodes;
+  std::vector<u32> root_node_indices;
 };
 
 } // namespace dy

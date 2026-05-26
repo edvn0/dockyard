@@ -29,6 +29,8 @@
 #include <taskflow/algorithm/for_each.hpp>
 #include <taskflow/taskflow.hpp>
 
+#include <meshoptimizer.h>
+
 namespace dy {
 
 struct PrimitiveData {
@@ -441,6 +443,55 @@ constexpr u32 k_fb_emissive = 4u;
   return std::expected<PrimitiveResult, std::string>{std::in_place, out, aabb};
 }
 
+[[nodiscard]] auto generate_lods(const PrimitiveData &lod0)
+    -> std::vector<std::vector<u32>> // [0] = LOD1 indices, [1] = LOD2, ...
+{
+  static constexpr std::array<f32, 5> k_lod_targets = {0.50F, 0.25F, 0.125F,
+                                                       0.0625F, 0.03125F};
+  static constexpr f32 k_lod_error = 0.8F;
+
+  std::vector<std::vector<u32>> result;
+
+  std::vector<f32> positions;
+  positions.reserve(lod0.vertices.size() * 3);
+  for (const auto &v : lod0.vertices) {
+    positions.push_back(v.position[0]);
+    positions.push_back(v.position[1]);
+    positions.push_back(v.position[2]);
+  }
+
+  const auto *prev_indices = lod0.indices.data();
+  usize prev_count = lod0.indices.size();
+
+  for (const f32 target_ratio : k_lod_targets) {
+    const usize target_count =
+        std::max(static_cast<usize>(3),
+                 static_cast<usize>(static_cast<f32>(lod0.indices.size()) *
+                                    target_ratio));
+    const usize rounded = (target_count / 3) * 3;
+
+    std::vector<u32> simplified(lod0.indices.size());
+    f32 error = 0.0F;
+    const usize out_count = meshopt_simplify(
+        simplified.data(), prev_indices, prev_count, positions.data(),
+        lod0.vertices.size(), sizeof(f32) * 3, rounded, k_lod_error, 0, &error);
+
+    simplified.resize(out_count);
+
+    // Stop early if simplification stalled (< 10% reduction vs previous)
+    if (out_count >= static_cast<usize>(static_cast<f32>(prev_count) * 0.9F)) {
+      info("Stopping at {}", target_ratio);
+      break;
+    }
+
+    result.push_back(std::move(simplified));
+    prev_indices = result.back().data();
+    prev_count = result.back().size();
+  }
+
+  return result;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Node transform helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -470,11 +521,6 @@ constexpr u32 k_fb_emissive = 4u;
 // ─────────────────────────────────────────────────────────────────────────────
 // Node hierarchy flattening — pure output into MeshAsset::nodes
 // ─────────────────────────────────────────────────────────────────────────────
-
-struct NodeStackFrame {
-  usize node_idx;
-  i32 parent_flat_idx; // -1 = root
-};
 
 void flatten_nodes(const fastgltf::Asset &asset,
                    std::span<const std::size_t> root_indices, MeshAsset &out) {
@@ -511,19 +557,18 @@ void flatten_nodes(const fastgltf::Asset &asset,
 
     if (node.meshIndex.has_value()) {
       const usize mi = *node.meshIndex;
-      const auto &meshes = out.meshes[mi];
+      const auto &lod_groups = out.meshes[mi];
       const auto &gltf_mesh = asset.meshes[mi];
-      desc.primitives.reserve(meshes.size());
+      desc.primitives.reserve(lod_groups.size());
 
-      for (usize pi = 0; pi < meshes.size(); ++pi) {
-        const auto &h = meshes[pi];
+      for (usize pi = 0; pi < lod_groups.size(); ++pi) {
         const u32 mat_id =
             gltf_mesh.primitives[pi].materialIndex.has_value()
                 ? out.material_slots[*gltf_mesh.primitives[pi].materialIndex]
                 : 0u;
 
         desc.primitives.push_back({
-            .mesh = h,
+            .lod_group = lod_groups[pi],
             .material_id = mat_id,
             .aabb = out.submesh_aabbs[mi][pi],
         });
@@ -555,7 +600,7 @@ namespace mesh {
 
 auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
                       std::span<const u32> indices)
-    -> std::expected<MeshHandle, std::string> {
+    -> std::expected<MeshAssetHandle, std::string> {
   auto &pool = *renderer.geometry_pool;
 
   MeshAsset result{
@@ -571,28 +616,34 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
 
   auto &&[v_off, sv_off, i_off] = pool.allocate(vertices, indices);
 
-  const Mesh mesh{
-      .index_count = static_cast<u32>(indices.size()),
-      .first_index = static_cast<u32>(i_off / sizeof(u32)),
-      .vertex_offset = static_cast<i32>(v_off / sizeof(Vertex)),
-  };
+  MeshLodGroup lod_group;
+  lod_group.vertex_offset = static_cast<i32>(v_off / sizeof(Vertex));
+  lod_group.lods[0].index_count = static_cast<u32>(indices.size());
+  lod_group.lods[0].first_index = static_cast<u32>(i_off / sizeof(u32));
+  lod_group.lod_count = 1;
 
-  result.meshes = {{mesh}};
   auto aabb = AABB::create();
   for (const auto &v : vertices)
     aabb.update({v.position[0], v.position[1], v.position[2]});
+
+  result.meshes = {{lod_group}};
+  result.submesh_aabbs = {{aabb}};
+  result.mesh_aabb = aabb;
 
   MeshNodeDescription desc{};
   desc.name = "mesh_from_memory";
   desc.local_transform = glm::mat4{1.f};
   desc.parent_index = -1;
-  desc.primitives = {{.mesh = mesh, .material_id = 0u, .aabb = aabb}};
+  desc.primitives = {
+      {
+          .lod_group = lod_group,
+          .material_id = 0u,
+          .aabb = aabb,
+      },
+  };
 
   result.nodes = {std::move(desc)};
   result.root_node_indices = {0u};
-
-  result.mesh_aabb = aabb;
-  result.submesh_aabbs = {{aabb}};
 
   return renderer.register_gltf(std::move(result));
 }
@@ -616,7 +667,7 @@ static auto calculate_requirements(const auto &extracted_prims)
 }
 
 auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
-    -> std::expected<MeshHandle, std::string> {
+    -> std::expected<MeshAssetHandle, std::string> {
 
   auto &pool = *renderer.geometry_pool;
   const auto fs_path = VFS::get().resolve(path);
@@ -746,15 +797,34 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
   {
     PROFILE_SCOPE("Allocate geometry");
 
-    // 1. Pre-calculate & Safety
-    auto [total_v, total_i] = calculate_requirements(extracted_prims);
-    pool.reserve(total_v, total_i);
+    // Generate LODs up front so the reserve call is accurate
+    struct PrimLods {
+      std::vector<std::vector<u32>> extra; // LOD1, LOD2, LOD3
+    };
+    std::vector<PrimLods> prim_lods(prim_work_list.size());
+    usize total_lod_indices = 0;
 
-    // 2. Start optimized batch
+    {
+      PROFILE_SCOPE("Generate LODs");
+      for (usize i = 0; i < prim_work_list.size(); ++i) {
+        if (!extracted_prims[i])
+          continue;
+        auto &[data, aabb] = *extracted_prims[i];
+        if (should_generate_lods(data)) {
+          prim_lods[i].extra = generate_lods(data);
+          for (const auto &lod_indices : prim_lods[i].extra)
+            total_lod_indices += lod_indices.size();
+        }
+      }
+    }
+
+    auto [total_v, total_i] = calculate_requirements(extracted_prims);
+    pool.reserve(total_v, total_i + total_lod_indices);
+
     auto batch = pool.begin_transaction();
 
     result->meshes.resize(asset.meshes.size());
-    result->submesh_aabbs.resize(asset.meshes.size()); // same size as meshes
+    result->submesh_aabbs.resize(asset.meshes.size());
     result->vertex_base_offset = pool.vertex_offset;
     result->submesh_aabbs.clear();
 
@@ -769,15 +839,28 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
 
       auto &[data, aabb] = *res;
 
+      // LOD0 — full vertices + indices
       auto offsets = batch.allocate(data.vertices, data.indices);
-      result->submesh_aabbs[mesh_idx].push_back(aabb); // ← per-submesh
-      result->mesh_aabb.merge(aabb);         // ← accumulate overall
-      result->meshes[mesh_idx].push_back(Mesh{
-          .index_count = static_cast<u32>(data.indices.size()),
-          .first_index = static_cast<u32>(offsets.index_offset / sizeof(u32)),
-          .vertex_offset =
-              static_cast<i32>(offsets.vertex_offset / sizeof(Vertex)),
-      });
+
+      MeshLodGroup lod_group;
+      lod_group.vertex_offset =
+          static_cast<i32>(offsets.vertex_offset / sizeof(Vertex));
+      lod_group.lods[0].first_index =
+          static_cast<u32>(offsets.index_offset / sizeof(u32));
+      lod_group.lods[0].index_count = static_cast<u32>(data.indices.size());
+      lod_group.lod_count = 1;
+
+      // LOD1–N — indices only, same vertex_offset
+      for (const auto &lod_indices : prim_lods[i].extra) {
+        auto lod_off = batch.allocate({}, lod_indices);
+        auto &lod = lod_group.lods[lod_group.lod_count++];
+        lod.first_index = static_cast<u32>(lod_off.index_offset / sizeof(u32));
+        lod.index_count = static_cast<u32>(lod_indices.size());
+      }
+
+      result->submesh_aabbs[mesh_idx].push_back(aabb);
+      result->mesh_aabb.merge(aabb);
+      result->meshes[mesh_idx].push_back(lod_group);
     }
 
     batch.commit();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cassert>
 #include <dockyard/types.hpp>
 #include <span>
 
@@ -225,10 +226,12 @@ struct TextureTag {};
 struct SamplerTag {};
 struct ComparisonSamplerTag {};
 struct SubImageTag {};
+struct MeshAssetTag {};
 
 using TextureHandle = Handle<TextureTag>;
 using SamplerHandle = Handle<SamplerTag>;
 using ComparisonSamplerHandle = Handle<ComparisonSamplerTag>;
 using SubImageHandle = Handle<SubImageTag>;
+using MeshAssetHandle = Handle<MeshAssetTag>;
 
 } // namespace dy

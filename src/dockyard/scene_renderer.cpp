@@ -11,6 +11,8 @@
 #include <limits>
 #include <ranges>
 
+#include <glm/gtc/packing.hpp>
+
 namespace dy {
 
 namespace {
@@ -213,10 +215,8 @@ auto create_main_pipeline_layout(VkDevice device,
   return layout;
 }
 
-auto SceneRenderer::register_gltf(MeshAsset &&asset) -> MeshHandle {
-  u32 id = static_cast<u32>(mesh_registry.size());
-  mesh_registry.push_back(std::move(asset));
-  return MeshHandle{id};
+auto SceneRenderer::register_gltf(MeshAsset &&asset) -> MeshAssetHandle {
+  return mesh_registry.create(std::move(asset));
 }
 
 auto SceneRenderer::register_external_view(VkImageView view,
@@ -234,25 +234,22 @@ auto SceneRenderer::register_external_view(VkImageView view,
   return handle;
 }
 
-auto SceneRenderer::get_mesh(MeshHandle handle) -> MeshAsset * {
-  if (!handle.valid() || handle.index() >= mesh_registry.size())
-    return nullptr;
-  return &mesh_registry[handle.index()];
+auto SceneRenderer::get_mesh(MeshAssetHandle handle) -> MeshAsset * {
+  return mesh_registry.get(handle);
 }
-auto SceneRenderer::get_mesh(MeshHandle handle) const -> const MeshAsset * {
-  if (!handle.valid() || handle.index() >= mesh_registry.size())
-    return nullptr;
-  return &mesh_registry[handle.index()];
+auto SceneRenderer::get_mesh(MeshAssetHandle handle) const
+    -> const MeshAsset * {
+  return mesh_registry.get(handle);
 }
 
-auto SceneRenderer::get_material_view(MeshHandle handle) const
+auto SceneRenderer::get_material_view(MeshAssetHandle handle) const
     -> ConstMaterialView {
   const auto *mesh = get_mesh(handle);
   assert(mesh && "invalid mesh handle");
   return get_material_view(*mesh);
 }
 
-auto SceneRenderer::get_material_view_mut(MeshHandle handle)
+auto SceneRenderer::get_material_view_mut(MeshAssetHandle handle)
     -> MutableMaterialView {
   const auto *mesh = get_mesh(handle);
   assert(mesh && "invalid mesh handle");
@@ -275,6 +272,17 @@ auto SceneRenderer::get_material_view_mut(const MeshAsset &mesh) const
                                                     mesh.material_count),
       .base_slot = mesh.material_base_slot,
   };
+}
+
+auto SceneRenderer::remove_override(Entity entity) -> void {
+  auto *material_override = entity.try_get<Components::MaterialOverride>();
+  if (material_override == nullptr)
+    return;
+
+  if (material_override->gpu_slot != ~0U)
+    override_pool.free(material_override->gpu_slot);
+
+  entity.remove<Components::MaterialOverride>();
 }
 
 SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
@@ -537,20 +545,23 @@ auto SceneRenderer::destroy() -> void {
     vkDestroyPipelineLayout(ctx.device, pipeline_layout, nullptr);
 }
 
-void SceneRenderer::submit(MeshHandle handle, const glm::mat4 &t,
+void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
                            u32 pipeline_id, u32 material_id) {
   auto *asset = get_mesh(handle);
   if (asset == nullptr)
     return;
 
   for (const auto &node : asset->nodes) {
-    glm::mat4 node_transform = t * node.local_transform;
+    const glm::mat4 node_transform = t * node.local_transform;
+
     for (const auto &prim : node.primitives) {
-      u32 id = static_cast<u32>(submission_queue.size());
-      u32 resolved_mat = material_id != 0 ? material_id : prim.material_id;
+      const u32 id = static_cast<u32>(submission_queue.size());
+      const u32 resolved_mat =
+          material_id != 0 ? material_id : prim.material_id;
+      const auto &lg = prim.lod_group;
 
       submission_queue.emplace_back(PendingDraw{
-          .mesh = prim.mesh,
+          .lod_group = &lg,
           .pipeline_id = pipeline_id,
           .material_id = resolved_mat,
           .transform = node_transform,
@@ -558,24 +569,23 @@ void SceneRenderer::submit(MeshHandle handle, const glm::mat4 &t,
           .instance_id = id,
       });
 
-      // const auto &mat =
-      // get_material_view(*asset).materials[prim.material_id];
-
-      // each pass decides membership here
+      // Depth — one bucket per primitive; lod_group carries all levels
       {
-        u64 depth_key = static_cast<u64>(prim.mesh.first_index);
+        const u64 depth_key = static_cast<u64>(lg.lods[0].first_index);
         auto &b = depth_prepass.buckets[depth_key];
-        b.mesh = prim.mesh;
+        b.lod_group = &lg;
         b.pipeline_id = pipeline_id;
         b.instance_ids.push_back(id);
       }
 
+      // Forward — one bucket per primitive
       {
-        u64 fwd_key = (static_cast<u64>(pipeline_id) << 48) |
-                      (static_cast<u64>(resolved_mat) << 32) |
-                      prim.mesh.first_index;
+        const u64 fwd_key =
+            (static_cast<u64>(pipeline_id) << 48) |
+            (static_cast<u64>(resolved_mat) << 32) |
+            static_cast<u64>(lg.lods[0].first_index & 0xFFFFFFFFu);
         auto &b = forward_pass.buckets[fwd_key];
-        b.mesh = prim.mesh;
+        b.lod_group = &lg;
         b.pipeline_id = pipeline_id;
         b.material_id = resolved_mat;
         b.instance_ids.push_back(id);
@@ -585,7 +595,7 @@ void SceneRenderer::submit(MeshHandle handle, const glm::mat4 &t,
 }
 
 void SceneRenderer::ensure_global_capacity(usize instance_count) {
-  if (const auto size = instance_count * sizeof(InstanceData);
+  if (const auto size = instance_count * sizeof(CompressedInstanceData);
       !global_instance_buffer || global_instance_buffer->size() < size) {
     global_instance_buffer =
         Buffer::create(ctx.allocator, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -650,9 +660,10 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
   global_instance_data.clear();
 
   for (const auto &draw : submission_queue) {
-    glm::vec3 half_extents = (draw.aabb.get_max() - draw.aabb.get_min()) * 0.5F;
-    float radius = glm::length(half_extents);
-    global_instance_data.emplace_back(draw.transform, draw.material_id, radius);
+    const auto half = (draw.aabb.get_max() - draw.aabb.get_min()) * 0.5F;
+    const auto radius = glm::length(half);
+    global_instance_data.emplace_back(draw.transform, draw.material_id, radius,
+                                      draw.lod_group->lod_count);
   }
 
   global_instance_buffer->upload(global_instance_data);
@@ -930,6 +941,7 @@ void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
                             .pBufferMemoryBarriers = post_cull_barriers};
   vkCmdPipelineBarrier2(cmd, &post_dep);
 }
+
 auto RenderPass::ensure_capacity(usize command_count, usize instance_count,
                                  usize batch_count,
                                  usize total_global_instances) -> bool {
@@ -974,15 +986,15 @@ auto RenderPass::bake(usize total_global_instances) -> void {
   std::vector<PaddedDrawCommand> commands;
   std::vector<u32> remapped_indices;
   std::vector<u32> draw_counts;
-  std::vector<u32> instance_to_commands(total_global_instances, 0xFFFFFFFF);
+  std::vector<u32> instance_to_commands(total_global_instances, 0xFFFFFFFFu);
 
   batches.clear();
   u32 current_pipeline = ~0U;
 
-  for (auto &&[key, bucket] : buckets) {
+  for (auto &[key, bucket] : buckets) {
     if (bucket.pipeline_id != current_pipeline) {
       current_pipeline = bucket.pipeline_id;
-      draw_counts.push_back(0U);
+      draw_counts.push_back(0u);
       batches.push_back({
           .pipeline_id = bucket.pipeline_id,
           .max_command_count = 0U,
@@ -992,22 +1004,31 @@ auto RenderPass::bake(usize total_global_instances) -> void {
       });
     }
 
-    const u32 first_instance = static_cast<u32>(remapped_indices.size());
-    const u32 cmd_idx = static_cast<u32>(commands.size());
-
-    commands.push_back({
-        .index_count = bucket.mesh.index_count,
-        .instance_count = 0U,
-        .first_index = bucket.mesh.first_index,
-        .vertex_offset = bucket.mesh.vertex_offset,
-        .first_instance = first_instance,
-    });
-    batches.back().max_command_count++;
-    draw_counts.back()++;
-
+    const u32 lod0_cmd_idx = static_cast<u32>(commands.size());
     for (u32 iid : bucket.instance_ids) {
-      remapped_indices.push_back(iid);
-      instance_to_commands[iid] = cmd_idx;
+      instance_to_commands[iid] = lod0_cmd_idx;
+    }
+
+    const auto &lod_group = bucket.lod_group;
+    for (u8 lod = 0; lod < lod_group->lod_count; ++lod) {
+      const u32 unique_first_instance =
+          static_cast<u32>(remapped_indices.size());
+
+      for (u32 iid : bucket.instance_ids) {
+        remapped_indices.push_back(iid);
+      }
+
+      const auto m = lod_group->resolve(lod);
+      commands.push_back({
+          .index_count = m.index_count,
+          .instance_count = 0U,
+          .first_index = m.first_index,
+          .vertex_offset = m.vertex_offset,
+          .first_instance = unique_first_instance,
+      });
+
+      batches.back().max_command_count++;
+      draw_counts.back()++;
     }
 
     bucket.instance_ids.clear();
@@ -1021,15 +1042,6 @@ auto RenderPass::bake(usize total_global_instances) -> void {
   ws.count_buffer->upload_with_offset(draw_counts, 0);
   ws.index_remapping_buffer->upload_with_offset(remapped_indices, 0);
   ws.instance_to_command_buffer->upload_with_offset(instance_to_commands, 0);
-}
-
-[[nodiscard]] constexpr auto PendingDraw::get_key(RenderPassType pass) const
-    -> u64 {
-  const u32 mesh_id = mesh.first_index;
-  if (pass == RenderPassType::DepthPrepass)
-    return static_cast<u64>(mesh_id);
-  return (static_cast<u64>(pipeline_id) << 48) |
-         (static_cast<u64>(material_id) << 32) | mesh_id;
 }
 
 void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
@@ -1176,6 +1188,23 @@ void SceneRenderer::init_csm() {
 
   ctx.transition_to_general(csm.image, VK_IMAGE_ASPECT_DEPTH_BIT, 1,
                             shadow_map_cascade_count);
+}
+
+CompressedInstanceData::CompressedInstanceData(const glm::mat4 &t,
+                                               u16 material_id,
+                                               f32 bounding_radius,
+                                               u8 lod_count) {
+  transform = glm::mat3x4(glm::transpose(t));
+
+  const u32 meta = (static_cast<u32>(material_id) & 0xFFFFu) |
+                   ((static_cast<u32>(lod_count) & 0x7u) << 16u);
+  material_and_lod = std::bit_cast<float>(meta);
+
+  // fp16 radius compression isn't worth it — you have the space
+  // and half-float precision breaks for large world coordinates
+  this->bounding_radius = bounding_radius;
+  padding0 = 0.0f;
+  padding1 = 0.0f;
 }
 
 } // namespace dy

@@ -219,24 +219,28 @@ auto GeometryPool::allocate_without_flush(std::span<const Vertex> vertices,
       .index_offset = index_offset,
   };
 
-  auto *v_dst =
-      cast<Vertex>(vertex_buffer->get_mapped_pointer(), vertex_offset);
-  auto *sv_dst = cast<PositionOnlyVertex>(
-      position_only_vertex_buffer->get_mapped_pointer(), shadow_vertex_offset);
   auto *i_dst = cast<u32>(index_buffer->get_mapped_pointer(), index_offset);
-
-  std::memcpy(v_dst, vertices.data(), vertices.size_bytes());
   std::memcpy(i_dst, indices.data(), indices.size_bytes());
-
-  for (auto &&[index, vertex] : vertices | std::views::enumerate) {
-    sv_dst[index].position[0] = vertex.position[0];
-    sv_dst[index].position[1] = vertex.position[1];
-    sv_dst[index].position[2] = vertex.position[2];
-  }
-
-  vertex_offset += vertices.size_bytes();
-  shadow_vertex_offset += vertices.size() * sizeof(PositionOnlyVertex);
   index_offset += indices.size_bytes();
+
+  if (!vertices.empty()) {
+    auto *v_dst =
+        cast<Vertex>(vertex_buffer->get_mapped_pointer(), vertex_offset);
+    auto *sv_dst = cast<PositionOnlyVertex>(
+        position_only_vertex_buffer->get_mapped_pointer(),
+        shadow_vertex_offset);
+
+    std::memcpy(v_dst, vertices.data(), vertices.size_bytes());
+
+    for (auto &&[i, v] : vertices | std::views::enumerate) {
+      sv_dst[i].position[0] = v.position[0];
+      sv_dst[i].position[1] = v.position[1];
+      sv_dst[i].position[2] = v.position[2];
+    }
+
+    vertex_offset += vertices.size_bytes();
+    shadow_vertex_offset += vertices.size() * sizeof(PositionOnlyVertex);
+  }
 
   return off;
 }

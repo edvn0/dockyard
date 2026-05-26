@@ -1,5 +1,7 @@
 #include <dockyard/scene.hpp>
 
+#include <dockyard/scene_renderer.hpp>
+
 namespace dy {
 
 Entity::Entity(Scene &s, entt::entity e) : reg(s.scene), entity(e) {}
@@ -47,6 +49,24 @@ auto Scene::set_primary_camera(entt::entity e) -> void {
 
 auto Scene::clear_primary_camera() -> void {
   primary_camera_entity = entt::null;
+}
+
+auto Scene::destroy_and_all_children(entt::entity entity,
+                                     SceneRenderer &renderer) -> void {
+  std::vector<entt::entity> children;
+  auto child_view = scene.view<Components::ParentOf>();
+  for (auto child : child_view) {
+    if (child_view.get<Components::ParentOf>(child).parent == entity)
+      children.push_back(child);
+  }
+
+  for (auto child : children)
+    destroy_and_all_children(child, renderer);
+
+  if (scene.valid(entity)) {
+    renderer.remove_override({*this, entity});
+    scene.destroy(entity);
+  }
 }
 
 } // namespace dy

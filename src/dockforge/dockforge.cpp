@@ -25,6 +25,10 @@
 
 #include <ImGuizmo.h>
 
+#include <dockforge/component_inspector.hpp>
+
+#include <dockforge/component_renderers.hpp>
+
 #include "./cube_vertices.inl"
 
 namespace {
@@ -44,19 +48,6 @@ auto resize_viewport(Dockforge &app) -> void {
           app.viewport_panel_extent.height);
   }
 }
-
-constexpr auto remove_rotation = [](const auto &m) {
-  glm::mat4 result(1.F);
-
-  result[0][0] = glm::length(glm::vec3(m[0]));
-  result[1][1] = glm::length(glm::vec3(m[1]));
-  result[2][2] = glm::length(glm::vec3(m[2]));
-
-  result[3] = m[3];
-
-  return result;
-};
-
 } // namespace
 
 auto make_app() -> std::unique_ptr<Dockforge> {
@@ -206,7 +197,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   auto &df_transform = frustum_entity.get<Components::Transform>();
   df_transform.mut().position = glm::vec3{5, -5, -10};
   auto &df = frustum_entity.emplace<Components::DebugFrustum>();
-  df.center = glm::vec3{0, 0, 0};
   df.projection_config = {
       .fov_degrees = 30.0F,
       .aspect = 1.77F,
@@ -338,44 +328,43 @@ void Dockforge::refresh_entity_cache() {
   state.cache_dirty = false;
 }
 
-void Dockforge::draw_component_editors() {
-  if (ImGui::Begin("Component Editor")) {
-    if (state.selected != entt::null) {
-      Entity entity{*active_scene, state.selected};
-
-      if (auto *tag = entity.try_get<Components::Tag>()) {
-        char buffer[128];
-        std::snprintf(buffer, sizeof(buffer), "%.*s",
-                      static_cast<int>(tag->tag.size()), tag->tag.data());
-        if (ImGui::InputText("Tag", buffer, sizeof(buffer))) {
-          tag->tag = buffer;
-        }
-      }
-
-      if (auto *mesh = entity.try_get<Components::Mesh>()) {
-        ImGui::Text("Mesh: %u", mesh->handle.index());
-      }
-
-      // Debug frustum
-      if (auto *frustum = entity.try_get<Components::DebugFrustum>()) {
-        ImGui::Text("Debug Frustum:");
-        ImGui::SliderFloat3("Center", glm::value_ptr(frustum->center), -20.F,
-                            20.F);
-        ImGui::SliderFloat("FOV", &frustum->projection_config.fov_degrees, 1.F,
-                           179.F);
-        ImGui::SliderFloat("Aspect", &frustum->projection_config.aspect, 0.1F,
-                           10.F);
-        ImGui::SliderFloat("Near", &frustum->projection_config.near, 0.01F,
-                           100.F);
-        ImGui::SliderFloat("Far", &frustum->projection_config.far, 0.1F,
-                           1000.F);
-        ImGui::ColorEdit4("Color", glm::value_ptr(frustum->color));
-      }
-    } else {
-      ImGui::Text("No entity selected");
-    }
+auto Dockforge::draw_inspector() -> void {
+  if (!ImGui::Begin("Inspector")) {
     ImGui::End();
+    return;
   }
+
+  if (state.selected == entt::null) {
+    ImGui::TextDisabled("Nothing selected");
+    ImGui::End();
+    return;
+  }
+
+  Entity entity{*active_scene, state.selected};
+  if (!entity.valid()) {
+    state.selected = entt::null;
+    ImGui::End();
+    return;
+  }
+
+  // ── Tag — always visible, inline edit, no remove button ──────────────
+  if (auto *tag = entity.try_get<Components::Tag>()) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "%.*s", static_cast<int>(tag->tag.size()),
+                  tag->tag.data());
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {6.F, 5.F});
+    ImGui::SetNextItemWidth(-1.F);
+    if (ImGui::InputText("##tag", buf, sizeof(buf)))
+      tag->tag = buf;
+    ImGui::PopStyleVar();
+  }
+
+  ImGui::Separator();
+  ImGui::Spacing();
+
+  ComponentInspector::draw(*renderer, entity);
+  //  state.hierarchy_dirty = true;
+  ImGui::End();
 }
 
 void Dockforge::draw_scene_outliner() {
@@ -473,6 +462,22 @@ void Dockforge::draw_scene_outliner() {
         state.selected = cached.entity;
       }
 
+      if (ImGui::BeginPopupContextItem("##entity_ctx")) {
+        if (ImGui::MenuItem("Duplicate")) {
+          pending_duplicate = cached.entity;
+        }
+
+        ImGui::Separator();
+
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{0.9F, 0.35F, 0.35F, 1.F});
+        if (ImGui::MenuItem("Delete")) {
+          delete_candidate = cached.entity;
+        }
+        ImGui::PopStyleColor();
+
+        ImGui::EndPopup();
+      }
+
       ImGui::PopID(); // entity ID
 
       if (cached.depth > 0) {
@@ -484,57 +489,47 @@ void Dockforge::draw_scene_outliner() {
       }
     }
   }
-
   clipper.End();
+
+  if (pending_duplicate != entt::null) {
+    duplicate_entity({*active_scene, pending_duplicate});
+    pending_duplicate = entt::null;
+    state.cache_dirty = true;
+  }
+  if (pending_delete != entt::null) {
+    if (state.selected == pending_delete)
+      state.selected = entt::null;
+    active_scene->destroy_and_all_children(pending_delete, *renderer);
+    state.cache_dirty = true;
+    pending_delete = entt::null;
+  }
+
   ImGui::EndChild();
+
+  if (delete_candidate != entt::null)
+    ImGui::OpenPopup("Delete Entity?");
+
+  if (ImGui::BeginPopupModal("Delete Entity?", nullptr,
+                             ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::Text("Are you sure? This deletes all child entities too.");
+    ImGui::Separator();
+    if (ImGui::Button("OK", ImVec2(120, 0))) {
+      pending_delete = delete_candidate;
+      delete_candidate = entt::null;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SetItemDefaultFocus();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+      delete_candidate = entt::null;
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
   ImGui::End();
 }
 
-/**
-struct GPUMaterial {
-  alignas(16) float albedo_factor[4];
-  alignas(16) float emissive_factor[4];
-
-  // PBR factors + scales
-  float metallic_factor;
-  float roughness_factor;
-  float normal_scale;
-  float occlusion_strength;
-
-  // Alpha & mode
-  u32 alpha_mode;
-  float alpha_cutoff;
-
-  // Texture indices
-  u32 albedo_index;
-  u32 normal_index;
-  u32 metallic_roughness_index;
-  u32 emissive_index;
-  u32 occlusion_index;
-
-  // Flags for shader branching
-  MaterialFlags flags;
-
-  // ───────────────────────────────────────────────────────────────────────
-  // Extensions & advanced features
-  // ───────────────────────────────────────────────────────────────────────
-
-  // Transmission (glass refraction) — KHR_materials_transmission
-  float transmission_factor; // [0,1]: 0 = opaque, 1 = fully transmissive
-
-  // Anisotropy (brushed metals, etc) — KHR_materials_anisotropy
-  float anisotropy_factor;   // [0,1]: strength of anisotropic reflection
-  float anisotropy_rotation; // [0,1]: rotation angle (normalized to [0, 2π])
-
-  // Cull mode: determines which faces to render
-  u32 cull_mode;
-
-  // UV transformation (cheap variation without extra textures)
-  float uv_scale_x;
-  float uv_scale_y;
-  float uv_offset_x;
-  float uv_offset_y;
-}; */
 [[nodiscard]] auto draw_material_editor(GPUMaterial &mat) -> bool {
   bool changed = false;
   changed |= ImGui::ColorEdit4("Albedo Factor", mat.albedo_factor);
@@ -614,15 +609,25 @@ struct GPUMaterial {
   return changed;
 }
 
-auto Dockforge::remove_override(Entity entity) -> void {
-  auto *material_override = entity.try_get<Components::MaterialOverride>();
-  if (material_override == nullptr)
-    return;
+auto Dockforge::duplicate_entity(Entity src) -> Entity {
+  static constexpr std::string_view name = "duplicate";
+  auto dst = active_scene->make(name);
 
-  if (material_override->gpu_slot != ~0U)
-    renderer->override_pool.free(material_override->gpu_slot);
+  for_each_type<MasterComponentList>([&]<typename T>() {
+    if (auto *comp = src.try_get<T>())
+      dst.emplace_or_replace<T>(*comp);
+  });
 
-  entity.remove<Components::MaterialOverride>();
+  if (auto *tag = dst.try_get<Components::Tag>())
+    tag->tag += " (copy)";
+
+  if (auto *ov = dst.try_get<Components::MaterialOverride>()) {
+    ov->gpu_slot = ~0U;
+    ov->dirty = true;
+  }
+
+  state.cache_dirty = true;
+  return dst;
 }
 
 auto Dockforge::draw_debug_shapes() -> void {
@@ -649,7 +654,8 @@ auto Dockforge::draw_debug_shapes() -> void {
   for (auto &&[e, frustum, xt] :
        active_scene->view<Components::DebugFrustum, Components::Transform>()
            .each()) {
-    auto &&[view, proj] = frustum.matrices(xt.get().position);
+    auto &&[pos, rot, scl] = xt.get();
+    auto &&[view, proj] = frustum.matrices(pos, rot);
     canvas_renderer->frustum(view, proj, frustum.color);
   }
 }
@@ -717,7 +723,6 @@ auto Dockforge::build_ui() -> void {
     pending_pick = glm::vec2(mp.x, mp.y);
   }
 
-  MutableMaterialView selected_entity_materials{};
   if (state.selected != entt::null) {
     Entity selected_entity{*active_scene, state.selected};
     auto &transform = selected_entity.get<Components::Transform>();
@@ -760,91 +765,8 @@ auto Dockforge::build_ui() -> void {
         state.hierarchy_dirty = true;
       }
     }
-
-    if (auto *mesh = selected_entity.try_get<Components::Mesh>()) {
-      auto *resolved = renderer->get_mesh(*mesh);
-      canvas_renderer->box(remove_rotation(world_matrix), resolved->mesh_aabb,
-                           glm::vec4{0.1, 0.9, 0.2, 1.0F});
-
-      selected_entity_materials = renderer->get_material_view_mut(*mesh);
-    }
   }
   ImGui::End();
-
-  if (ImGui::Begin("Materials")) {
-    Entity selected_entity{*active_scene, state.selected};
-    if (!selected_entity.valid()) {
-      ImGui::TextDisabled("No entity selected");
-      ImGui::End();
-    } else {
-      auto *mesh = selected_entity.try_get<Components::Mesh>();
-
-      if (auto *material_override =
-              selected_entity.try_get<Components::MaterialOverride>()) {
-        ImGui::TextDisabled("Override active");
-        ImGui::SameLine();
-
-        ImGui::PushStyleColor(ImGuiCol_Button,
-                              ImVec4{0.55F, 0.15F, 0.15F, 1.0F});
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-                              ImVec4{0.75F, 0.20F, 0.20F, 1.0F});
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-                              ImVec4{0.90F, 0.25F, 0.25F, 1.0F});
-        bool was_removed = false;
-        if (ImGui::SmallButton("Remove Override")) {
-          remove_override(selected_entity);
-          was_removed = true;
-        }
-        ImGui::PopStyleColor(3);
-
-        if (!was_removed) {
-          ImGui::Separator();
-          ImGui::PushID("override");
-          if (draw_material_editor(material_override->material))
-            material_override->dirty = true;
-          ImGui::PopID();
-        }
-
-      } else if (mesh != nullptr) {
-        auto mats = renderer->get_material_view_mut(*mesh);
-
-        if (mats.empty()) {
-          ImGui::TextDisabled("Mesh has no materials");
-        } else {
-          for (u32 i = 0; i < mats.size(); ++i) {
-            ImGui::PushID(static_cast<int>(i));
-            if (ImGui::CollapsingHeader(
-                    std::format("Material {}", i).c_str())) {
-              if (draw_material_editor(mats[i]) &&
-                  ImGui::IsItemDeactivatedAfterEdit())
-                renderer->geometry_pool->flush_material(mats.slot(i));
-            }
-            ImGui::PopID();
-          }
-
-          ImGui::Separator();
-          if (ImGui::Button("Add Override")) {
-            auto &new_ov =
-                selected_entity.emplace<Components::MaterialOverride>();
-            new_ov.material = mats.first();
-            auto random_color =
-                glm::linearRand(glm::vec4{0.5F, 0.5F, 0.5F, 1.0F},
-                                glm::vec4{1.0F, 1.0F, 1.0F, 1.0F});
-            std::ranges::copy(glm::value_ptr(random_color),
-                              glm::value_ptr(random_color) + 4,
-                              new_ov.material.albedo_factor);
-          }
-          if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Stamps a single-material override.");
-        }
-
-      } else {
-        ImGui::TextDisabled("No mesh component");
-      }
-
-      ImGui::End();
-    }
-  }
 
   draw_debug_shapes();
   canvas_renderer->render_2d();
@@ -855,12 +777,12 @@ auto Dockforge::build_ui() -> void {
       renderer->sun_direction =
           glm::vec4(glm::normalize(glm::vec3(copy)), 0.0F);
     }
-    ImGui::End();
   }
+  ImGui::End();
 
   draw_scene_outliner();
 
-  draw_component_editors();
+  draw_inspector();
 
   if (viewport_hovered || viewport_focused) {
     ImGui::GetIO().WantCaptureMouse = false;

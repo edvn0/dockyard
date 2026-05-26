@@ -13,6 +13,8 @@
 
 namespace dy {
 
+struct SceneRenderer;
+
 class Scene;
 class Entity {
   entt::registry &reg;
@@ -29,14 +31,35 @@ public:
   [[nodiscard]] auto id() const -> entt::entity { return entity; }
   [[nodiscard]] auto handle() const -> entt::entity { return entity; }
 
+  /// Returns true if missing
+  [[nodiscard]] auto parent_is_valid() const {
+    const auto *has_parent = try_get<Components::ParentOf>();
+    if (has_parent == nullptr)
+      return true;
+    return reg.valid(has_parent->parent);
+  }
+  template <typename T> [[nodiscard]] auto try_get_for_parent() const {
+    const auto *has_parent = try_get<Components::ParentOf>();
+    if (has_parent == nullptr)
+      return static_cast<T *>(nullptr);
+    return reg.try_get<T>(has_parent->parent);
+  }
+
   template <typename T, typename... Args>
   auto emplace(Args &&...args) -> decltype(auto) {
     return reg.emplace<T>(entity, std::forward<Args>(args)...);
+  }
+  template <typename T, typename... Args>
+  auto emplace_or_replace(Args &&...args) -> decltype(auto) {
+    return reg.emplace_or_replace<T>(entity, std::forward<Args>(args)...);
   }
   template <typename T> auto get() -> decltype(auto) {
     return reg.get<T>(entity);
   }
   template <typename T> auto try_get() -> T * { return reg.try_get<T>(entity); }
+  template <typename T> auto try_get() const -> const T * {
+    return reg.try_get<T>(entity);
+  }
   template <typename T> auto remove() -> void { reg.remove<T>(entity); }
 };
 
@@ -59,7 +82,9 @@ public:
   template <typename T> auto on_destroy() { return scene.on_destroy<T>(); }
 
   auto registry() -> entt::registry & { return scene; }
-  auto registry() const -> const entt::registry & { return scene; }
+  [[nodiscard]] auto registry() const -> const entt::registry & {
+    return scene;
+  }
 
   auto make(std::string_view, entt::entity = entt::null) -> Entity;
   auto make(std::string_view, Entity &) -> Entity;
@@ -76,6 +101,9 @@ public:
       return nullptr;
     return scene.try_get<Components::Camera>(primary_camera_entity);
   }
+
+  auto destroy_and_all_children(entt::entity entity, SceneRenderer &renderer)
+      -> void;
 };
 
 } // namespace dy

@@ -15,6 +15,7 @@ struct V2F
     float2 uv : TEXCOORD0;
     uint material_id : TEXCOORD1;
     float3x3 tbn : TEXCOORD2;
+    uint lod_idx : TEXCOORD3;
 };
 
 float4 sample_material_tex(uint idx, float2 uv)
@@ -32,11 +33,16 @@ V2F vertexMain(uint vertex_id: SV_VulkanVertexID, uint instance_id: SV_InstanceI
     let vertices = pc.vertex_buffer_ptr;
 
     uint global_id = culled_remap_indices[NonUniformResourceIndex(inst_base)];
-    InstanceData instance = instance_data[global_id];
+    var instance = unpack_instance_data(instance_data[global_id]);
     float4x4 model_matrix = instance.transform;
     float3x3 normal_matrix = (float3x3)model_matrix;
 
     Vertex v = vertices[vertex_id];
+
+    uint packed_data = culled_remap_indices[inst_base];
+    uint true_instance_id = packed_data & 0x0FFFFFFF;
+    uint debug_lod_idx = packed_data >> 28u;
+    output.lod_idx = debug_lod_idx;
 
     float3 local_normal = unpackSnorm4x8ToFloat(v.normal).xyz;
     float4 local_tangent = unpackSnorm4x8ToFloat(v.tangent).xyzw;
@@ -141,6 +147,5 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target
     var shadow_result = compute_shadow(input.world_pos, geom_n, sun_dir, *pc.frame_ubo);
 
     float3 final_color = (direct * shadow_result._0) + ambient + emissive;
-
     return float4(final_color, albedo.a);
 }

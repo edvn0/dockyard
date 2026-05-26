@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cassert>
+
 #include <dockyard/binary_stream.hpp>
 #include <dockyard/component_traits.hpp>
 #include <dockyard/scene.hpp>
@@ -22,7 +23,15 @@ struct CompileTimeInputArchive {
   }
 };
 
-template <typename... Components> class TemplateSceneSerializer {
+template <typename T>
+concept has_valid_serializer =
+    requires(CompileTimeOutputArchive &out_a, CompileTimeInputArchive &in_a,
+             const T &const_val, T &val) {
+      { ComponentSerializer<T>::save(out_a, const_val) } -> std::same_as<void>;
+      { ComponentSerializer<T>::load(in_a, val) } -> std::same_as<void>;
+    };
+
+class SceneSerializer {
 public:
   static void serialize(Scene &scene, BinaryWriter &writer) {
     entt::snapshot snapshot{scene.registry()};
@@ -30,13 +39,22 @@ public:
 
     snapshot.get<entt::entity>(archive);
 
-    (
-        [&]() {
-          constexpr u32 type_id = entt::type_hash<Components>::value();
-          writer.write(&type_id, sizeof(type_id));
-          snapshot.template get<Components>(archive);
-        }(),
-        ...);
+    for_each_type<MasterComponentList>([&]<typename Component>() {
+      if constexpr (ComponentConfig<Component>::serializable) {
+
+        constexpr bool can_serialize = has_valid_serializer<Component> ||
+                                       std::is_trivially_copyable_v<Component>;
+
+        static_assert(
+            can_serialize,
+            "Component is marked serializable, is NOT trivially copyable, and "
+            "lacks a ComponentSerializer specialization!");
+
+        constexpr u32 type_id = entt::type_hash<Component>::value();
+        writer.write(&type_id, sizeof(type_id));
+        snapshot.template get<Component>(archive);
+      }
+    });
   }
 
   static void deserialize(Scene &scene, BinaryReader &reader) {
@@ -46,25 +64,29 @@ public:
 
     loader.get<entt::entity>(archive);
 
-    (
-        [&]() {
-          u32 expected_id = entt::type_hash<Components>::value();
-          u32 read_id = 0;
-          reader.read(&read_id, sizeof(read_id));
+    for_each_type<MasterComponentList>([&]<typename Component>() {
+      if constexpr (ComponentConfig<Component>::serializable) {
 
-          assert(read_id == expected_id &&
-                 "Scene component layout structural mismatch detected!");
-          if (read_id == expected_id) {
-            loader.template get<Components>(archive);
-          }
-        }(),
-        ...);
+        constexpr bool can_serialize = has_valid_serializer<Component> ||
+                                       std::is_trivially_copyable_v<Component>;
+
+        static_assert(
+            can_serialize,
+            "Component is marked serializable, is NOT trivially copyable, and "
+            "lacks a ComponentSerializer specialization!");
+
+        u32 expected_id = entt::type_hash<Component>::value();
+        u32 read_id = 0;
+        reader.read(&read_id, sizeof(read_id));
+
+        assert(read_id == expected_id &&
+               "Scene component layout structural mismatch!");
+        if (read_id == expected_id) {
+          loader.template get<Component>(archive);
+        }
+      }
+    });
   }
 };
-
-using SceneSerializer =
-    TemplateSceneSerializer<Components::Tag, Components::Transform,
-                            Components::Camera, Components::LocalToWorld,
-                            Components::MeshRequest, Components::ParentOf>;
 
 } // namespace dy

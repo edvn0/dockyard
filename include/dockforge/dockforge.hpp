@@ -29,7 +29,7 @@ struct Dockforge : App {
 
   GLFWwindow *main_window = nullptr;
 
-  MeshHandle mesh_handle{};
+  MeshAssetHandle mesh_handle{};
   PipelineHandle forward_pipeline{};
   PipelineHandle depth_pipeline{};
 
@@ -41,6 +41,9 @@ struct Dockforge : App {
   ViewportResources viewport_resources;
 
   std::optional<glm::vec2> pending_pick;
+  entt::entity pending_duplicate = entt::null;
+  entt::entity pending_delete = entt::null;
+  entt::entity delete_candidate = entt::null;
   ImGuizmo::OPERATION gizmo_op = ImGuizmo::TRANSLATE;
   VkExtent2D viewport_panel_extent{};
   VkExtent2D viewport_panel_offset{};
@@ -67,10 +70,10 @@ struct Dockforge : App {
   auto try_pick_entity(glm::vec2 mouse_screen) -> void;
   void refresh_entity_cache();
   void draw_scene_outliner();
-  void draw_component_editors();
+  void draw_inspector();
   auto build_ui() -> void;
   auto draw_debug_shapes() -> void;
-  auto remove_override(Entity) -> void;
+  auto duplicate_entity(Entity) -> Entity;
   [[nodiscard]] auto resolve_material_slot(Entity) -> u32;
 
   auto destroy() -> void override;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <bitset>
 #include <dockyard/app.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/compiler.hpp>
@@ -60,15 +61,13 @@ struct CullingPushConstants {
 enum class RenderPassType { DepthPrepass, Forward, Shadow };
 
 struct PendingDraw {
-  Mesh mesh;
+  const MeshLodGroup *lod_group;
   u32 pipeline_id;
   u32 material_id;
   glm::mat4 transform;
   AABB aabb;
 
   u32 instance_id;
-
-  [[nodiscard]] constexpr auto get_key(RenderPassType pass) const -> u64;
 };
 
 struct RenderPass {
@@ -76,12 +75,12 @@ struct RenderPass {
   VmaAllocator allocator;
 
   struct DrawBucket {
-    Mesh mesh;
+    const MeshLodGroup *lod_group;
     u32 pipeline_id;
     u32 material_id;
-    std::vector<u32> instance_ids; // indices into global_instance_data
+    std::vector<u32> instance_ids;
   };
-  std::map<u64, DrawBucket> buckets; // key = get_key() result, already ordered
+  std::map<u64, DrawBucket> buckets;
   struct Batch {
     u32 pipeline_id;
     u32 max_command_count;
@@ -103,13 +102,26 @@ struct RenderPass {
   auto bake(usize) -> void;
 };
 
-struct InstanceData {
-  glm::mat4 transform;
-  u32 material_id;
-  float bounding_radius; // replaces pad0
-  u32 pad1;
-  u32 pad2;
+struct InstanceMetadata {
+  u32 material_id : 16;
+  u32 lod_count : 3;
+  u32 padding : 13;
 };
+union PackedDataSlot {
+  InstanceMetadata metadata;
+  u16 half_floats[2]; // [0] = radius, [1] = padding
+  float gpu_float;
+};
+struct alignas(16) CompressedInstanceData {
+  glm::mat3x4 transform;
+  float material_and_lod;
+  float bounding_radius;
+  float padding0;
+  float padding1;
+  CompressedInstanceData(const glm::mat4 &, u16, f32, u8);
+};
+static_assert(sizeof(CompressedInstanceData) == 64,
+              "CompressedInstanceData must be exactly 64 bytes!");
 
 struct alignas(16) CascadeData {
   glm::mat4 view_proj;
@@ -170,7 +182,8 @@ struct SceneRenderer {
   using MaterialOverridePool = FreeListPool;
   MaterialOverridePool override_pool;
 
-  std::deque<MeshAsset> mesh_registry;
+  using MeshAssetPool = Pool<MeshAssetTag, MeshAsset>;
+  MeshAssetPool mesh_registry;
 
   TextureHandle dummy_texture_handle;
   SamplerHandle dummy_sampler_handle;
@@ -186,7 +199,7 @@ struct SceneRenderer {
   VkSampler dummy_sampler_vk = VK_NULL_HANDLE;
   VkSampler comparison_sampler_vk = VK_NULL_HANDLE;
 
-  std::vector<InstanceData> global_instance_data{};
+  std::vector<CompressedInstanceData> global_instance_data{};
   std::vector<PendingDraw> submission_queue{};
   std::unique_ptr<Buffer> global_instance_buffer{nullptr};
 
@@ -249,7 +262,7 @@ struct SceneRenderer {
   auto prepare(u64 frame_index, const glm::mat4 &view,
                const glm::mat4 &projection) -> PrepareResult;
 
-  void submit(MeshHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
+  void submit(MeshAssetHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
               u32 material_id = 0U);
 
   void update_csm(const glm::mat4 &view, const glm::mat4 &proj,
@@ -261,19 +274,20 @@ struct SceneRenderer {
   void culling_pass(VkCommandBuffer);
   void skybox_pass(VkCommandBuffer);
 
-  auto register_gltf(MeshAsset &&asset) -> MeshHandle;
+  auto register_gltf(MeshAsset &&asset) -> MeshAssetHandle;
   auto register_external_view(VkImageView view, VkImageViewType type)
       -> TextureHandle;
-  auto get_mesh(MeshHandle handle) -> MeshAsset *;
-  auto get_mesh(MeshHandle handle) const -> const MeshAsset *;
-  [[nodiscard]] auto get_material_view(MeshHandle handle) const
+  auto get_mesh(MeshAssetHandle handle) -> MeshAsset *;
+  auto get_mesh(MeshAssetHandle handle) const -> const MeshAsset *;
+  [[nodiscard]] auto get_material_view(MeshAssetHandle handle) const
       -> ConstMaterialView;
-  [[nodiscard]] auto get_material_view_mut(MeshHandle handle)
+  [[nodiscard]] auto get_material_view_mut(MeshAssetHandle handle)
       -> MutableMaterialView;
   [[nodiscard]] auto get_material_view(const MeshAsset &) const
       -> ConstMaterialView;
   [[nodiscard]] auto get_material_view_mut(const MeshAsset &) const
       -> MutableMaterialView;
+  auto remove_override(Entity) -> void;
 
   template <typename Handle>
   auto resolve(Handle handle) const -> decltype(auto) {

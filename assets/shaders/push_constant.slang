@@ -1,11 +1,12 @@
 import handle;
 
-struct InstanceData {
-    float4x4 transform;
-    uint material_id;
-    float bounding_radius; // replaces pad0
-    uint pad1;
-    uint pad2;
+struct InstanceData
+{
+    float4x3 transform;
+    float material_and_lod;
+    float bounding_radius;
+    float padding0;
+    float padding1;
 };
 
 enum class MaterialFlags {
@@ -113,3 +114,27 @@ struct GpuPushConstants
     uint cascade_index;
     uint _pad[3];
 };
+
+struct UnpackedInstanceData
+{
+    float4x4 transform;
+    uint material_id;
+    float bounding_radius;
+    uint lod_count;
+};
+UnpackedInstanceData unpack_instance_data(InstanceData compressed)
+{
+    UnpackedInstanceData unpacked;
+    unpacked.transform = float4x4(
+        compressed.transform[0].x, compressed.transform[1].x, compressed.transform[2].x, compressed.transform[3].x,
+        compressed.transform[0].y, compressed.transform[1].y, compressed.transform[2].y, compressed.transform[3].y,
+        compressed.transform[0].z, compressed.transform[1].z, compressed.transform[2].z, compressed.transform[3].z,
+        0.0, 0.0, 0.0, 1.0
+    );
+    uint meta_bits = asuint(compressed.material_and_lod);
+    unpacked.material_id = meta_bits & 0xFFFFu;
+    unpacked.lod_count = (meta_bits >> 16u) & 0x7u;
+    unpacked.bounding_radius = compressed.bounding_radius;
+
+    return unpacked;
+}

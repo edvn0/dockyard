@@ -12,7 +12,7 @@ float4 main(uint vertex_id: SV_VulkanVertexID,
 
     uint global_id = culled_remap_indices[NonUniformResourceIndex(inst_base)];
 
-    InstanceData instance = instance_data[global_id];
+    var instance = unpack_instance_data(instance_data[global_id]);
     float4x4 model_matrix = instance.transform;
 
     PositionOnlyVertex v = vertices[NonUniformResourceIndex(vertex_id)];

@@ -15,7 +15,7 @@ V2F vertexMain(uint vertexID: SV_VulkanVertexID, uint inst_base: SV_VulkanInstan
     let vertices = pc.position_only_buffer_ptr;
 
     uint global_id = remap_indices[NonUniformResourceIndex(inst_base)];
-    InstanceData instance = instance_data[global_id];
+    var instance = unpack_instance_data(instance_data[global_id]);
     float4x4 model_matrix = instance.transform;
 
     float v[3] = vertices[vertexID].position;

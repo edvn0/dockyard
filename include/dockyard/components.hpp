@@ -1,5 +1,6 @@
 #pragma once
 
+#include <dockyard/bindless_handle.hpp>
 #include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
 #include <dockyard/vfs_path.hpp>
@@ -17,9 +18,9 @@ struct MeshRequest {
 };
 
 struct Mesh {
-  MeshHandle handle;
+  MeshAssetHandle handle;
 
-  explicit(false) operator MeshHandle() const { return handle; }
+  explicit(false) operator MeshAssetHandle() const { return handle; }
 };
 
 struct Camera {
@@ -157,11 +158,10 @@ struct DebugFrustum {
     float near{0.1F};
     float far{30.0F};
   };
-  glm::vec3 center{1.0F};
   ProjectionConfiguration projection_config{};
   glm::vec4 color{1.0F, 1.0F, 0.0F, 1.0F};
 
-  [[nodiscard]] auto matrices(const glm::vec3 &) const
+  [[nodiscard]] auto matrices(const glm::vec3 &, const glm::quat &) const
       -> std::pair<glm::mat4, glm::mat4>;
 };
 

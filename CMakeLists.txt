@@ -123,6 +123,10 @@ CPMAddPackage(
   GITHUB_REPOSITORY SpartanJ/efsw
   GIT_TAG master  
 )
+CPMAddPackage(
+  URI "gh:zeux/meshoptimizer@1.0.1"
+  GIT_SHALLOW YES
+)
 
 set(GLM_ENABLE_SIMD_SSE2 CACHE FORCE "Enable SSE2 optimizations" ON)
 set(GLM_ENABLE_SIMD_SSE3 CACHE FORCE "Enable SSE3 optimizations" ON)
@@ -279,6 +283,7 @@ add_library(dockyard STATIC
   src/dockyard/canvas_renderer.cpp
   src/dockyard/components.cpp
   src/dockyard/component_traits.cpp
+  src/dockyard/bindless_handle.cpp
 )
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
 target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -303,6 +308,7 @@ target_link_libraries(dockyard
     ThirdPartySTB
     fastgltf::fastgltf
     Taskflow::Taskflow
+    meshoptimizer
     ${CMAKE_DL_LIBS}
   PRIVATE
     efsw-static
