@@ -135,6 +135,54 @@ auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
   };
 }
 
+auto make_default_override_materials(u32) -> std::vector<GPUMaterial>;
+auto grow_pool(SceneRenderer &renderer) -> u32 {
+  const u32 old_capacity = renderer.override_pool.capacity;
+  const u32 new_capacity = old_capacity * 2;
+
+  info("MaterialOverridePool growing {} → {} slots", old_capacity,
+       new_capacity);
+
+  vkDeviceWaitIdle(renderer.ctx.device);
+
+  renderer.geometry_pool->reserve_materials(new_capacity - old_capacity);
+
+  auto new_data = make_default_override_materials(new_capacity);
+
+  if (renderer.override_pool.next > 0) {
+    auto live = renderer.geometry_pool->get_materials(
+        renderer.override_pool.base_slot, renderer.override_pool.next);
+    std::ranges::reverse_copy(live, new_data.begin());
+  }
+
+  const auto new_offset =
+      renderer.geometry_pool->allocate_materials(std::span(new_data));
+  const u32 delta = new_offset.start_index - renderer.override_pool.base_slot;
+
+  for (auto &s : renderer.override_pool.free_slots)
+    s += delta;
+
+  renderer.override_pool.base_slot = new_offset.start_index;
+  renderer.override_pool.capacity = new_capacity;
+  renderer.override_pool.needs_grow = false;
+  renderer.bindless.mark_dirty();
+
+  return delta;
+}
+
+auto make_default_override_materials(u32 count) -> std::vector<GPUMaterial> {
+  std::vector<GPUMaterial> output(count);
+  for (auto &material : output) {
+    material.albedo_factor[0] = material.albedo_factor[1] =
+        material.albedo_factor[2] = material.albedo_factor[3] = 1.F;
+    material.roughness_factor = 1.F;
+    material.normal_scale = 1.F;
+    material.occlusion_strength = 1.F;
+    material.albedo_index = 0U; // white fallback
+  }
+  return output;
+}
+
 } // namespace
 
 struct PaddedDrawCommand {
@@ -266,6 +314,13 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
   resize();
 }
 auto SceneRenderer::initialise_bindless() -> void {
+  constexpr u32 override_material_count_initial = 16U;
+  auto blank = make_default_override_materials(override_material_count_initial);
+  auto offset = geometry_pool->allocate_materials(std::span(blank));
+  override_pool = {
+      .base_slot = offset.start_index,
+      .capacity = override_material_count_initial,
+  };
 
   const VkSamplerCreateInfo sampler_ci{
       .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
@@ -323,7 +378,7 @@ auto SceneRenderer::initialise_bindless() -> void {
     auto result = pipeline_registry->create_graphics({
         .shader_path = VFSPath::create("shaders://composite.slang"),
         .descriptor_set_layout = bindless.layout,
-        .render_targets = {.color_formats = {VK_FORMAT_R8G8B8A8_UNORM}},
+        .render_targets = {.color_formats = {VK_FORMAT_R8G8B8A8_SRGB}},
         .cull_mode = VK_CULL_MODE_NONE,
         .blending = {BlendMode::opaque()},
     });
@@ -571,14 +626,25 @@ auto extract_frustum_planes(const glm::mat4 &vp)
 }
 
 auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
-                            const glm::mat4 &projection) -> bool {
+                            const glm::mat4 &projection) -> PrepareResult {
   {
     pipeline_registry->poll_and_update_dirty_pipelines();
   }
 
+  if (override_pool.needs_grow) [[unlikely]] {
+    const u32 delta = grow_pool(*this);
+    return {
+        .status = PrepareResult::Status::SuccessMaterialPoolGrew,
+        .material_pool_delta = delta,
+    };
+  }
+
   current_frame_index = frame_index;
-  if (submission_queue.empty())
-    return false;
+  if (submission_queue.empty()) {
+    return {
+        .status = PrepareResult::Status::SuccessNoSubmissions,
+    };
+  }
 
   ensure_global_capacity(submission_queue.size());
   global_instance_data.clear();
@@ -615,12 +681,8 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
   };
 
   frame_ubo_buffers.at(frame_index)->upload(std::span(&ubo, 1));
-  if (!depth_prepass.bake(global_instance_data.size())) {
-    return false;
-  }
-  if (!forward_pass.bake(global_instance_data.size())) {
-    return false;
-  }
+  depth_prepass.bake(global_instance_data.size());
+  forward_pass.bake(global_instance_data.size());
 
   for (auto &v : depth_prepass.buckets | std::views::values) {
     v.instance_ids.clear();
@@ -629,7 +691,9 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
     v.instance_ids.clear();
   }
   submission_queue.clear();
-  return true;
+  return {
+      .status = PrepareResult::Status::Success,
+  };
 }
 
 void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
@@ -906,7 +970,7 @@ auto RenderPass::ensure_capacity(usize command_count, usize instance_count,
   return true;
 }
 
-auto RenderPass::bake(usize total_global_instances) -> bool {
+auto RenderPass::bake(usize total_global_instances) -> void {
   std::vector<PaddedDrawCommand> commands;
   std::vector<u32> remapped_indices;
   std::vector<u32> draw_counts;
@@ -957,8 +1021,6 @@ auto RenderPass::bake(usize total_global_instances) -> bool {
   ws.count_buffer->upload_with_offset(draw_counts, 0);
   ws.index_remapping_buffer->upload_with_offset(remapped_indices, 0);
   ws.instance_to_command_buffer->upload_with_offset(instance_to_commands, 0);
-
-  return true;
 }
 
 [[nodiscard]] constexpr auto PendingDraw::get_key(RenderPassType pass) const

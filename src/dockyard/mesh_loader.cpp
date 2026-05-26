@@ -390,7 +390,7 @@ constexpr u32 k_fb_emissive = 4u;
       a != prim.attributes.end()) {
     fastgltf::iterateAccessorWithIndex<glm::vec3>(
         asset, asset.accessors[a->accessorIndex], [&](glm::vec3 n, usize i) {
-          out.vertices[i].normal = glm::packSnorm4x8({n, 1.0f});
+          out.vertices[i].normal = glm::packSnorm4x8({n, 1.0F});
         });
   }
 

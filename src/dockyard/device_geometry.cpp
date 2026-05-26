@@ -147,7 +147,7 @@ auto GeometryPool::allocate_materials(std::span<const GPUMaterial> mats)
   const u32 start_index = static_cast<u32>(material_offset);
   const usize byte_offset = start_index * sizeof(GPUMaterial);
 
-  material_buffer->upload_with_offset(mats, byte_offset);
+  material_buffer->upload_with_offset(mats, byte_offset, true);
   material_offset += mats.size();
 
   return {start_index};

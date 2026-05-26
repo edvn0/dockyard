@@ -3,28 +3,41 @@ import bindless;
 
 static const int shadow_map_resolution = 2048;
 
-Tuple<float, uint> compute_shadow(float3 world_pos, float3 n, float3 sun_dir,
-                                  float view_depth, FrameUBO frame)
+Tuple<float, uint> compute_shadow(float3 world_pos, float3 n, float3 sun_dir, FrameUBO frame)
 {
+    // 1. Calculate true linear view depth for stable cascade selection
+    float4 view_pos = mul(frame.view, float4(world_pos, 1.0));
+    float fragment_depth = abs(view_pos.z);
+
+    // 2. Select cascade (using <= to match your CPU's growing split depths)
     uint cascade_idx = shadow_map_cascade_count - 1u;
     for (uint i = 0u; i < shadow_map_cascade_count; ++i)
     {
-        if (view_depth <= frame.cascades[i].split_depth)
+        if (fragment_depth <= frame.cascades[i].split_depth)
         {
             cascade_idx = i;
             break;
         }
     }
 
-    float4 light_clip = mul(frame.cascades[cascade_idx].view_proj,
-                            float4(world_pos, 1.0));
-    float3 ndc = light_clip.xyz / light_clip.w;
+    // 3. Project to light space
+    float4 light_clip = mul(frame.cascades[cascade_idx].view_proj, float4(world_pos, 1.0));
 
+    // 4. Orthographic projection means W is 1.0. Use raw XYZ.
+    float3 ndc = light_clip.xyz;
+
+    // 5. Map to UV (Your baseline: NO manual Y-flip required)
     float2 uv = ndc.xy * 0.5 + 0.5;
 
-    // Slope-scaled bias: steeper surfaces get more bias to avoid acne.
+    // 6. Out-of-bounds safety clamp
+    if (any(uv < 0.0) || any(uv > 1.0) || ndc.z < 0.0 || ndc.z > 1.0)
+    {
+        return makeTuple(1.0, cascade_idx);
+    }
+
     float cos_theta = clamp(dot(n, sun_dir), 0.0, 1.0);
-    float bias = max(0.005 * (1.0 - cos_theta), 0.0005);
+    float bias = max(0.0001 * (1.0 - cos_theta), 0.00002);
+
     float shadow_z = ndc.z - bias;
 
     Texture2DArray<float> shadow_array = get_texture_2d_array(frame.shadow_array_index);
@@ -32,16 +45,19 @@ Tuple<float, uint> compute_shadow(float3 world_pos, float3 n, float3 sun_dir,
 
     float shadow = 0.0;
     float2 texel = 1.0 / float2(shadow_map_resolution);
+
     [unroll]
     for (int x = -1; x <= 1; ++x)
+    {
         [unroll]
-    for (int y = -1; y <= 1; ++y)
+        for (int y = -1; y <= 1; ++y)
         {
             shadow += shadow_array.SampleCmpLevelZero(
                 shadow_sampler,
                 float3(uv + float2(x, y) * texel, float(cascade_idx)),
                 shadow_z);
         }
+    }
 
     return makeTuple(shadow / 9.0, cascade_idx);
 }

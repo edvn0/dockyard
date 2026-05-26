@@ -71,7 +71,7 @@ public:
   }
 
   auto upload_with_offset(std::ranges::contiguous_range auto &&range,
-                          usize byte_offset) {
+                          usize byte_offset, bool flush = false) {
     const auto bytes = std::ranges::size(range) *
                        sizeof(std::ranges::range_value_t<decltype(range)>);
     assert(byte_offset + bytes <= allocation_info.size &&
@@ -80,6 +80,10 @@ public:
     if (mapped_data) {
       u8 *destination = static_cast<u8 *>(mapped_data) + byte_offset;
       std::memcpy(destination, std::ranges::data(range), bytes);
+    }
+
+    if (flush) {
+      vmaFlushAllocation(allocator, allocation, byte_offset, bytes);
     }
   }
 

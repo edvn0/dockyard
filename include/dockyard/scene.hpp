@@ -61,15 +61,10 @@ public:
   auto registry() -> entt::registry & { return scene; }
   auto registry() const -> const entt::registry & { return scene; }
 
-  auto make(std::string_view name) -> Entity {
-    auto e = Entity{scene};
-    e.emplace<Components::Tag>(name);
-    e.emplace<Components::Transform>();
-    e.emplace<Components::LocalToWorld>();
-    return e;
-  }
+  auto make(std::string_view, entt::entity = entt::null) -> Entity;
+  auto make(std::string_view, Entity &) -> Entity;
 
-  auto make_camera(std::string_view name, u32 width, u32 height,
+  auto make_camera(std::string_view, u32 width, u32 height,
                    glm::vec3 position = {0.0F, 0.0F, 0.0F},
                    glm::vec3 look_at = {0.0F, 0.0F, 1.0F}) -> Entity;
 

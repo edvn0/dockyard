@@ -50,9 +50,6 @@ struct Dockforge : App {
   std::optional<VkExtent2D> candidate_viewport_resize{std::nullopt};
   SceneOutlinerState state;
 
-  using MaterialOverridePool = FreeListPool;
-  MaterialOverridePool override_pool;
-
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
 

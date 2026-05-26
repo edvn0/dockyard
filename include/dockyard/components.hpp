@@ -13,7 +13,7 @@
 namespace dy::Components {
 
 struct MeshRequest {
-  VFSPath path;
+  NullableVFSPath path;
 };
 
 struct Mesh {
@@ -74,6 +74,7 @@ struct Camera {
 
 struct Tag {
   std::string tag;
+  Tag() = default;
   explicit Tag(const std::string_view n) : tag(n) {}
 };
 

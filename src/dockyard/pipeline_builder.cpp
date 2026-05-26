@@ -419,7 +419,6 @@ auto PipelineRegistry::create_compute(ComputePipelineDescription desc)
 }
 
 auto PipelineRegistry::poll_and_update_dirty_pipelines() -> void {
-  // 1. Gather all unique paths that are actually out of date on disk
   std::unordered_set<std::string> dirty_paths;
 
   for (u32 i = 0u; i < pool.capacity(); ++i) {

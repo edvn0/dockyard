@@ -35,7 +35,12 @@ public:
       std::abort();
     }
 
-    return VFSPath{raw, sep};
+    if (sep > 255) {
+      error("Scheme too long (max 255 chars): {} ({})", scheme, raw);
+      std::abort();
+    }
+
+    return VFSPath{raw, static_cast<u8>(sep)};
   }
 
   template <typename... Args>
@@ -54,10 +59,26 @@ public:
   [[nodiscard]] auto view() const -> std::string_view { return path; }
 
 private:
-  explicit VFSPath(std::string_view d, usize sep) : path(d), sep(sep) {}
+  explicit VFSPath(std::string_view d, u8 s) : path(d), sep(s) {}
 
   std::string path;
-  usize sep; // index of ':'
+  u8 sep; // index of ':'
+};
+
+struct NullableVFSPath {
+  std::optional<VFSPath> path;
+
+  template <typename... Args>
+  static auto create(std::format_string<Args...> fmt, Args &&...args) {
+    return NullableVFSPath{
+        VFSPath::create(std::format(fmt, std::forward<Args>(args)...)),
+    };
+  }
+
+  [[nodiscard]] auto valid() const -> bool { return path.has_value(); }
+  [[nodiscard]] auto view() const -> std::string_view {
+    return path ? path->view() : std::string_view{};
+  }
 };
 
 } // namespace dy

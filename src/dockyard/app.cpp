@@ -22,7 +22,6 @@
 #include <VkBootstrap.h>
 #include <entt/entt.hpp>
 #include <vk_mem_alloc.h>
-#include <vulkan/vulkan_core.h>
 
 struct TimeStep {
   double last_time{glfwGetTime()};

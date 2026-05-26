@@ -22,6 +22,7 @@ struct CullingPushConstants
 
 bool is_visible(float4x4 model_matrix, float local_radius, Array<float4, 6> frustum_planes, float3 camera_pos, float max_dist_sq)
 {
+    return true;
     float3 position = float3(model_matrix[0][3], model_matrix[1][3], model_matrix[2][3]);
 
     float scale_x = length(float3(model_matrix[0][0], model_matrix[1][0], model_matrix[2][0]));

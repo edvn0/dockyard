@@ -1,21 +1,21 @@
 #pragma once
 
-#include "dockyard/texture.hpp"
 #include <dockyard/app.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/compiler.hpp>
 #include <dockyard/context.hpp>
 #include <dockyard/device_geometry.hpp>
+#include <dockyard/freelist_pool.hpp>
 #include <dockyard/mesh.hpp>
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene.hpp>
+#include <dockyard/texture.hpp>
 #include <dockyard/thread_safe_memory_cache.hpp>
 
 #include <deque>
 #include <glm/glm.hpp>
 #include <type_traits>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
 
@@ -100,7 +100,7 @@ struct RenderPass {
 
   auto ensure_capacity(usize command_count, usize instance_count,
                        usize batch_count, usize total_global_instances) -> bool;
-  auto bake(usize) -> bool;
+  auto bake(usize) -> void;
 };
 
 struct InstanceData {
@@ -167,6 +167,8 @@ struct SceneRenderer {
   SubImagePool subimages;
   BindlessSet bindless;
   std::unique_ptr<GeometryPool> geometry_pool;
+  using MaterialOverridePool = FreeListPool;
+  MaterialOverridePool override_pool;
 
   std::deque<MeshAsset> mesh_registry;
 
@@ -229,9 +231,23 @@ struct SceneRenderer {
 
   void ensure_global_capacity(usize instance_count);
 
-  // Prepare should setup frame index.
+  struct PrepareResult {
+    enum class Status : u8 {
+      Success,
+      SuccessMaterialPoolGrew,
+      SuccessNoSubmissions,
+      DeviceWaitRequired,
+    };
+
+    Status status = Status::Success;
+    u32 material_pool_delta = 0;
+
+    [[nodiscard]] auto failed() const {
+      return status == Status::DeviceWaitRequired;
+    }
+  };
   auto prepare(u64 frame_index, const glm::mat4 &view,
-               const glm::mat4 &projection) -> bool;
+               const glm::mat4 &projection) -> PrepareResult;
 
   void submit(MeshHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
               u32 material_id = 0U);

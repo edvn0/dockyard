@@ -138,11 +138,9 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target
 
     float3 ambient = (diffuse_ibl + specular_ibl) * ao;
 
-    float view_depth = 1.0 / input.pos.w;
-    var shadow_result = compute_shadow(input.world_pos, n, sun_dir, view_depth, *pc.frame_ubo);
+    var shadow_result = compute_shadow(input.world_pos, geom_n, sun_dir, *pc.frame_ubo);
 
     float3 final_color = (direct * shadow_result._0) + ambient + emissive;
 
-    // geom normal
     return float4(final_color, albedo.a);
 }

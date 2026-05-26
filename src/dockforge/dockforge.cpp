@@ -5,6 +5,7 @@
 #include <dockforge/editor_utils.hpp>
 #include <dockforge/matrix_cache.hpp>
 
+#include <dockyard/binary_stream.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/context.hpp>
@@ -12,6 +13,7 @@
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/scene_renderer.hpp>
+#include <dockyard/scene_serialiser.hpp>
 #include <dockyard/vfs.hpp>
 
 #include <GLFW/glfw3.h>
@@ -22,7 +24,6 @@
 #include <imgui.h>
 
 #include <ImGuizmo.h>
-#include <vulkan/vulkan_core.h>
 
 #include "./cube_vertices.inl"
 
@@ -44,45 +45,6 @@ auto resize_viewport(Dockforge &app) -> void {
   }
 }
 
-auto make_default_override_materials(u32) -> std::vector<GPUMaterial>;
-auto grow_pool(Dockforge &app) -> void {
-  const u32 old_capacity = app.override_pool.capacity;
-  const u32 new_capacity = old_capacity * 2;
-
-  info("MaterialOverridePool growing {} → {} slots", old_capacity,
-       new_capacity);
-
-  vkDeviceWaitIdle(app.context->device);
-
-  app.renderer->geometry_pool->reserve_materials(new_capacity - old_capacity);
-
-  auto new_data = make_default_override_materials(new_capacity);
-
-  if (app.override_pool.next > 0) {
-    auto live = app.renderer->geometry_pool->get_materials(
-        app.override_pool.base_slot, app.override_pool.next);
-    std::ranges::reverse_copy(live, new_data.begin());
-  }
-
-  const auto new_offset =
-      app.renderer->geometry_pool->allocate_materials(std::span(new_data));
-  const u32 delta = new_offset.start_index - app.override_pool.base_slot;
-
-  for (auto &&[e, ov] :
-       app.active_scene->template view<Components::MaterialOverride>().each()) {
-    if (ov.gpu_slot != ~0U)
-      ov.gpu_slot += delta;
-  }
-
-  for (auto &s : app.override_pool.free_slots)
-    s += delta;
-
-  app.override_pool.base_slot = new_offset.start_index;
-  app.override_pool.capacity = new_capacity;
-  app.override_pool.needs_grow = false;
-  app.renderer->bindless.mark_dirty();
-}
-
 constexpr auto remove_rotation = [](const auto &m) {
   glm::mat4 result(1.F);
 
@@ -95,18 +57,6 @@ constexpr auto remove_rotation = [](const auto &m) {
   return result;
 };
 
-auto make_default_override_materials(u32 count) -> std::vector<GPUMaterial> {
-  std::vector<GPUMaterial> output(count);
-  for (auto &material : output) {
-    material.albedo_factor[0] = material.albedo_factor[1] =
-        material.albedo_factor[2] = material.albedo_factor[3] = 1.F;
-    material.roughness_factor = 1.F;
-    material.normal_scale = 1.F;
-    material.occlusion_strength = 1.F;
-    material.albedo_index = 0U; // white fallback
-  }
-  return output;
-}
 } // namespace
 
 auto make_app() -> std::unique_ptr<Dockforge> {
@@ -148,15 +98,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     viewport_resources = ViewportResources::create(*context, *renderer, w, h);
     renderer->update_output_texture(viewport_resources.forward_target);
     renderer->initialise_bindless();
-
-    constexpr u32 override_material_count_initial = 16U;
-    auto blank =
-        make_default_override_materials(override_material_count_initial);
-    auto offset = renderer->geometry_pool->allocate_materials(std::span(blank));
-    override_pool = {
-        .base_slot = offset.start_index,
-        .capacity = override_material_count_initial,
-    };
   }
 
   {
@@ -244,9 +185,14 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   auto loaded = mesh::load_from_path(
       VFSPath::create("meshes://DamagedHelmet.glb"), *renderer);
   if (loaded) {
-    auto entity = active_scene->make("Helmet");
-    entity.emplace<Components::Mesh>(*loaded);
-    entity.get<Components::Transform>().mut().position = {-5, 3, 9};
+    constexpr auto size = 50.0F;
+    auto parent = active_scene->make("Helmet parent");
+    for (auto i = 0; i < 5000; i++) {
+      auto entity = active_scene->make("Helmet", parent);
+      entity.emplace<Components::Mesh>(*loaded);
+      entity.get<Components::Transform>().mut().position = glm::linearRand(
+          glm::vec3{-size, -size, -size}, glm::vec3{size, size, size});
+    }
   }
 
   if (auto loaded_sponza = mesh::load_from_path(
@@ -674,7 +620,7 @@ auto Dockforge::remove_override(Entity entity) -> void {
     return;
 
   if (material_override->gpu_slot != ~0U)
-    override_pool.free(material_override->gpu_slot);
+    renderer->override_pool.free(material_override->gpu_slot);
 
   entity.remove<Components::MaterialOverride>();
 }
@@ -991,7 +937,7 @@ auto Dockforge::resolve_material_slot(Entity e) -> u32 {
     return default_material;
 
   if (material_override->gpu_slot == ~0U) {
-    if (auto slot = override_pool.alloc()) {
+    if (auto slot = renderer->override_pool.alloc()) {
       material_override->gpu_slot = *slot;
       material_override->dirty = true;
     } else {
@@ -1057,10 +1003,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     pending_pick.reset();
   }
 
-  if (override_pool.needs_grow) [[unlikely]] {
-    grow_pool(*this);
-  }
-
   const bool size_changed =
       (last_ui_size.width != viewport_panel_extent.width ||
        last_ui_size.height != viewport_panel_extent.height);
@@ -1079,7 +1021,9 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   auto [view, projection] = resolve_camera();
   renderer->update_csm(view, projection, editor_camera->near_plane(),
                        editor_camera->far_plane());
-  if (!renderer->prepare(ctx.frame_index, view, projection)) {
+
+  auto prepare_result = renderer->prepare(ctx.frame_index, view, projection);
+  if (prepare_result.failed()) {
     return ctx.next_frame_wait_value();
   }
 

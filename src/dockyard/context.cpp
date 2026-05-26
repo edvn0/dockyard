@@ -160,14 +160,14 @@ auto ViewportResources::resize(const VulkanContext &ctx,
     auto *entry = renderer.textures.get(display_target);
     entry->texture.destroy(ctx);
     entry->texture = Texture::create(
-        ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_UNORM,
+        ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT);
     renderer.bindless.mark_dirty();
 
   } else {
     auto tex = Texture::create(
-        ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_UNORM,
+        ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT);
     display_target = renderer.textures.create(TextureEntry{
