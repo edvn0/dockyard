@@ -21,8 +21,10 @@
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/packing.hpp>
 
+#include <execution>
 #include <expected>
 #include <format>
+#include <ranges>
 #include <string>
 #include <vector>
 
@@ -146,103 +148,11 @@ namespace dy {
 namespace {
 
 struct DecodedImage {
-  std::vector<u32> pixels;
+  std::vector<std::byte> pixels; // was u32
   u32 width{};
   u32 height{};
 };
-
-[[nodiscard]] auto decode_stbi(const stbi_uc *data, int len,
-                               std::string_view debug_name)
-    -> std::expected<DecodedImage, std::string> {
-  int w{};
-  int h{};
-  int ch{};
-  stbi_uc *raw = stbi_load_from_memory(data, len, &w, &h, &ch, STBI_rgb_alpha);
-  if (!raw)
-    return std::unexpected(
-        std::format("stbi '{}': {}", debug_name, stbi_failure_reason()));
-
-  DecodedImage img;
-  img.width = static_cast<u32>(w);
-  img.height = static_cast<u32>(h);
-  img.pixels.resize(static_cast<usize>(w * h));
-  std::memcpy(img.pixels.data(), raw, img.pixels.size() * sizeof(u32));
-  stbi_image_free(raw);
-  return std::expected<DecodedImage, std::string>{
-      std::in_place,
-      std::move(img),
-  };
-}
-
-[[nodiscard]] auto load_image(const fastgltf::Asset &asset,
-                              const fastgltf::Image &image,
-                              const std::filesystem::path &gltf_dir)
-    -> std::expected<DecodedImage, std::string> {
-  const std::string_view name = image.name;
-
-  return std::visit(
-      fastgltf::visitor{
-          [&](const fastgltf::sources::URI &uri)
-              -> std::expected<DecodedImage, std::string> {
-            const auto full = gltf_dir / uri.uri.fspath();
-            int w{};
-            int h{};
-            int ch{};
-            stbi_uc *raw =
-                stbi_load(full.string().c_str(), &w, &h, &ch, STBI_rgb_alpha);
-            if (!raw)
-              return std::unexpected(std::format("stbi '{}': {}", full.string(),
-                                                 stbi_failure_reason()));
-            DecodedImage img;
-            img.width = static_cast<u32>(w);
-            img.height = static_cast<u32>(h);
-            img.pixels.resize(static_cast<usize>(w * h));
-            std::memcpy(img.pixels.data(), raw,
-                        img.pixels.size() * sizeof(u32));
-            stbi_image_free(raw);
-            return img;
-          },
-          [&](const fastgltf::sources::Array &arr)
-              -> std::expected<DecodedImage, std::string> {
-            return decode_stbi(
-                reinterpret_cast<const stbi_uc *>(arr.bytes.data()),
-                static_cast<int>(arr.bytes.size()), name);
-          },
-          [&](const fastgltf::sources::BufferView &bv)
-              -> std::expected<DecodedImage, std::string> {
-            const auto &view = asset.bufferViews[bv.bufferViewIndex];
-            const auto &buf = asset.buffers[view.bufferIndex];
-            return std::visit(
-                fastgltf::visitor{
-                    [&](const fastgltf::sources::Array &arr)
-                        -> std::expected<DecodedImage, std::string> {
-                      return decode_stbi(
-                          reinterpret_cast<const stbi_uc *>(arr.bytes.data() +
-                                                            view.byteOffset),
-                          static_cast<int>(view.byteLength), name);
-                    },
-                    [&](const auto &)
-                        -> std::expected<DecodedImage, std::string> {
-                      return std::unexpected(std::format(
-                          "Unsupported buffer backing for image '{}'", name));
-                    },
-                },
-                buf.data);
-          },
-          [&](const auto &) -> std::expected<DecodedImage, std::string> {
-            return std::unexpected(
-                std::format("Unsupported image source type for '{}'", name));
-          },
-      },
-      image.data);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// sRGB classification — scan materials before uploading so format is known
-// ─────────────────────────────────────────────────────────────────────────────
-
 enum class ImageColorSpace : u8 { linear, srgb };
-
 [[nodiscard]] auto classify_images(const fastgltf::Asset &asset)
     -> std::vector<ImageColorSpace> {
   std::vector<ImageColorSpace> cs(asset.images.size(), ImageColorSpace::linear);
@@ -444,24 +354,20 @@ constexpr u32 k_fb_emissive = 4u;
 }
 
 [[nodiscard]] auto generate_lods(const PrimitiveData &lod0)
-    -> std::vector<std::vector<u32>> // [0] = LOD1 indices, [1] = LOD2, ...
-{
+    -> std::vector<std::vector<u32>> {
   static constexpr std::array<f32, 5> k_lod_targets = {0.50F, 0.25F, 0.125F,
                                                        0.0625F, 0.03125F};
   static constexpr f32 k_lod_error = 0.8F;
 
   std::vector<std::vector<u32>> result;
 
-  std::vector<f32> positions;
-  positions.reserve(lod0.vertices.size() * 3);
-  for (const auto &v : lod0.vertices) {
-    positions.push_back(v.position[0]);
-    positions.push_back(v.position[1]);
-    positions.push_back(v.position[2]);
-  }
+  thread_local std::vector<u32> tl_simplified;
 
   const auto *prev_indices = lod0.indices.data();
   usize prev_count = lod0.indices.size();
+
+  const f32 *position_ptr = &lod0.vertices[0].position[0];
+  const usize vertex_stride = sizeof(Vertex);
 
   for (const f32 target_ratio : k_lod_targets) {
     const usize target_count =
@@ -470,21 +376,22 @@ constexpr u32 k_fb_emissive = 4u;
                                     target_ratio));
     const usize rounded = (target_count / 3) * 3;
 
-    std::vector<u32> simplified(lod0.indices.size());
+    tl_simplified.resize(prev_count);
+
     f32 error = 0.0F;
     const usize out_count = meshopt_simplify(
-        simplified.data(), prev_indices, prev_count, positions.data(),
-        lod0.vertices.size(), sizeof(f32) * 3, rounded, k_lod_error, 0, &error);
+        tl_simplified.data(), prev_indices, prev_count, position_ptr,
+        lod0.vertices.size(), vertex_stride, rounded, k_lod_error, 0, &error);
 
-    simplified.resize(out_count);
-
-    // Stop early if simplification stalled (< 10% reduction vs previous)
-    if (out_count >= static_cast<usize>(static_cast<f32>(prev_count) * 0.9F)) {
-      info("Stopping at {}", target_ratio);
+    // tiers
+    if (out_count >= static_cast<usize>(static_cast<f32>(prev_count) * 0.9F) ||
+        out_count == 0) {
       break;
     }
 
-    result.push_back(std::move(simplified));
+    result.emplace_back(tl_simplified.begin(),
+                        tl_simplified.begin() + out_count);
+
     prev_indices = result.back().data();
     prev_count = result.back().size();
   }
@@ -577,9 +484,9 @@ void flatten_nodes(const fastgltf::Asset &asset,
 
     out.nodes.push_back(std::move(desc));
 
-    for (auto it = node.children.rbegin(); it != node.children.rend(); ++it)
+    for (auto it : std::views::reverse(node.children))
       dfs.push_back({
-          .node_idx = *it,
+          .node_idx = it,
           .parent_flat_idx = flat_idx,
           .is_root = false,
       });
@@ -589,6 +496,48 @@ void flatten_nodes(const fastgltf::Asset &asset,
 } // namespace
 
 namespace mesh {
+
+struct MaterialTexturePatch {
+  u32 pool_slot; // absolute slot in geometry_pool
+  std::function<void(GPUMaterial &, TextureHandle)> apply;
+};
+
+auto build_patch_list(const fastgltf::Asset &asset, usize image_idx,
+                      u32 material_base_slot)
+    -> std::vector<MaterialTexturePatch> {
+  std::vector<MaterialTexturePatch> patches;
+
+  for (usize mi = 0; mi < asset.materials.size(); ++mi) {
+    const auto &mat = asset.materials[mi];
+    const u32 slot = material_base_slot + static_cast<u32>(mi);
+
+    auto try_add = [&](const auto &tex_opt, auto setter) {
+      if (!tex_opt.has_value())
+        return;
+      const auto &tex = asset.textures[tex_opt->textureIndex];
+      if (tex.imageIndex.has_value() && *tex.imageIndex == image_idx)
+        patches.push_back({slot, std::move(setter)});
+    };
+
+    try_add(mat.pbrData.baseColorTexture, [](GPUMaterial &g, TextureHandle h) {
+      g.albedo_index = h.index();
+    });
+    try_add(mat.normalTexture, [](GPUMaterial &g, TextureHandle h) {
+      g.normal_index = h.index();
+    });
+    try_add(mat.pbrData.metallicRoughnessTexture,
+            [](GPUMaterial &g, TextureHandle h) {
+              g.metallic_roughness_index = h.index();
+            });
+    try_add(mat.occlusionTexture, [](GPUMaterial &g, TextureHandle h) {
+      g.occlusion_index = h.index();
+    });
+    try_add(mat.emissiveTexture, [](GPUMaterial &g, TextureHandle h) {
+      g.emissive_index = h.index();
+    });
+  }
+  return patches;
+}
 
 [[nodiscard]] static auto hash_bytes(const void *data, usize len) -> u64 {
   const auto *p = static_cast<const u8 *>(data);
@@ -666,6 +615,10 @@ static auto calculate_requirements(const auto &extracted_prims)
   return reqs;
 }
 
+template <typename O> auto cast(void *ptr, usize offset) -> O * {
+  return reinterpret_cast<O *>(static_cast<u8 *>(ptr) + offset);
+}
+
 auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
     -> std::expected<MeshAssetHandle, std::string> {
 
@@ -683,27 +636,90 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
     return std::unexpected("Parse error");
 
   auto &asset = asset_result.get();
-  MeshAsset output_result{
-      .mesh_aabb = AABB::create(),
-  };
-  auto result = std::make_shared<MeshAsset>(output_result);
-  result->texture_handles.resize(asset.images.size());
+  auto result =
+      std::make_unique<MeshAsset>(MeshAsset{.mesh_aabb = AABB::create()});
+  result->texture_handles.resize(asset.images.size(),
+                                 renderer.dummy_texture_handle);
   result->material_slots.resize(asset.materials.size(), 0u);
 
   const auto color_spaces = classify_images(asset);
 
-  static tf::Executor executor;
-  tf::Taskflow taskflow;
+  struct ImageSource {
+    std::variant<std::filesystem::path, std::vector<std::byte>> data;
+    std::string debug_name;
+    std::string cache_key;
+    VkFormat format;
+    usize image_idx;
+  };
+  std::vector<ImageSource> image_sources;
+  image_sources.reserve(asset.images.size());
 
-  std::vector<std::expected<DecodedImage, std::string>> decoded_images(
-      asset.images.size());
-  {
-    PROFILE_SCOPE("Decode images");
-    [[maybe_unused]] auto image_group = taskflow.for_each_index(
-        static_cast<usize>(0), asset.images.size(), usize(1), [&](usize i) {
-          decoded_images[i] = load_image(asset, asset.images[i], gltf_dir);
-        });
+  for (usize i = 0; i < asset.images.size(); ++i) {
+    const VkFormat fmt = (color_spaces[i] == ImageColorSpace::srgb)
+                             ? VK_FORMAT_R8G8B8A8_SRGB
+                             : VK_FORMAT_R8G8B8A8_UNORM;
+    const std::string fmt_suffix =
+        (fmt == VK_FORMAT_R8G8B8A8_SRGB) ? ":srgb" : ":linear";
+    const std::string debug_name =
+        asset.images[i].name.empty()
+            ? std::format("{}#img{}", fs_path.filename().string(), i)
+            : std::string(asset.images[i].name);
+
+    std::visit(
+        fastgltf::visitor{
+            [&](const fastgltf::sources::URI &uri) {
+              const auto full = gltf_dir / uri.uri.fspath();
+              image_sources.push_back({
+                  .data = full,
+                  .debug_name = debug_name,
+                  .cache_key = full.string() + fmt_suffix,
+                  .format = fmt,
+                  .image_idx = i,
+              });
+            },
+            [&](const fastgltf::sources::Array &arr) {
+              std::vector<std::byte> buf(arr.bytes.size());
+              std::memcpy(buf.data(), arr.bytes.data(), arr.bytes.size());
+              image_sources.push_back({
+                  .data = std::move(buf),
+                  .debug_name = debug_name,
+                  .cache_key = {}, // hash after decode
+                  .format = fmt,
+                  .image_idx = i,
+              });
+            },
+            [&](const fastgltf::sources::BufferView &bv) {
+              const auto &view = asset.bufferViews[bv.bufferViewIndex];
+              const auto &buf = asset.buffers[view.bufferIndex];
+              std::visit(fastgltf::visitor{
+                             [&](const fastgltf::sources::Array &arr) {
+                               std::vector<std::byte> copy(view.byteLength);
+                               std::memcpy(copy.data(),
+                                           arr.bytes.data() + view.byteOffset,
+                                           view.byteLength);
+                               image_sources.push_back({
+                                   .data = std::move(copy),
+                                   .debug_name = debug_name,
+                                   .cache_key = {},
+                                   .format = fmt,
+                                   .image_idx = i,
+                               });
+                             },
+                             [&](const auto &) {
+                               warn("Unsupported buffer backing for image '{}'",
+                                    debug_name);
+                             },
+                         },
+                         buf.data);
+            },
+            [&](const auto &) {
+              warn("Unsupported image source for '{}'", debug_name);
+            },
+        },
+        asset.images[i].data);
   }
+
+  // ── Primitive extraction (taskflow) ────────────────────────────────────────
   struct PrimWork {
     usize mesh_idx;
     usize prim_idx;
@@ -723,59 +739,112 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
   std::vector<std::expected<PrimitiveResult, std::string>> extracted_prims(
       prim_work_list.size(), std::unexpected<std::string>("Could not extract"));
   {
+    static tf::Executor executor;
+    tf::Taskflow taskflow;
+
     PROFILE_SCOPE("Extract primitives");
     [[maybe_unused]] auto mesh_group = taskflow.for_each_index(
         static_cast<usize>(0), prim_work_list.size(), static_cast<usize>(1),
         [&](usize i) {
           extracted_prims[i] = extract_primitive(asset, *prim_work_list[i].ptr);
         });
-  }
-
-  {
-    PROFILE_SCOPE("Wait for threads");
     executor.run(taskflow).wait();
   }
 
+  struct PendingUpload {
+    std::future<pool::CpuTextureData> fut;
+    usize image_idx;
+    std::stop_source stop_src;
+    std::vector<MaterialTexturePatch> patches;
+  };
+  std::vector<PendingUpload> pending_uploads;
+  pending_uploads.reserve(image_sources.size());
+
   {
-    PROFILE_SCOPE("Decode and upload textures");
-    for (usize i = 0; i < asset.images.size(); ++i) {
-      if (!decoded_images[i]) {
-        result->texture_handles[i] = renderer.dummy_texture_handle;
-        continue;
+    PROFILE_SCOPE("Launch deferred texture futures");
+    for (auto &src : image_sources) {
+      if (!src.cache_key.empty()) {
+        if (auto cached = renderer.texture_cache.get(src.cache_key)) {
+          result->texture_handles[src.image_idx] = *cached;
+          continue;
+        }
       }
 
-      auto &img = *decoded_images[i];
-      const VkFormat fmt = (color_spaces[i] == ImageColorSpace::srgb)
-                               ? VK_FORMAT_R8G8B8A8_SRGB
-                               : VK_FORMAT_R8G8B8A8_UNORM;
-      const std::string fmt_suffix =
-          (fmt == VK_FORMAT_R8G8B8A8_SRGB) ? ":srgb" : ":linear";
+      auto stop_src = std::stop_source{};
+      std::stop_token token = stop_src.get_token();
 
-      std::string cache_key;
-      if (const auto *uri_src =
-              std::get_if<fastgltf::sources::URI>(&asset.images[i].data)) {
-        cache_key = (gltf_dir / uri_src->uri.fspath()).string() + fmt_suffix;
-      } else {
-        const u64 h =
-            hash_bytes(img.pixels.data(), img.pixels.size() * sizeof(u32));
-        cache_key = std::format("hash:{:016x}{}", h, fmt_suffix);
-      }
+      auto fut = std::async(
+          std::launch::async,
+          [src = std::move(src), token]() mutable -> pool::CpuTextureData {
+            if (token.stop_requested())
+              return {};
 
-      if (auto cached = renderer.texture_cache.get(cache_key)) {
-        result->texture_handles[i] = *cached;
-        continue;
-      }
+            int w{};
+            int h{};
+            int ch{};
+            stbi_uc *raw = nullptr;
 
-      const std::string debug_name =
-          asset.images[i].name.empty()
-              ? std::format("{}#img{}", fs_path.filename().string(), i)
-              : std::string(asset.images[i].name);
+            if (auto *file_path =
+                    std::get_if<std::filesystem::path>(&src.data)) {
+              raw = stbi_load(file_path->string().c_str(), &w, &h, &ch,
+                              STBI_rgb_alpha);
+            } else {
+              auto &buf = std::get<std::vector<std::byte>>(src.data);
+              raw = stbi_load_from_memory(
+                  reinterpret_cast<const stbi_uc *>(buf.data()),
+                  static_cast<int>(buf.size()), &w, &h, &ch, STBI_rgb_alpha);
+            }
 
-      auto handle = renderer.upload_texture(img.pixels, debug_name, img.width,
-                                            img.height, fmt, true, false);
+            if (!raw) {
+              warn("stbi failed for '{}': {}", src.debug_name,
+                   stbi_failure_reason());
+              return {};
+            }
 
-      renderer.texture_cache.insert(cache_key, handle);
-      result->texture_handles[i] = handle;
+            if (token.stop_requested()) {
+              stbi_image_free(raw);
+              return {};
+            }
+
+            std::vector<std::byte> pixels(static_cast<usize>(w * h * 4));
+            std::memcpy(pixels.data(), raw, pixels.size());
+            stbi_image_free(raw);
+
+            const std::string cache_key =
+                src.cache_key.empty()
+                    ? std::format("hash:{:016x}{}",
+                                  hash_bytes(pixels.data(), pixels.size()),
+                                  src.format == VK_FORMAT_R8G8B8A8_SRGB
+                                      ? ":srgb"
+                                      : ":linear")
+                    : src.cache_key;
+
+            auto total_sleep = std::chrono::seconds{3 + (std::rand() % 8)};
+            auto end_time = std::chrono::steady_clock::now() + total_sleep;
+            while (std::chrono::steady_clock::now() < end_time) {
+              if (token.stop_requested()) {
+                return {};
+              }
+              std::this_thread::sleep_for(std::chrono::milliseconds{50});
+            }
+
+            return pool::CpuTextureData{
+                .pixels = std::move(pixels),
+                .name = std::move(src.debug_name),
+                .cache_key = std::move(cache_key),
+                .width = static_cast<u32>(w),
+                .height = static_cast<u32>(h),
+                .format = src.format,
+                .generate_mips = true,
+            };
+          });
+
+      pending_uploads.push_back(PendingUpload{
+          .fut = std::move(fut),
+          .image_idx = src.image_idx,
+          .stop_src = std::move(stop_src),
+          .patches = {},
+      });
     }
   }
 
@@ -791,81 +860,172 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
     result->material_base_slot = mat_offset.start_index;
     result->material_count = static_cast<u32>(gpu_mats.size());
     for (usize i = 0; i < gpu_mats.size(); ++i)
-      result->material_slots[i] = result->material_base_slot + (u32)i;
+      result->material_slots[i] =
+          result->material_base_slot + static_cast<u32>(i);
+  }
+
+  for (auto &pu : pending_uploads) {
+    pu.patches =
+        build_patch_list(asset, pu.image_idx, result->material_base_slot);
   }
 
   {
-    PROFILE_SCOPE("Allocate geometry");
+    // Keeping this main scope, but our sub-scopes will pinpoint the exact
+    // culprit.
+    PROFILE_SCOPE("Allocate geometry TOTAL");
 
-    // Generate LODs up front so the reserve call is accurate
     struct PrimLods {
-      std::vector<std::vector<u32>> extra; // LOD1, LOD2, LOD3
+      std::vector<std::vector<u32>> extra;
     };
     std::vector<PrimLods> prim_lods(prim_work_list.size());
     usize total_lod_indices = 0;
 
     {
-      PROFILE_SCOPE("Generate LODs");
-      for (usize i = 0; i < prim_work_list.size(); ++i) {
-        if (!extracted_prims[i])
-          continue;
-        auto &[data, aabb] = *extracted_prims[i];
-        if (should_generate_lods(data)) {
-          prim_lods[i].extra = generate_lods(data);
-          for (const auto &lod_indices : prim_lods[i].extra)
-            total_lod_indices += lod_indices.size();
-        }
+      PROFILE_SCOPE("1. Generate LODs (Parallel)");
+
+      std::vector<usize> indices_per_prim(prim_work_list.size(), 0);
+
+      std::for_each(std::execution::par, prim_work_list.begin(),
+                    prim_work_list.end(), [&](const auto &work_item) {
+                      // Calculate index via distance
+                      usize i = &work_item - prim_work_list.data();
+
+                      if (!extracted_prims[i])
+                        return;
+
+                      auto &[pdata, aabb] = *extracted_prims[i];
+                      if (should_generate_lods(pdata)) {
+                        prim_lods[i].extra = generate_lods(pdata);
+
+                        for (const auto &lod_indices : prim_lods[i].extra) {
+                          indices_per_prim[i] += lod_indices.size();
+                        }
+                      }
+                    });
+
+      for (usize count : indices_per_prim) {
+        total_lod_indices += count;
       }
     }
 
-    auto [total_v, total_i] = calculate_requirements(extracted_prims);
-    pool.reserve(total_v, total_i + total_lod_indices);
+    {
+      PROFILE_SCOPE("2. Pool Reserve & Transaction Init");
+      auto [total_v, total_i] = calculate_requirements(extracted_prims);
+      pool.reserve(total_v, total_i + total_lod_indices);
+    }
 
     auto batch = pool.begin_transaction();
 
     result->meshes.resize(asset.meshes.size());
     result->submesh_aabbs.resize(asset.meshes.size());
     result->vertex_base_offset = pool.vertex_offset;
-    result->submesh_aabbs.clear();
 
-    for (usize i = 0; i < prim_work_list.size(); ++i) {
-      auto &res = extracted_prims[i];
-      const usize mesh_idx = prim_work_list[i].mesh_idx;
+    // 2. Grab baseline base pointers directly
+    auto *v_base = cast<Vertex>(pool.vertex_buffer->get_mapped_pointer(),
+                                pool.vertex_offset);
+    auto *sv_base = cast<PositionOnlyVertex>(
+        pool.position_only_vertex_buffer->get_mapped_pointer(),
+        pool.shadow_vertex_offset);
+    auto *i_base =
+        cast<u32>(pool.index_buffer->get_mapped_pointer(), pool.index_offset);
 
-      if (!res) {
-        result->submesh_aabbs[mesh_idx].push_back(AABB::create());
-        continue;
+    usize current_v_byte_offset = 0;
+    usize current_sv_byte_offset = 0;
+    usize current_i_byte_offset = 0;
+
+    {
+      PROFILE_SCOPE("3. Serial Processing Loop");
+
+      // Let's track memory copies vs vector resizing overhead inside the loop
+      for (usize i = 0; i < prim_work_list.size(); ++i) {
+        auto &res = extracted_prims[i];
+        const usize mesh_idx = prim_work_list[i].mesh_idx;
+
+        if (!res) {
+          PROFILE_SCOPE("3a. Empty Primitive Handling");
+          result->submesh_aabbs[mesh_idx].push_back(AABB::create());
+          continue;
+        }
+
+        auto &[pdata, aabb] = *res;
+        auto pdata_vertex_span = std::span(pdata.vertices);
+        auto pdata_index_span = std::span(pdata.indices);
+
+        // Calculate local absolute offsets relative to start of pool
+        AllocatedOffset offsets{
+            .vertex_offset = pool.vertex_offset + current_v_byte_offset,
+            .shadow_vertex_offset =
+                pool.shadow_vertex_offset + current_sv_byte_offset,
+            .index_offset = pool.index_offset + current_i_byte_offset,
+        };
+
+        // Pointers for current item
+        auto *v_dst = cast<Vertex>(v_base, current_v_byte_offset);
+        auto *sv_dst =
+            cast<PositionOnlyVertex>(sv_base, current_sv_byte_offset);
+        auto *i_dst = cast<u32>(i_base, current_i_byte_offset);
+
+        {
+          // High-speed block transfers via memcpy
+          std::memcpy(v_dst, pdata_vertex_span.data(),
+                      pdata_vertex_span.size_bytes());
+          std::memcpy(i_dst, pdata_index_span.data(),
+                      pdata_index_span.size_bytes());
+
+          // Optimize structural copy
+          for (usize idx = 0; idx < pdata_vertex_span.size(); ++idx) {
+            sv_dst[idx].position[0] = pdata_vertex_span[idx].position[0];
+            sv_dst[idx].position[1] = pdata_vertex_span[idx].position[1];
+            sv_dst[idx].position[2] = pdata_vertex_span[idx].position[2];
+          }
+        }
+
+        current_v_byte_offset += pdata_vertex_span.size_bytes();
+        current_sv_byte_offset +=
+            pdata_vertex_span.size() * sizeof(PositionOnlyVertex);
+        current_i_byte_offset += pdata_index_span.size_bytes();
+
+        MeshLodGroup lod_group;
+        lod_group.vertex_offset =
+            static_cast<i32>(offsets.vertex_offset / sizeof(Vertex));
+        lod_group.lods[0].first_index =
+            static_cast<u32>(offsets.index_offset / sizeof(u32));
+        lod_group.lods[0].index_count = static_cast<u32>(pdata.indices.size());
+        lod_group.lod_count = 1;
+
+        {
+          // Track LOD indices allocation blocks sequentially
+          for (const auto &lod_indices : prim_lods[i].extra) {
+            auto as_span = std::span(lod_indices);
+            u32 *lod_i_dst = cast<u32>(i_base, current_i_byte_offset);
+            std::memcpy(lod_i_dst, lod_indices.data(), as_span.size_bytes());
+
+            auto &lod = lod_group.lods[lod_group.lod_count++];
+            lod.first_index = static_cast<u32>(
+                (pool.index_offset + current_i_byte_offset) / sizeof(u32));
+            lod.index_count = static_cast<u32>(as_span.size());
+
+            current_i_byte_offset += as_span.size_bytes();
+          }
+        }
+
+        {
+          result->submesh_aabbs[mesh_idx].push_back(aabb);
+          result->mesh_aabb.merge(aabb);
+          result->meshes[mesh_idx].push_back(lod_group);
+        }
       }
-
-      auto &[data, aabb] = *res;
-
-      // LOD0 — full vertices + indices
-      auto offsets = batch.allocate(data.vertices, data.indices);
-
-      MeshLodGroup lod_group;
-      lod_group.vertex_offset =
-          static_cast<i32>(offsets.vertex_offset / sizeof(Vertex));
-      lod_group.lods[0].first_index =
-          static_cast<u32>(offsets.index_offset / sizeof(u32));
-      lod_group.lods[0].index_count = static_cast<u32>(data.indices.size());
-      lod_group.lod_count = 1;
-
-      // LOD1–N — indices only, same vertex_offset
-      for (const auto &lod_indices : prim_lods[i].extra) {
-        auto lod_off = batch.allocate({}, lod_indices);
-        auto &lod = lod_group.lods[lod_group.lod_count++];
-        lod.first_index = static_cast<u32>(lod_off.index_offset / sizeof(u32));
-        lod.index_count = static_cast<u32>(lod_indices.size());
-      }
-
-      result->submesh_aabbs[mesh_idx].push_back(aabb);
-      result->mesh_aabb.merge(aabb);
-      result->meshes[mesh_idx].push_back(lod_group);
     }
 
-    batch.commit();
-  }
+    pool.vertex_offset += current_v_byte_offset;
+    pool.shadow_vertex_offset += current_sv_byte_offset;
+    pool.index_offset += current_i_byte_offset;
 
+    {
+      PROFILE_SCOPE("4. Transaction Commit & VMA Flush");
+      batch.commit();
+    }
+  }
   const auto scene_roots =
       asset.defaultScene.has_value()
           ? asset.scenes[*asset.defaultScene].nodeIndices
@@ -879,7 +1039,29 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
   info("load_gltf: '{}' — {} image(s), {} material(s), {} mesh(es), {} node(s)",
        fs_path.filename().string(), asset.images.size(), asset.materials.size(),
        asset.meshes.size(), result->nodes.size());
-  return renderer.register_gltf(std::move(*result));
+
+  auto handle = renderer.register_gltf(std::move(*result));
+
+  for (auto &pu : pending_uploads) {
+    renderer.texture_upload_pool->submit(
+        std::move(pu.fut), std::move(pu.stop_src),
+        [&renderer, handle, image_idx = pu.image_idx,
+         patches = std::move(pu.patches)](TextureHandle h) mutable {
+          auto *mesh_asset = renderer.resolve_mut(handle);
+          if (!mesh_asset) {
+            warn("Asset unloaded before deferred texture upload completed");
+            return;
+          }
+          mesh_asset->texture_handles[image_idx] = h;
+          for (auto &[slot, apply] : patches) {
+            auto &mat = renderer.geometry_pool->get_material(slot);
+            apply(mat, h);
+            renderer.geometry_pool->update_material(slot, mat);
+          }
+        });
+  }
+
+  return handle;
 }
 
 } // namespace mesh

@@ -1,3 +1,4 @@
+#include "dockyard/texture_upload_pool.hpp"
 #include "glm/ext/matrix_float4x4.hpp"
 #include <dockyard/scene_renderer.hpp>
 
@@ -285,6 +286,9 @@ auto SceneRenderer::remove_override(Entity entity) -> void {
   entity.remove<Components::MaterialOverride>();
 }
 
+constexpr std::byte operator""_b(unsigned long long val) {
+  return static_cast<std::byte>(val);
+}
 SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
     : ctx(c), swapchain(sc),
       depth_prepass(RenderPassType::DepthPrepass, ctx.allocator),
@@ -296,28 +300,32 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
       ctx.allocator, vertex_count * sizeof(Vertex),
       vertex_count * sizeof(PositionOnlyVertex), index_count * sizeof(u32),
       material_count * sizeof(GPUMaterial));
-
-  const u32 white = 0xFFFFFFFF;
-  const u32 blue = glm::packUnorm4x8(glm::vec4(0.5f, 0.5f, 1.0F, 1.0F));
-  const u32 mr_default = glm::packUnorm4x8(glm::vec4(0.0F, 1.0F, 0.0F, 1.0F));
-  const u32 occlusion_default = 0xFFFFFFFF;
-  const u32 black = 0xFF000000;
-  white_texture = upload_texture(std::span(&white, 1), "white_fallback_texture",
-                                 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
-  normal_texture =
-      upload_texture(std::span(&blue, 1), "normal_fallback_texture", 1, 1,
+  // 1. Define your 1x1 pixel data as byte arrays
+  constexpr auto white_pixel = std::array{255_b, 255_b, 255_b, 255_b};
+  constexpr auto blue_pixel =
+      std::array{127_b, 127_b, 255_b, 255_b}; // 0.5, 0.5, 1.0, 1.0
+  constexpr auto mr_pixel =
+      std::array{0_b, 255_b, 0_b, 255_b}; // 0.0, 1.0, 0.0, 1.0
+  constexpr auto occlusion_pixel = std::array{255_b, 255_b, 255_b, 255_b};
+  constexpr auto black_pixel = std::array{0_b, 0_b, 0_b, 255_b};
+  white_texture = upload_texture(white_pixel, "white_fallback_texture", 1, 1,
+                                 VK_FORMAT_R8G8B8A8_UNORM, false);
+  normal_texture = upload_texture(blue_pixel, "normal_fallback_texture", 1, 1,
+                                  VK_FORMAT_R8G8B8A8_UNORM, false);
+  metallic_roughness_texture =
+      upload_texture(mr_pixel, "metallic_roughness_fallback_texture", 1, 1,
                      VK_FORMAT_R8G8B8A8_UNORM, false);
-  metallic_roughness_texture = upload_texture(
-      std::span(&mr_default, 1), "metallic_roughness_fallback_texture", 1, 1,
-      VK_FORMAT_R8G8B8A8_UNORM, false);
-  occlusion_texture = upload_texture(std::span(&occlusion_default, 1),
-                                     "occlusion_fallback_texture", 1, 1,
-                                     VK_FORMAT_R8G8B8A8_UNORM, false);
-  black_texture = upload_texture(std::span(&black, 1), "black_fallback_texture",
-                                 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
+  occlusion_texture =
+      upload_texture(occlusion_pixel, "occlusion_fallback_texture", 1, 1,
+                     VK_FORMAT_R8G8B8A8_UNORM, false);
+  black_texture = upload_texture(black_pixel, "black_fallback_texture", 1, 1,
+                                 VK_FORMAT_R8G8B8A8_UNORM, false);
+
   assert(white_texture.index() == 0);
   info("White texture index: {}", white_texture.index());
   dummy_texture_handle = white_texture;
+
+  texture_upload_pool = std::make_unique<pool::TextureUploadPool>();
 
   resize();
 }
@@ -490,7 +498,7 @@ auto SceneRenderer::initialise_bindless() -> void {
     ibl_probe = IblProbe::create(ctx, *this, equirect);
   }
 }
-auto SceneRenderer::upload_texture(std::span<const u32> data,
+auto SceneRenderer::upload_texture(std::span<const std::byte> data,
                                    std::string_view name, u32 w, u32 h,
                                    VkFormat fmt, bool gen_mips, bool storage)
     -> TextureHandle {
@@ -637,6 +645,10 @@ auto extract_frustum_planes(const glm::mat4 &vp)
 
 auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
                             const glm::mat4 &projection) -> PrepareResult {
+  {
+    texture_upload_pool->poll_one(*this); // at most one, never stalls
+  }
+
   {
     pipeline_registry->poll_and_update_dirty_pipelines();
   }

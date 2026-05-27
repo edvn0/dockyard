@@ -284,6 +284,7 @@ add_library(dockyard STATIC
   src/dockyard/components.cpp
   src/dockyard/component_traits.cpp
   src/dockyard/bindless_handle.cpp
+  src/dockyard/texture_upload_pool.cpp
 )
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
 target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)

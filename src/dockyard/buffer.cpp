@@ -12,7 +12,7 @@ Buffer::Buffer(VmaAllocator alloc, VkDeviceSize size, VkBufferUsageFlags u)
 
   VmaAllocationCreateInfo alloc_ci{};
   alloc_ci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
-                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
   alloc_ci.usage = VMA_MEMORY_USAGE_AUTO;
 
   vk::check(vmaCreateBuffer(allocator, &buffer_ci, &alloc_ci, &buffer,

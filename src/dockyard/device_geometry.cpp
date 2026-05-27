@@ -206,6 +206,19 @@ auto GeometryPool::flush_materials(u32 base_slot, u32 count) -> void {
                      count * sizeof(GPUMaterial));
 }
 
+[[nodiscard]] auto GeometryPool::get_material(u32 slot) -> GPUMaterial & {
+  auto *ptr = static_cast<GPUMaterial *>(material_buffer->get_mapped_pointer());
+  assert(slot < material_offset && "out of range material read");
+  return ptr[slot];
+}
+
+auto GeometryPool::update_material(u32 slot, const GPUMaterial &mat) -> void {
+  auto *ptr = static_cast<GPUMaterial *>(material_buffer->get_mapped_pointer());
+  assert(slot < material_offset && "out of range material write");
+  ptr[slot] = mat;
+  flush_material(slot); // VMA flush for the single slot
+}
+
 template <typename O> auto cast(void *ptr, usize offset) -> O * {
   return reinterpret_cast<O *>(static_cast<u8 *>(ptr) + offset);
 }
@@ -232,10 +245,11 @@ auto GeometryPool::allocate_without_flush(std::span<const Vertex> vertices,
 
     std::memcpy(v_dst, vertices.data(), vertices.size_bytes());
 
-    for (auto &&[i, v] : vertices | std::views::enumerate) {
-      sv_dst[i].position[0] = v.position[0];
-      sv_dst[i].position[1] = v.position[1];
-      sv_dst[i].position[2] = v.position[2];
+    const usize vertex_count = vertices.size();
+    for (usize idx = 0; idx < vertex_count; ++idx) {
+      sv_dst[idx].position[0] = vertices[idx].position[0];
+      sv_dst[idx].position[1] = vertices[idx].position[1];
+      sv_dst[idx].position[2] = vertices[idx].position[2];
     }
 
     vertex_offset += vertices.size_bytes();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dockyard/bindless_handle.hpp"
 #include <bitset>
 #include <dockyard/app.hpp>
 #include <dockyard/buffer.hpp>
@@ -12,6 +13,7 @@
 #include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/texture.hpp>
+#include <dockyard/texture_upload_pool.hpp>
 #include <dockyard/thread_safe_memory_cache.hpp>
 
 #include <deque>
@@ -185,6 +187,8 @@ struct SceneRenderer {
   using MeshAssetPool = Pool<MeshAssetTag, MeshAsset>;
   MeshAssetPool mesh_registry;
 
+  std::unique_ptr<pool::TextureUploadPool> texture_upload_pool{nullptr};
+
   TextureHandle dummy_texture_handle;
   SamplerHandle dummy_sampler_handle;
   TextureHandle white_texture;
@@ -207,6 +211,7 @@ struct SceneRenderer {
 
   VkPipelineLayout pipeline_layout{VK_NULL_HANDLE};
   std::unique_ptr<PipelineRegistry> pipeline_registry{nullptr};
+
   CsmResources csm{};
   struct CsmFrameData {
     std::array<CascadeData, shadow_map_cascade_count> cascades{};
@@ -235,9 +240,9 @@ struct SceneRenderer {
 
   auto initialise_bindless() -> void;
   void init_csm();
-  auto upload_texture(std::span<const u32> data, std::string_view name, u32 w,
-                      u32 h, VkFormat fmt, bool gen_mips, bool storage = true)
-      -> TextureHandle;
+  auto upload_texture(std::span<const std::byte> data, std::string_view name,
+                      u32 w, u32 h, VkFormat fmt, bool gen_mips,
+                      bool storage = true) -> TextureHandle;
 
   auto resize() -> void;
   auto destroy() -> void;
@@ -297,8 +302,24 @@ struct SceneRenderer {
       return samplers.get(handle)->sampler;
     } else if constexpr (std::is_same_v<Handle, ComparisonSamplerHandle>) {
       return comparison_samplers.get(handle)->sampler;
+    } else if constexpr (std::is_same_v<Handle, MeshAssetHandle>) {
+      return mesh_registry.get(handle);
     } else {
-      static_assert(false, "Unsupported handle type"); // Valid in C++26!
+      static_assert(false, "Unsupported handle type");
+    }
+  }
+
+  template <typename Handle> auto resolve_mut(Handle handle) -> decltype(auto) {
+    if constexpr (std::is_same_v<Handle, TextureHandle>) {
+      return textures.get(handle)->texture;
+    } else if constexpr (std::is_same_v<Handle, SamplerHandle>) {
+      return samplers.get(handle)->sampler;
+    } else if constexpr (std::is_same_v<Handle, ComparisonSamplerHandle>) {
+      return comparison_samplers.get(handle)->sampler;
+    } else if constexpr (std::is_same_v<Handle, MeshAssetHandle>) {
+      return mesh_registry.get(handle);
+    } else {
+      static_assert(false, "Unsupported handle type");
     }
   }
 };

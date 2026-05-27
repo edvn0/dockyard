@@ -575,7 +575,7 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
                               }),
       VK_IMAGE_VIEW_TYPE_CUBE);
 
-  auto bytes = std::vector<u32>(512u * 512u, {});
+  auto bytes = std::vector<std::byte>(512u * 512u * sizeof(u32), {});
   probe.brdf_lut =
       register_tex(Texture::from_bytes(ctx, "ibl/brdf_lut",
                                        {

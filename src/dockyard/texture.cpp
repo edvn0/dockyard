@@ -263,6 +263,7 @@ auto Texture::load_hdr_texture(const VulkanContext &ctx, const VFSPath &path)
 
   auto real_path = VFS::get().resolve(path);
 
+  // stbi_loadf returns float*, forcing 4 channels (RGBA)
   float *data =
       stbi_loadf(real_path.string().c_str(), &width, &height, &channels, 4);
 
@@ -271,9 +272,9 @@ auto Texture::load_hdr_texture(const VulkanContext &ctx, const VFSPath &path)
     std::abort();
   }
 
-  const auto byte_size = static_cast<usize>(width) * height * 4 * sizeof(u32);
-  const std::span<const u32> bytes{reinterpret_cast<const u32 *>(data),
-                                   byte_size};
+  const auto byte_size = static_cast<usize>(width) * height * 4 * sizeof(float);
+  const std::span<const std::byte> bytes{
+      reinterpret_cast<const std::byte *>(data), byte_size};
 
   auto tex = Texture::from_bytes(ctx, real_path.filename().string(),
                                  {

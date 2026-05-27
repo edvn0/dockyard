@@ -210,9 +210,12 @@ auto Dockforge::on_mouse_moved(const events::MouseMoved &e) -> void {
   if (glfwGetMouseButton(get_window(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
     editor_camera->on_mouse_delta(e.dx, e.dy);
 }
+
 auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
-  if (e.key == GLFW_KEY_ESCAPE)
+  if (e.key == GLFW_KEY_ESCAPE) {
+    renderer->texture_upload_pool->drop();
     glfwSetWindowShouldClose(get_window(), GLFW_TRUE);
+  }
 
   if (e.key == GLFW_KEY_F2 && e.mods == GLFW_MOD_SHIFT)
     editor_camera->save_keyframe(2.F);

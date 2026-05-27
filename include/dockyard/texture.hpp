@@ -41,7 +41,7 @@ struct Texture {
   }
 
   struct CreateInfo {
-    std::span<const u32> bytes{}; // one f32 per pixel
+    std::span<const std::byte> bytes{};
     u32 width{};
     u32 height{};
     VkFormat format{VK_FORMAT_R8G8B8A8_SRGB};

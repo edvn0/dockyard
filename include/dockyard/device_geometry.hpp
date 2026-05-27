@@ -258,6 +258,8 @@ struct GeometryPool {
   void reserve(usize additional_vertices, usize additional_indices);
   void reserve_materials(usize additional_mats);
 
+  [[nodiscard]] auto get_material(u32 slot) -> GPUMaterial &;
+  auto update_material(u32 slot, const GPUMaterial &mat) -> void;
   [[nodiscard]] auto get_materials(u32 base_slot, u32 count) const
       -> std::span<const GPUMaterial>;
   [[nodiscard]] auto get_materials_mut(u32 base_slot, u32 count)

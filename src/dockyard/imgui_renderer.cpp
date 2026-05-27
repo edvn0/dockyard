@@ -341,12 +341,13 @@ auto ImGuiRenderer::update_font(FontChoice f) -> void {
   int height;
   io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
 
-  auto *as_u32 = std::bit_cast<u32 *>(pixels);
+  const auto *as_bytes = std::bit_cast<const std::byte *>(pixels);
 
   auto tex = Texture::from_bytes(
       renderer.ctx, "imgui_fonts",
       Texture::CreateInfo{
-          .bytes = std::span(as_u32, static_cast<usize>(width * height * 4)),
+          .bytes = std::span<const std::byte>(
+              as_bytes, static_cast<usize>(width * height * 4)),
           .width = static_cast<u32>(width),
           .height = static_cast<u32>(height),
           .format = VK_FORMAT_R8G8B8A8_UNORM,
