@@ -6,25 +6,43 @@ project(
   LANGUAGES CXX C
 )
 
-# ─── Global settings ──────────────────────────────────────────────────────────
+if(UNIX AND NOT APPLE)
+  find_program(MOLD_EXECUTABLE mold)
+  if(MOLD_EXECUTABLE)
+    add_link_options(-fuse-ld=mold)
+    message(STATUS "Using mold linker: ${MOLD_EXECUTABLE}")
+  endif()
+endif()
+
+include(cmake/DockyardRenderDoc.cmake)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
-# ─── Options ──────────────────────────────────────────────────────────────────
+function(target_enable_native_arch target)
+  if(MSVC)
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>
+    )
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+    target_compile_options(${target} PRIVATE
+      $<$<COMPILE_LANGUAGE:CXX>:-march=native>
+    )
+  endif()
+endfunction()
 
-set(RENDERDOC_INCLUDE_PATH "" CACHE PATH
-  "Path to directory containing renderdoc_app.h")
 set(ASSETS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/assets" CACHE PATH
   "Path to game assets")
-
-# ─── Dependencies ─────────────────────────────────────────────────────────────
+get_filename_component(ASSETS_ROOT_ABS "${ASSETS_ROOT}" ABSOLUTE)
 
 find_package(Vulkan REQUIRED)
-find_package(X11 REQUIRED)
-find_package(PkgConfig REQUIRED) 
+
+if(UNIX AND NOT APPLE)
+  find_package(PkgConfig REQUIRED)
+  find_package(X11 REQUIRED)
+endif()
 
 include(cmake/CPM.cmake)
 
@@ -34,6 +52,7 @@ elseif(APPLE)
   set(VOLK_DEFINES VK_USE_PLATFORM_METAL_EXT)
 elseif(UNIX)
   pkg_check_modules(WAYLAND wayland-client)
+
   if(WAYLAND_FOUND)
     set(VOLK_DEFINES VK_USE_PLATFORM_WAYLAND_KHR)
   else()
@@ -47,28 +66,33 @@ CPMAddPackage(
   GIT_TAG master
   OPTIONS "VOLK_STATIC_DEFINES=${VOLK_DEFINES}"
 )
+
 CPMAddPackage(
   NAME vk-bootstrap
   GITHUB_REPOSITORY charles-lunarg/vk-bootstrap
   GIT_TAG main
 )
+
 CPMAddPackage(
   NAME entt
   GITHUB_REPOSITORY skypjack/entt
   GIT_TAG main
 )
+
 CPMAddPackage(
   NAME vma
   GITHUB_REPOSITORY GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
   GIT_TAG master
   OPTIONS "VMA_ENABLE_INSTALL OFF"
 )
+
 CPMAddPackage(
   NAME spdlog
   GITHUB_REPOSITORY gabime/spdlog
   GIT_TAG v1.x
   OPTIONS "SPDLOG_USE_STD_FORMAT ON"
 )
+
 CPMAddPackage(
   NAME glfw
   GITHUB_REPOSITORY glfw/glfw
@@ -79,6 +103,7 @@ CPMAddPackage(
     "GLFW_BUILD_EXAMPLES OFF"
     "GLFW_INSTALL OFF"
 )
+
 CPMAddPackage(
   NAME ImGui
   GITHUB_REPOSITORY ocornut/imgui
@@ -86,19 +111,7 @@ CPMAddPackage(
   GIT_SHALLOW YES
   DOWNLOAD_ONLY YES
 )
-set(TF_BUILD_CUDA CACHE FORCE "Build CUDA" OFF)
-set(TF_BUILD_TESTS CACHE FORCE "" OFF)
-set(TF_BUILD_EXAMPLES CACHE FORCE "" OFF)
-CPMAddPackage(
-  NAME taskflow
-  GITHUB_REPOSITORY taskflow/taskflow
-  GIT_TAG master
-  GIT_SHALLOW YES
-  OPTIONS
-    "TF_BUILD_CUDA OFF"
-    "TF_BUILD_TESTS OFF"
-    "TF_BUILD_EXAMPLES OFF"
-)
+
 CPMAddPackage(
   NAME ImPlot
   GITHUB_REPOSITORY epezent/implot
@@ -106,6 +119,7 @@ CPMAddPackage(
   GIT_SHALLOW NO
   DOWNLOAD_ONLY YES
 )
+
 CPMAddPackage(
   NAME ImGuizmo
   GITHUB_REPOSITORY CedricGuillemet/ImGuizmo
@@ -113,29 +127,80 @@ CPMAddPackage(
   GIT_SHALLOW NO
   DOWNLOAD_ONLY YES
 )
+
 CPMAddPackage(
   URI "gh:spnda/fastgltf@0.9.0"
   GIT_SHALLOW YES
-  OPTIONS "FASTGLTF_COMPILE_AS_CPP20 ON FASTGLTF_USE_CUSTOM_SMALLVECTOR ON FASTGLTF_DISABLE_CUSTOM_MEMORY_POOL ON"
+  OPTIONS
+    "FASTGLTF_COMPILE_AS_CPP20 ON"
+    "FASTGLTF_USE_CUSTOM_SMALLVECTOR OFF"
+    "FASTGLTF_DISABLE_CUSTOM_MEMORY_POOL ON"
 )
+
 CPMAddPackage(
   NAME efsw
   GITHUB_REPOSITORY SpartanJ/efsw
-  GIT_TAG master  
+  GIT_TAG master
 )
+
 CPMAddPackage(
   URI "gh:zeux/meshoptimizer@1.0.1"
   GIT_SHALLOW YES
 )
 
-set(GLM_ENABLE_SIMD_SSE2 CACHE FORCE "Enable SSE2 optimizations" ON)
-set(GLM_ENABLE_SIMD_SSE3 CACHE FORCE "Enable SSE3 optimizations" ON)
-set(GLM_ENABLE_SIMD_SSSE3 CACHE FORCE "Enable SSSE3 optimizations" ON)
-set(GLM_ENABLE_SIMD_SSE4_1 CACHE FORCE "Enable SSE 4.1 optimizations" ON)
-set(GLM_ENABLE_SIMD_SSE4_2 CACHE FORCE "Enable SSE 4.2 optimizations" ON)
-set(GLM_ENABLE_SIMD_AVX CACHE FORCE "Enable AVX optimizations" ON)
-set(GLM_ENABLE_SIMD_AVX2 CACHE FORCE "Enable AVX2 optimizations" ON)
-set(GLM_ENABLE_SIMD_NEON CACHE FORCE "Enable ARM NEON optimizations" ON)
+CPMAddPackage(
+  NAME ThreadPool
+  GITHUB_REPOSITORY "bshoshany/thread-pool"
+  GIT_TAG v5.1.0
+  GIT_SHALLOW YES
+  DOWNLOAD_ONLY YES
+)
+
+CPMAddPackage(
+  NAME Tracy
+  GITHUB_REPOSITORY "wolfpld/tracy"
+  GIT_TAG 2c6adfb416004f38c57094a4e796206edf89f8ff
+  OPTIONS
+        "TRACY_ENABLE ON"
+        "TRACY_ON_DEMAND ON"   # only profiles when Tracy UI is connected
+        "TRACY_NO_CALLSTACK OFF"
+        "TRACY_VK_USE_SYMBOL_TABLE ON"
+)
+
+CPMAddPackage(
+  NAME freetype
+  GITHUB_REPOSITORY freetype/freetype
+  GIT_TAG VER-2-13-3
+  OPTIONS
+    "BUILD_SHARED_LIBS OFF"
+    "FT_DISABLE_ZLIB ON"
+    "FT_DISABLE_BZIP2 ON"
+    "FT_DISABLE_PNG ON"
+    "FT_DISABLE_HARFBUZZ ON"
+    "FT_DISABLE_BROTLI ON"
+)
+
+# --- Added KTX-Software Package ---
+CPMAddPackage(
+  NAME ktx
+  GITHUB_REPOSITORY KhronosGroup/KTX-Software
+  GIT_TAG v4.4.2
+  OPTIONS
+    "KTX_FEATURE_STATIC_LIBRARY ON"
+    "KTX_FEATURE_TOOLS OFF"
+    "KTX_FEATURE_DOCS OFF"
+    "KTX_FEATURE_TESTS OFF"
+)
+
+set(GLM_ENABLE_SIMD_SSE2 ON CACHE BOOL "Enable SSE2 optimizations" FORCE)
+set(GLM_ENABLE_SIMD_SSE3 ON CACHE BOOL "Enable SSE3 optimizations" FORCE)
+set(GLM_ENABLE_SIMD_SSSE3 ON CACHE BOOL "Enable SSSE3 optimizations" FORCE)
+set(GLM_ENABLE_SIMD_SSE4_1 ON CACHE BOOL "Enable SSE 4.1 optimizations" FORCE)
+set(GLM_ENABLE_SIMD_SSE4_2 ON CACHE BOOL "Enable SSE 4.2 optimizations" FORCE)
+set(GLM_ENABLE_SIMD_AVX ON CACHE BOOL "Enable AVX optimizations" FORCE)
+set(GLM_ENABLE_SIMD_AVX2 ON CACHE BOOL "Enable AVX2 optimizations" FORCE)
+set(GLM_ENABLE_SIMD_NEON ON CACHE BOOL "Enable ARM NEON optimizations" FORCE)
+
 CPMAddPackage(
   NAME glm
   GITHUB_REPOSITORY g-truc/glm
@@ -152,8 +217,6 @@ CPMAddPackage(
     "GLM_FORCE_PURE=ON"
 )
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function(target_set_warnings target)
   if(MSVC)
     target_compile_options(${target} PRIVATE /W4 /permissive-)
@@ -167,11 +230,15 @@ set(DOCKYARD_PUBLIC_DEFINES
   VK_NO_PROTOTYPES
   GLFW_INCLUDE_VULKAN
   ${VOLK_DEFINES}
-  WIN32_LEAN_AND_MEAN
-  NOMINMAX
 )
 
-# Warnings that are false positives or irrelevant for GCC/Clang in this project
+if(WIN32)
+  list(APPEND DOCKYARD_PUBLIC_DEFINES
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+  )
+endif()
+
 set(DOCKYARD_SUPPRESSED_WARNINGS
   -Wno-nullability-completeness
   -Wno-nullability-extension
@@ -203,7 +270,12 @@ if(ImGui_SOURCE_DIR AND ImPlot_SOURCE_DIR AND ImGuizmo_SOURCE_DIR)
   set(IMGUIZMO_SRCS
     ${ImGuizmo_SOURCE_DIR}/ImGuizmo.cpp
   )
-  add_library(imgui STATIC ${IMGUI_SRCS} ${IMPLOT_SRCS} ${IMGUIZMO_SRCS})
+
+  add_library(imgui STATIC
+    ${IMGUI_SRCS}
+    ${IMPLOT_SRCS}
+    ${IMGUIZMO_SRCS}
+  )
 
   target_include_directories(imgui PUBLIC
     ${ImGui_SOURCE_DIR}
@@ -212,56 +284,74 @@ if(ImGui_SOURCE_DIR AND ImPlot_SOURCE_DIR AND ImGuizmo_SOURCE_DIR)
     ${ImGuizmo_SOURCE_DIR}
   )
 
-  find_package(Freetype REQUIRED)
-
   target_link_libraries(imgui PUBLIC
     glfw
     volk
     volk::volk_headers
-    X11::X11
-    Freetype::Freetype
+    freetype
   )
+
+  if(UNIX AND NOT APPLE)
+    target_link_libraries(imgui PUBLIC X11::X11)
+  endif()
 
   target_compile_definitions(imgui
     PUBLIC
-    GLFW_INCLUDE_NONE
-    IMGUI_IMPL_VULKAN_USE_VOLK
-    IMGUI_ENABLE_FREETYPE
+      GLFW_INCLUDE_NONE
+      IMGUI_IMPL_VULKAN_USE_VOLK
+      IMGUI_ENABLE_FREETYPE
   )
 endif()
 
-# ─── dockyard-allocator ───────────────────────────────────────────────────────
+add_library(dockyard-allocator STATIC
+  src/dockyard/allocator.cpp
+)
 
-add_library(dockyard-allocator STATIC src/dockyard/allocator.cpp)
 target_compile_options(dockyard-allocator PUBLIC
   $<$<CXX_COMPILER_ID:GNU>:${DOCKYARD_SUPPRESSED_WARNINGS}>
   $<$<CXX_COMPILER_ID:Clang>:${DOCKYARD_SUPPRESSED_WARNINGS}>
 )
-target_link_libraries(dockyard-allocator
-  PUBLIC VulkanMemoryAllocator
-  PRIVATE volk
-)
 
-# dockyard-compiler
+target_link_libraries(dockyard-allocator
+  PUBLIC
+    VulkanMemoryAllocator
+  PRIVATE
+    volk
+)
 
 find_package(slang REQUIRED CONFIG)
 
-add_library(dockyard-compiler STATIC src/dockyard/compiler.cpp)
-target_link_libraries(dockyard-compiler PRIVATE slang::slang)
-target_compile_definitions(dockyard-compiler PRIVATE
-    ${DOCKYARD_PUBLIC_DEFINES}
-    ASSETS_ROOT_PATH="${ASSETS_ROOT_ABS}"
-    $<$<CONFIG:Debug>:DOCKYARD_DEBUG>)
-target_include_directories(dockyard-compiler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_library(dockyard-compiler STATIC
+  src/dockyard/compiler.cpp
+)
 
-add_library(ThirdPartySTB STATIC "3PP/stb.c" "3PP/mikktspace.c")
+target_link_libraries(dockyard-compiler PRIVATE
+  slang::slang
+)
+
+target_compile_definitions(dockyard-compiler PRIVATE
+  ${DOCKYARD_PUBLIC_DEFINES}
+  ASSETS_ROOT_PATH="${ASSETS_ROOT_ABS}"
+  $<$<CONFIG:Debug>:DOCKYARD_DEBUG>
+)
+
+target_include_directories(dockyard-compiler PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+
+add_library(ThirdPartySTB STATIC
+  3PP/stb.c
+  3PP/mikktspace.c
+)
+
 target_compile_definitions(ThirdPartySTB PRIVATE
   STB_IMAGE_IMPLEMENTATION
-  STB_IMAGE_RESIZE_IMPLEMENTATION)
-target_include_directories(ThirdPartySTB PUBLIC "3PP")
+  STB_IMAGE_RESIZE_IMPLEMENTATION
+)
 
-
-get_filename_component(ASSETS_ROOT_ABS "${ASSETS_ROOT}" ABSOLUTE)
+target_include_directories(ThirdPartySTB PUBLIC
+  3PP
+)
 
 add_library(dockyard STATIC
   src/dockyard/context.cpp
@@ -270,7 +360,6 @@ add_library(dockyard STATIC
   src/dockyard/buffer.cpp
   src/dockyard/event_callbacks.cpp
   src/dockyard/vfs.cpp
-  src/dockyard/renderdoc.cpp
   src/dockyard/device_geometry.cpp
   src/dockyard/bindless_descriptor.cpp
   src/dockyard/texture.cpp
@@ -284,9 +373,19 @@ add_library(dockyard STATIC
   src/dockyard/components.cpp
   src/dockyard/component_traits.cpp
   src/dockyard/bindless_handle.cpp
+  src/dockyard/texture_upload_pool.cpp
 )
+dockyard_configure_renderdoc(dockyard
+  REAL_SOURCE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/dockyard/renderdoc.cpp"
+  STUB_SOURCE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/dockyard/renderdoc_stub.cpp"
+  INCLUDE_CACHE_VARIABLE
+    RENDERDOC_INCLUDE_PATH
+)
+target_enable_native_arch(dockyard)
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
-target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${ThreadPool_SOURCE_DIR}/include)
 target_compile_definitions(dockyard
   PUBLIC
     ${DOCKYARD_PUBLIC_DEFINES}
@@ -294,7 +393,10 @@ target_compile_definitions(dockyard
     $<$<CONFIG:Debug>:DOCKYARD_DEBUG>
     GLM_FORCE_LEFT_HANDED
     GLM_FORCE_DEPTH_ZERO_TO_ONE
+    TRACY_ENABLE
+    TRACY_VK_USE_SYMBOL_TABLE
 )
+
 target_link_libraries(dockyard
   PUBLIC
     dockyard-allocator
@@ -306,40 +408,41 @@ target_link_libraries(dockyard
     EnTT::EnTT
     glm::glm
     ThirdPartySTB
-    fastgltf::fastgltf
-    Taskflow::Taskflow
-    meshoptimizer
+    TracyClient
     ${CMAKE_DL_LIBS}
   PRIVATE
+    fastgltf::fastgltf
+    meshoptimizer
     efsw-static
     spdlog::spdlog
     Vulkan::Headers
+    ktx
 )
+
 target_set_warnings(dockyard)
-set_target_properties(dockyard PROPERTIES FOLDER dockyard)
 
-if(RENDERDOC_INCLUDE_PATH)
-  if(NOT EXISTS "${RENDERDOC_INCLUDE_PATH}/renderdoc_app.h")
-    message(FATAL_ERROR
-      "RENDERDOC_INCLUDE_PATH is '${RENDERDOC_INCLUDE_PATH}' "
-      "but renderdoc_app.h was not found there.")
-  endif()
-  target_include_directories(dockyard PRIVATE "${RENDERDOC_INCLUDE_PATH}")
-  message(STATUS "RenderDoc: using header from ${RENDERDOC_INCLUDE_PATH}")
-else()
-  message(STATUS "RenderDoc: using renderdoc_app.h from default include paths")
-endif()
+set_target_properties(dockyard PROPERTIES
+  FOLDER dockyard
+)
 
-# ─── dockforge ────────────────────────────────────────────────────────────────
-
-add_executable(dockforge src/dockforge/main.cpp
+add_executable(dockforge
+  src/dockforge/main.cpp
   src/dockforge/dockforge.cpp
   src/dockforge/free_camera_controller.cpp
   src/dockforge/path_camera_controller.cpp
   src/dockforge/editor_camera.cpp
   src/dockforge/editor_utils.cpp
+  src/dockforge/matrix_cache.cpp
+)
+target_enable_native_arch(dockforge)
 
-  src/dockforge/matrix_cache.cpp)
-target_link_libraries(dockforge PRIVATE dockyard imgui)
+target_link_libraries(dockforge PRIVATE
+  dockyard
+  imgui
+)
+
 target_set_warnings(dockforge)
-set_target_properties(dockforge PROPERTIES FOLDER apps)
+
+set_target_properties(dockforge PROPERTIES
+  FOLDER apps
+)

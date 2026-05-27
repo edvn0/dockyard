@@ -12,7 +12,7 @@ SamplerComparisonState comparison_samplers[];
 TextureCube<float4> sampled_cubemaps[];
 [[vk::binding(5, 0)]]
 Texture3D<float4> sampled_3d_images[];
-[[vk::binding(7, 0)]] [vk::image_format("r32f")]
+[[vk::binding(7, 0)]]
 Texture2DArray<float> sampled_2d_arrays[];
 [[vk::binding(8, 0)]]
 RWTexture2DArray<float4> rw_sub_images[];
@@ -29,6 +29,12 @@ float4 sample_2d(uint tex, SamplerHandle samp, float2 uv)
 {
     return sampled_images[NonUniformResourceIndex(tex)]
         .Sample(samplers[NonUniformResourceIndex(samp.index)], uv);
+}
+
+float4 sample_2d(uint tex, uint samp, float2 uv)
+{
+    return sampled_images[NonUniformResourceIndex(tex)]
+        .Sample(samplers[NonUniformResourceIndex(samp)], uv);
 }
 
 float4 sample_2d_lod(TextureHandle tex, SamplerHandle samp, float2 uv, float lod)

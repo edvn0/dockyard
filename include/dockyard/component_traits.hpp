@@ -44,7 +44,7 @@ using MasterComponentList =
                dy::Components::Camera, dy::Components::LocalToWorld,
                dy::Components::MeshRequest, dy::Components::ParentOf,
                dy::Components::Mesh, dy::Components::MaterialOverride,
-               dy::Components::DebugFrustum>;
+               dy::Components::DebugFrustum, dy::Components::PointLight>;
 
 template <typename Tuple, typename Fn> constexpr void for_each_type(Fn &&fn) {
   []<std::size_t... Is>(auto &&f, std::index_sequence<Is...>) {
@@ -88,6 +88,11 @@ template <> struct ComponentSerializer<Components::Transform> {
 template <> struct ComponentSerializer<Components::LocalToWorld> {
   static void save(auto &archive, const Components::LocalToWorld &);
   static void load(auto &archive, Components::LocalToWorld &);
+};
+
+template <> struct ComponentSerializer<Components::PointLight> {
+  static void save(auto &archive, const Components::PointLight &);
+  static void load(auto &archive, Components::PointLight &);
 };
 
 } // namespace dy

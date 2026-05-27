@@ -6,7 +6,7 @@
 
 namespace dy {
 
-template <typename Tag> struct Handle {
+template <typename Tag> struct alignas(4) Handle {
   static constexpr u32 k_index_bits = 20u;
   static constexpr u32 k_gen_bits = 32u - k_index_bits;
   static constexpr u32 k_index_mask = (1u << k_index_bits) - 1u;

@@ -24,14 +24,14 @@ struct Mesh {
 };
 
 struct Camera {
-  float fov_degrees = 70.0F;
-  float near_plane = 0.7F;
-  float far_plane = 1000.0F;
-  float aspect = 16.0F / 9.0F;
+  f32 fov_degrees = 70.0F;
+  f32 near_plane = 0.01F;
+  f32 far_plane = 10000.0F;
+  f32 aspect = 16.0F / 9.0F;
 
   glm::vec3 position{0.0F};
-  float yaw = 0.0F;
-  float pitch = 0.0F;
+  f32 yaw = 0.0F;
+  f32 pitch = 0.0F;
 
   std::optional<glm::vec3> forward_override = std::nullopt;
 
@@ -61,14 +61,14 @@ struct Camera {
   }
 
   auto set_aspect(u32 width, u32 height) -> void {
-    aspect = static_cast<float>(width) / static_cast<float>(height);
+    aspect = static_cast<f32>(width) / static_cast<f32>(height);
   }
 
   static auto facing_toward(const auto &from, const auto &vec_to)
-      -> std::pair<float, float> {
+      -> std::pair<f32, f32> {
     auto dir = glm::normalize(vec_to - from);
-    float p = glm::asin(glm::clamp(dir.y, -1.0F, 1.0F));
-    float y = glm::atan(dir.x, dir.z);
+    f32 p = glm::asin(glm::clamp(dir.y, -1.0F, 1.0F));
+    f32 y = glm::atan(dir.x, dir.z);
     return {y, p};
   }
 };
@@ -117,6 +117,12 @@ public:
     res = glm::scale(res, scale);
     return res;
   }
+
+  [[nodiscard]] auto matrix_without_rotation() const -> glm::mat4 {
+    glm::mat4 res = glm::translate(glm::mat4(1.0F), position);
+    res = glm::scale(res, scale);
+    return res;
+  }
 };
 
 struct LocalToWorld {
@@ -124,8 +130,9 @@ struct LocalToWorld {
 };
 
 struct MaterialOverride {
+  static constexpr auto invalid_material = ~0U;
   GPUMaterial material{};
-  u32 gpu_slot = ~0U;
+  u32 gpu_slot = invalid_material;
   bool dirty = true;
 };
 
@@ -145,18 +152,18 @@ struct DebugPlane {
   glm::vec3 v2{0.0F, 0.0F, 1.0F};
   int n1 = 10;
   int n2 = 10;
-  float s1 = 10.0F;
-  float s2 = 10.0F;
+  f32 s1 = 10.0F;
+  f32 s2 = 10.0F;
   glm::vec4 color{0.4F, 0.4F, 0.4F, 0.5F};
   glm::vec4 outline{0.8F, 0.8F, 0.8F, 1.0F};
 };
 
 struct DebugFrustum {
   struct ProjectionConfiguration {
-    float fov_degrees{30.0F};
-    float aspect{1.77F};
-    float near{0.1F};
-    float far{30.0F};
+    f32 fov_degrees{30.0F};
+    f32 aspect{1.77F};
+    f32 near_plane{0.1F};
+    f32 far_plane{30.0F};
   };
   ProjectionConfiguration projection_config{};
   glm::vec4 color{1.0F, 1.0F, 0.0F, 1.0F};
@@ -167,6 +174,12 @@ struct DebugFrustum {
 
 struct ParentOf {
   entt::entity parent{entt::null};
+};
+
+struct PointLight {
+  glm::vec3 color = {1.F, 1.F, 1.F};
+  float intensity = 1.F;
+  float radius = 10.F;
 };
 
 } // namespace dy::Components

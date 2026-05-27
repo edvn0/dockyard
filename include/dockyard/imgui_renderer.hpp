@@ -56,7 +56,6 @@ private:
   };
 
   PipelineHandle main_pipeline{};
-  VkPipelineLayout pipeline_layout{};
   SamplerHandle sampler{};
   TextureHandle font_texture{};
 

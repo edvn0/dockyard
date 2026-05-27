@@ -1,12 +1,21 @@
 #pragma once
 
-#include <cstdint>
+#include <memory>
 #include <string_view>
 
 struct RenderDocApi;
 
 struct RenderDocContext {
-  RenderDocApi *api{nullptr}; // null ↔ RenderDoc not present / not loaded
+  std::unique_ptr<RenderDocApi> api{};
+
+  RenderDocContext() = default;
+  ~RenderDocContext();
+
+  RenderDocContext(RenderDocContext &&) noexcept;
+  auto operator=(RenderDocContext &&) noexcept -> RenderDocContext &;
+
+  RenderDocContext(const RenderDocContext &) = delete;
+  auto operator=(const RenderDocContext &) -> RenderDocContext & = delete;
 
   [[nodiscard]] auto is_active() const -> bool { return api != nullptr; }
   [[nodiscard]] auto is_capturing() const -> bool;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dockyard/bindless_handle.hpp"
 #include <bitset>
 #include <dockyard/app.hpp>
 #include <dockyard/buffer.hpp>
@@ -12,10 +13,13 @@
 #include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/texture.hpp>
+#include <dockyard/texture_upload_pool.hpp>
 #include <dockyard/thread_safe_memory_cache.hpp>
 
+#include <BS_thread_pool.hpp>
 #include <deque>
 #include <glm/glm.hpp>
+#include <tracy/TracyVulkan.hpp>
 #include <type_traits>
 
 namespace dy {
@@ -49,16 +53,33 @@ struct CullingPushConstants {
   DeviceAddress depth_indirect_commands;
   DeviceAddress depth_culled_remap;
 
+  u32 total_instance_count;
+  u32 padding[3];
+};
+
+struct OcclusionCullingPushConstants {
+  DeviceAddress instance_buffer;
+  DeviceAddress frame_data;
+
   DeviceAddress forward_original_remap_buffer;
   DeviceAddress forward_instance_to_command_buffer;
   DeviceAddress forward_indirect_commands;
   DeviceAddress forward_culled_remap;
 
   u32 total_instance_count;
-  u32 padding[3];
+  u32 hiz_sampler_idx;
+  f32 hiz_width;
+  f32 hiz_height;
+  u32 hiz_mip_indices[16];
 };
 
-enum class RenderPassType { DepthPrepass, Forward, Shadow };
+struct HizPushConstants {
+  u32 src_texture_idx;
+  u32 dst_texture_idx;
+  VkExtent2D src_dimension;
+};
+
+enum class RenderPassType : u8 { DepthPrepass, Forward, Shadow };
 
 struct PendingDraw {
   const MeshLodGroup *lod_group;
@@ -70,17 +91,32 @@ struct PendingDraw {
   u32 instance_id;
 };
 
+struct FrameSubmission {
+  struct Entry {
+    u64 sort_key;
+    u32 mesh_prim_flat_index;
+    u32 material_id;
+    u32 pipeline_id;
+    glm::mat4 transform;
+    AABB aabb;
+  };
+
+  std::vector<Entry> entries;
+  std::vector<u32> sort_order;
+
+  auto reset(usize hint) -> void {
+    entries.clear();
+    sort_order.clear();
+    entries.reserve(hint);
+    sort_order.reserve(hint);
+  }
+};
+
 struct RenderPass {
   RenderPassType type;
   VmaAllocator allocator;
+  SceneRenderer &renderer;
 
-  struct DrawBucket {
-    const MeshLodGroup *lod_group;
-    u32 pipeline_id;
-    u32 material_id;
-    std::vector<u32> instance_ids;
-  };
-  std::map<u64, DrawBucket> buckets;
   struct Batch {
     u32 pipeline_id;
     u32 max_command_count;
@@ -88,6 +124,7 @@ struct RenderPass {
     u32 count_buffer_offset;
   };
   std::vector<Batch> batches;
+
   struct FrameWorkspace {
     std::unique_ptr<Buffer> indirect_buffer;
     std::unique_ptr<Buffer> count_buffer;
@@ -99,7 +136,9 @@ struct RenderPass {
 
   auto ensure_capacity(usize command_count, usize instance_count,
                        usize batch_count, usize total_global_instances) -> bool;
-  auto bake(usize) -> void;
+  auto bake(std::span<const u32> sorted_order,
+            std::span<const FrameSubmission::Entry> entries,
+            usize total_global_instances) -> void;
 };
 
 struct InstanceMetadata {
@@ -118,6 +157,7 @@ struct alignas(16) CompressedInstanceData {
   float bounding_radius;
   float padding0;
   float padding1;
+  CompressedInstanceData() = default;
   CompressedInstanceData(const glm::mat4 &, u16, f32, u8);
 };
 static_assert(sizeof(CompressedInstanceData) == 64,
@@ -129,8 +169,23 @@ struct alignas(16) CascadeData {
   float _pad[3];
 };
 
+struct FlatPrimitive {
+  u32 first_index;
+  u32 index_count;
+  i32 vertex_offset;
+  u32 default_material_id;
+  const MeshLodGroup *lod_group;
+};
+
 static constexpr auto shadow_map_cascade_count = 6;
 static constexpr u32 shadow_map_cascade_resolution = 2048;
+
+struct GPUPointLight {
+  glm::vec3 position;
+  float radius; // falloff distance
+  glm::vec3 color;
+  float intensity;
+};
 
 struct FrameUBO {
   glm::mat4 view;
@@ -150,8 +205,14 @@ struct FrameUBO {
   u32 ibl_brdf_lut_index;    // binding 0 (sampled_images)
   u32 ibl_sampler_index;     // binding 1 (samplers) — linear + mip
   u32 ibl_prefiltered_mips;  // needed for roughness LOD selection
-  u32 pad0;
-  u32 pad1; // pad to 16-byte multiple
+  u32 pad_pre_lights{};      // align point_lights array to 16-byte boundary
+
+  static constexpr u32 max_point_lights = 256;
+  std::array<GPUPointLight, max_point_lights> point_lights{};
+  u32 point_light_count;
+  u32 pad0{};
+  u32 pad1{};
+  u32 pad2{};
 };
 static_assert(sizeof(FrameUBO) % 16 == 0);
 
@@ -159,9 +220,10 @@ struct CsmResources {
   VkImage image = VK_NULL_HANDLE;
   VmaAllocation allocation = VK_NULL_HANDLE;
   VkImageView array_view = VK_NULL_HANDLE;
-  std::array<VkImageView, shadow_map_cascade_resolution> layer_views{};
+  std::array<VkImageView, shadow_map_cascade_count> layer_views{};
 
   TextureHandle bindless_handle;
+  std::array<TextureHandle, shadow_map_cascade_count> layer_handles{};
 
   void destroy(VkDevice device, VmaAllocator allocator);
 };
@@ -169,6 +231,9 @@ struct CsmResources {
 struct SceneRenderer {
   VulkanContext &ctx;
   SwapchainResources &swapchain;
+  TracyVkCtx tracy_vk_ctx{};
+
+  BS::priority_thread_pool thread_pool;
 
   RenderPass depth_prepass;
   RenderPass forward_pass;
@@ -185,12 +250,15 @@ struct SceneRenderer {
   using MeshAssetPool = Pool<MeshAssetTag, MeshAsset>;
   MeshAssetPool mesh_registry;
 
+  std::unique_ptr<pool::TextureUploadPool> texture_upload_pool{nullptr};
+
   TextureHandle dummy_texture_handle;
   SamplerHandle dummy_sampler_handle;
+  SamplerHandle hiz_sampler_handle;
   TextureHandle white_texture;
   TextureHandle normal_texture;
   TextureHandle metallic_roughness_texture;
-  TextureHandle occlusion_texture;
+  TextureHandle ambient_occlusion_texture;
   TextureHandle black_texture;
 
   TextureHandle forward_target_handle;
@@ -201,12 +269,16 @@ struct SceneRenderer {
 
   std::vector<CompressedInstanceData> global_instance_data{};
   std::vector<PendingDraw> submission_queue{};
-  std::unique_ptr<Buffer> global_instance_buffer{nullptr};
 
-  std::vector<std::unique_ptr<Buffer>> frame_ubo_buffers{};
+  FrameSubmission frame_submission;
+  std::vector<FlatPrimitive> flat_prim_table;
+
+  FrameArray<std::unique_ptr<Buffer>> global_instance_buffer{nullptr};
+  FrameArray<std::unique_ptr<Buffer>> frame_ubo_buffers{};
 
   VkPipelineLayout pipeline_layout{VK_NULL_HANDLE};
   std::unique_ptr<PipelineRegistry> pipeline_registry{nullptr};
+
   CsmResources csm{};
   struct CsmFrameData {
     std::array<CascadeData, shadow_map_cascade_count> cascades{};
@@ -225,7 +297,10 @@ struct SceneRenderer {
   PipelineHandle shadow_pipeline;
   PipelineHandle composite_pipeline;
   PipelineHandle skybox_pipeline;
-  PipelineHandle culling_pipeline;
+  PipelineHandle depth_only_culling_pipeline;
+  PipelineHandle depth_to_r32_pipeline;
+  PipelineHandle forward_occlusion_pipeline;
+  PipelineHandle hiz_downsample_pipeline;
 
   Cache<StringMap<TextureHandle>> texture_cache{};
 
@@ -235,9 +310,9 @@ struct SceneRenderer {
 
   auto initialise_bindless() -> void;
   void init_csm();
-  auto upload_texture(std::span<const u32> data, std::string_view name, u32 w,
-                      u32 h, VkFormat fmt, bool gen_mips, bool storage = true)
-      -> TextureHandle;
+  auto upload_texture(std::span<const std::byte> data, std::string_view name,
+                      u32 w, u32 h, VkFormat fmt, bool gen_mips,
+                      bool storage = true) -> TextureHandle;
 
   auto resize() -> void;
   auto destroy() -> void;
@@ -260,7 +335,8 @@ struct SceneRenderer {
     }
   };
   auto prepare(u64 frame_index, const glm::mat4 &view,
-               const glm::mat4 &projection) -> PrepareResult;
+               const glm::mat4 &projection, std::span<const GPUPointLight>)
+      -> PrepareResult;
 
   void submit(MeshAssetHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
               u32 material_id = 0U);
@@ -271,8 +347,15 @@ struct SceneRenderer {
   void render_pass(VkCommandBuffer, RenderPass &,
                    VkPipeline override_pipeline = VK_NULL_HANDLE);
   void composite_pass(VkCommandBuffer);
-  void culling_pass(VkCommandBuffer);
   void skybox_pass(VkCommandBuffer);
+  void depth_frustum_culling_pass(VkCommandBuffer);
+  auto blit_depth_to_pre_hiz_pass(VkCommandBuffer, TextureHandle depth_resolved,
+                                  TextureHandle depth_pre_hiz) -> void;
+  void build_hierarchical_depth_pyramid_pass(VkCommandBuffer,
+                                             TextureHandle input_depth_image,
+                                             TextureHandle output_pyramid);
+  void forward_occlusion_culling_pass(VkCommandBuffer,
+                                      TextureHandle hiz_target);
 
   auto register_gltf(MeshAsset &&asset) -> MeshAssetHandle;
   auto register_external_view(VkImageView view, VkImageViewType type)
@@ -297,8 +380,24 @@ struct SceneRenderer {
       return samplers.get(handle)->sampler;
     } else if constexpr (std::is_same_v<Handle, ComparisonSamplerHandle>) {
       return comparison_samplers.get(handle)->sampler;
+    } else if constexpr (std::is_same_v<Handle, MeshAssetHandle>) {
+      return mesh_registry.get(handle);
     } else {
-      static_assert(false, "Unsupported handle type"); // Valid in C++26!
+      static_assert(false, "Unsupported handle type");
+    }
+  }
+
+  template <typename Handle> auto resolve_mut(Handle handle) -> decltype(auto) {
+    if constexpr (std::is_same_v<Handle, TextureHandle>) {
+      return textures.get(handle)->texture;
+    } else if constexpr (std::is_same_v<Handle, SamplerHandle>) {
+      return samplers.get(handle)->sampler;
+    } else if constexpr (std::is_same_v<Handle, ComparisonSamplerHandle>) {
+      return comparison_samplers.get(handle)->sampler;
+    } else if constexpr (std::is_same_v<Handle, MeshAssetHandle>) {
+      return mesh_registry.get(handle);
+    } else {
+      static_assert(false, "Unsupported handle type");
     }
   }
 };

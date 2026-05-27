@@ -12,7 +12,7 @@ Buffer::Buffer(VmaAllocator alloc, VkDeviceSize size, VkBufferUsageFlags u)
 
   VmaAllocationCreateInfo alloc_ci{};
   alloc_ci.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT |
-                   VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+                   VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT;
   alloc_ci.usage = VMA_MEMORY_USAGE_AUTO;
 
   vk::check(vmaCreateBuffer(allocator, &buffer_ci, &alloc_ci, &buffer,
@@ -38,8 +38,20 @@ auto Buffer::create(VmaAllocator allocator, VkDeviceSize size,
 }
 
 Buffer::~Buffer() {
-  if (buffer)
+  if (buffer != nullptr)
     vmaDestroyBuffer(allocator, buffer, allocation);
 }
 
+auto Buffer::set_name(const std::string_view name) const -> void {
+  VmaAllocatorInfo info{};
+  vmaGetAllocatorInfo(allocator, &info);
+
+  VkDebugUtilsObjectNameInfoEXT name_info{};
+  name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+  name_info.objectType = VK_OBJECT_TYPE_BUFFER;
+  name_info.objectHandle = reinterpret_cast<u64>(buffer);
+  name_info.pObjectName = name.data();
+  vk::check(vkSetDebugUtilsObjectNameEXT(info.device, &name_info));
+  vmaSetAllocationName(allocator, allocation, name.data());
+}
 }

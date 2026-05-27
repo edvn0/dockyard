@@ -11,7 +11,7 @@ auto DebugFrustum::matrices(const glm::vec3 &position,
   const glm::mat4 view = glm::lookAtLH(position, position + forward, up);
   const glm::mat4 proj = glm::perspectiveLH_ZO(
       glm::radians(projection_config.fov_degrees), projection_config.aspect,
-      projection_config.near, projection_config.far);
+      projection_config.near_plane, projection_config.far_plane);
 
   return {view, proj};
 }

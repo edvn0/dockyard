@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <string_view>
+#include <array>
 #include <unordered_map>
 
 
@@ -16,7 +17,7 @@ template <typename T> class Badge {
   friend T;
 
 private:
-  constexpr Badge() {}
+  constexpr Badge() = default;
 };
 
 using i32 = std::int32_t;
@@ -29,7 +30,9 @@ using usize = std::size_t;
 using f32 = float;
 using f64 = double;
 
-inline constexpr u32 frames_in_flight = 3;
+inline constexpr u32 frames_in_flight = 2;
+  template<typename T>
+  using FrameArray = std::array<T, frames_in_flight>;
 
 constexpr usize next_power_of_two(usize n) {
   if (n == 0)
@@ -41,7 +44,7 @@ namespace detail {
 struct StringHash {
   using is_transparent = void;
 
-  constexpr auto operator()(std::string_view sv) const {
+  auto operator()(std::string_view sv) const {
     return std::hash<std::string_view>{}(sv);
   }
 };
@@ -49,7 +52,7 @@ struct StringHash {
 struct StringEqual {
   using is_transparent = void;
 
-  constexpr auto operator()(std::string_view lhs, std::string_view rhs) const {
+  auto operator()(std::string_view lhs, std::string_view rhs) const {
     return lhs == rhs;
   }
 };
@@ -112,5 +115,13 @@ struct NanoProfiler {
   constexpr auto clear_flag(X &flags, X flag) -> void {                        \
     flags &= static_cast<X>(~std::to_underlying(flag));                        \
   }
+
+[[nodiscard]] inline auto hash_bytes(const void *data, usize len) -> u64 {
+  const auto *p = static_cast<const u8 *>(data);
+  u64 h = 14695981039346656037ULL;
+  for (usize i = 0; i < len; ++i)
+    h = (h ^ p[i]) * 1099511628211ULL;
+  return h;
+}
 
 } // namespace dy

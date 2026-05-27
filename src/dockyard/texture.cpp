@@ -3,10 +3,13 @@
 #include <bit>
 #include <cassert>
 #include <cstring>
+#include <string>
 
 #include <dockyard/app.hpp>
 #include <dockyard/context.hpp>
 #include <dockyard/vfs.hpp>
+
+#include <dockyard/texture_upload_pool.hpp>
 
 #include <stb_image.h>
 
@@ -39,7 +42,14 @@ auto bytes_per_texel(VkFormat fmt) -> u32 {
     return 8;
   case VK_FORMAT_R32G32B32A32_SFLOAT:
     return 16;
+  case VK_FORMAT_BC7_SRGB_BLOCK:
+  case VK_FORMAT_BC7_UNORM_BLOCK:
+    return 16; // 16 bytes per 4x4 block = 1 byte per pixel
+  case VK_FORMAT_BC5_UNORM_BLOCK:
+    return 16; // 16 bytes per 4x4 block = 1 byte per pixel (2 channels)
   default:
+    info("Warning: bytes_per_texel: unknown format {}, defaulting to 4",
+         std::to_underlying(fmt));
     assert(false && "bytes_per_texel: unknown format");
     return 4;
   }
@@ -151,18 +161,71 @@ auto blit_mip(VkCommandBuffer cmd, VkImage image, VkExtent2D src_extent,
   return dst_extent;
 }
 
+auto set_view_debug_name(VkDevice device, VkImageView view,
+                         const std::string_view name) -> void {
+  VkDebugUtilsObjectNameInfoEXT name_info{};
+  name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
+  name_info.objectType = VK_OBJECT_TYPE_IMAGE_VIEW;
+  name_info.objectHandle = std::bit_cast<u64>(view);
+  name_info.pObjectName = name.data();
+  vkSetDebugUtilsObjectNameEXT(device, &name_info);
+}
+
 } // namespace
 
 auto Texture::destroy(const VulkanContext &ctx, SubImagePool *sub_images)
     -> void {
-  // Release pool slots immediately — CPU only, no GPU sync needed
   if (sub_images != nullptr) {
     for (auto h : sub_handles)
       sub_images->destroy(h);
   }
   sub_handles.clear();
 
-  // GPU resources go through DeletionQueue as before
+  auto image_ = this->image;
+  auto sampled = this->sampled_view;
+  auto storage = this->storage_view;
+  auto alloc = this->allocation;
+  auto &&mv = std::move(this->sub_views);
+
+  DeletionQueue::the().push([o = this->owned, dev = ctx.device,
+                             allocator = ctx.allocator, image_, sampled,
+                             storage, alloc, mv = std::move(mv)]() mutable {
+    for (auto &v : mv)
+      vkDestroyImageView(dev, v, nullptr);
+
+    if (o) {
+      vkDestroyImageView(dev, sampled, nullptr);
+      if (storage != sampled)
+        vkDestroyImageView(dev, storage, nullptr);
+      vmaDestroyImage(allocator, image_, alloc);
+    }
+  });
+
+  *this = {};
+}
+
+auto Texture::destroy(const VulkanContext& ctx,
+    TexturePool* mip_layer_image_pool) -> void {
+    // Destroy pool slots (for bindless index reclamation)
+    if (mip_layer_image_pool != nullptr) {
+        for (auto h : mip_layer_handles)
+            mip_layer_image_pool->destroy(h);
+    }
+    mip_layer_handles.clear();
+
+    if (!mip_layer_views.empty()) {
+        DeletionQueue::the().push(
+            [dev = ctx.device, views = std::move(mip_layer_views)]() {
+                for (auto v : views)
+                    if (v != VK_NULL_HANDLE)
+                        vkDestroyImageView(dev, v, nullptr);
+            });
+    }
+
+    destroy(ctx);
+}
+
+void Texture::destroy(const VulkanContext &ctx) {
   auto image_ = this->image;
   auto sampled = this->sampled_view;
   auto storage = this->storage_view;
@@ -188,18 +251,20 @@ auto Texture::destroy(const VulkanContext &ctx, SubImagePool *sub_images)
 
 auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
                      u32 height, VkFormat format, VkImageUsageFlags usage,
-                     VkImageAspectFlags aspect, VkSampleCountFlagBits samples)
-    -> Texture {
+                     VkImageAspectFlags aspect, VkSampleCountFlagBits samples,
+                     u32 mips) -> Texture {
   Texture rt{};
   rt.format = format;
   rt.extent = {.width = width, .height = height};
+  rt.mip_levels = mips;
+  rt.name = name;
 
   VkImageCreateInfo image_info{};
   image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
   image_info.imageType = VK_IMAGE_TYPE_2D;
   image_info.format = format;
   image_info.extent = {.width = width, .height = height, .depth = 1};
-  image_info.mipLevels = 1;
+  image_info.mipLevels = mips;
   image_info.arrayLayers = 1;
   image_info.samples = samples;
   image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -240,7 +305,7 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
   view_info.format = format;
   view_info.subresourceRange.aspectMask = aspect;
   view_info.subresourceRange.baseMipLevel = 0;
-  view_info.subresourceRange.levelCount = 1;
+  view_info.subresourceRange.levelCount = mips;
   view_info.subresourceRange.baseArrayLayer = 0;
   view_info.subresourceRange.layerCount = 1;
 
@@ -249,8 +314,22 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
       result != VK_SUCCESS) {
     std::abort();
   }
+  set_view_debug_name(ctx.device, rt.sampled_view,
+                      std::string(name) + "_sampled_view");
 
-  ctx.transition_to_general(rt.image, aspect, 1, 1);
+  if ((usage & VK_IMAGE_USAGE_STORAGE_BIT) != 0U) {
+    auto storage_view_info = view_info;
+    storage_view_info.subresourceRange.levelCount = 1;
+    if (const auto result = vkCreateImageView(ctx.device, &storage_view_info,
+                                              nullptr, &rt.storage_view);
+        result != VK_SUCCESS) {
+      std::abort();
+    }
+    set_view_debug_name(ctx.device, rt.storage_view,
+                        std::string(name) + "_storage_view");
+  }
+
+  ctx.transition_to_general(rt.image, aspect, mips, 1);
 
   return rt;
 }
@@ -271,9 +350,9 @@ auto Texture::load_hdr_texture(const VulkanContext &ctx, const VFSPath &path)
     std::abort();
   }
 
-  const auto byte_size = static_cast<usize>(width) * height * 4 * sizeof(u32);
-  const std::span<const u32> bytes{reinterpret_cast<const u32 *>(data),
-                                   byte_size};
+  const auto byte_size = static_cast<usize>(width) * height * 4 * sizeof(float);
+  const std::span<const std::byte> bytes{
+      reinterpret_cast<const std::byte *>(data), byte_size};
 
   auto tex = Texture::from_bytes(ctx, real_path.filename().string(),
                                  {
@@ -291,11 +370,43 @@ auto Texture::load_hdr_texture(const VulkanContext &ctx, const VFSPath &path)
 
 auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
                          const CreateInfo &ci) -> Texture {
-  assert(!ci.bytes.empty() && ci.width > 0 && ci.height > 0);
+  assert((!ci.bytes.empty() || !ci.mips.empty()) && ci.width > 0 &&
+         ci.height > 0);
 
-  const u32 mips = ci.generate_mips ? mip_count(ci.width, ci.height) : 1u;
-  const VkDeviceSize byte_size = static_cast<VkDeviceSize>(ci.width) *
-                                 ci.height * bytes_per_texel(ci.format);
+  const bool has_custom_mips = !ci.mips.empty();
+
+  u32 mips = 1u;
+  VkDeviceSize total_byte_size = 0;
+  const u32 bytes_per_pixel = bytes_per_texel(ci.format);
+
+  struct MipCopyRegion {
+    VkDeviceSize buffer_offset;
+    u32 width;
+    u32 height;
+  };
+  std::vector<MipCopyRegion> copy_regions;
+
+  if (has_custom_mips) {
+    mips = static_cast<u32>(ci.mips.size() + 1);
+    copy_regions.reserve(mips);
+
+    total_byte_size =
+        static_cast<VkDeviceSize>(ci.width) * ci.height * bytes_per_pixel;
+    copy_regions.push_back({0, ci.width, ci.height});
+
+    VkDeviceSize current_offset = total_byte_size;
+    for (const auto &mip : ci.mips) {
+      copy_regions.push_back({current_offset, mip.width, mip.height});
+      current_offset +=
+          static_cast<VkDeviceSize>(mip.width) * mip.height * bytes_per_pixel;
+    }
+    total_byte_size = current_offset;
+  } else {
+    mips = ci.generate_mips ? mip_count(ci.width, ci.height) : 1u;
+    total_byte_size =
+        static_cast<VkDeviceSize>(ci.width) * ci.height * bytes_per_pixel;
+    copy_regions.push_back({0, ci.width, ci.height});
+  }
 
   const VmaAllocationCreateInfo staging_alloc_ci{
       .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
@@ -304,7 +415,7 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
   };
   const VkBufferCreateInfo staging_buf_ci{
       .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-      .size = byte_size,
+      .size = total_byte_size,
       .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
   };
   VkBuffer staging_buf{};
@@ -312,12 +423,24 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
   VmaAllocationInfo staging_info{};
   vmaCreateBuffer(ctx.allocator, &staging_buf_ci, &staging_alloc_ci,
                   &staging_buf, &staging_alloc, &staging_info);
-  std::memcpy(staging_info.pMappedData, ci.bytes.data(), byte_size);
+
+  u8 *dst_ptr = static_cast<u8 *>(staging_info.pMappedData);
+  if (has_custom_mips) {
+    std::memcpy(dst_ptr + copy_regions[0].buffer_offset, ci.bytes.data(),
+                ci.bytes.size_bytes());
+    for (size_t i = 0; i < ci.mips.size(); ++i) {
+      std::memcpy(dst_ptr + copy_regions[i + 1].buffer_offset,
+                  ci.mips[i].pixels.data(),
+                  ci.mips[i].pixels.size() * sizeof(std::byte));
+    }
+  } else {
+    std::memcpy(dst_ptr, ci.bytes.data(), total_byte_size);
+  }
   vmaFlushAllocation(ctx.allocator, staging_alloc, 0, VK_WHOLE_SIZE);
 
   VkImageUsageFlags usage =
       VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-  if (ci.generate_mips)
+  if (ci.generate_mips && !has_custom_mips)
     usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
   if (ci.storage_view)
     usage |= VK_IMAGE_USAGE_STORAGE_BIT;
@@ -343,59 +466,74 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
   tex.format = ci.format;
   tex.extent = {.width = ci.width, .height = ci.height};
   tex.mip_levels = mips;
+  tex.name = name;
 
   vk::check(vmaCreateImage(ctx.allocator, &image_ci, &image_alloc_ci,
                            &tex.image, &tex.allocation, &tex.allocation_info));
-  vmaSetAllocationName(ctx.allocator, tex.allocation, name.data());
-  VkDebugUtilsObjectNameInfoEXT name_info{};
-  name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
-  name_info.pObjectName = name.data();
-  name_info.objectType = VK_OBJECT_TYPE_IMAGE;
-  name_info.objectHandle = std::bit_cast<u64>(tex.image);
+  vmaSetAllocationName(ctx.allocator, tex.allocation, tex.name.c_str());
+
+  VkDebugUtilsObjectNameInfoEXT name_info{
+      .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+      .objectType = VK_OBJECT_TYPE_IMAGE,
+      .objectHandle = std::bit_cast<u64>(tex.image),
+      .pObjectName = tex.name.c_str(),
+  };
   vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info);
 
-  ctx.one_time_submit([&t = tex, &ci, &staging_buf, mips](const auto &cmd) {
-    // Whole image: UNDEFINED -> TRANSFER_DST
-    image_barrier(cmd, t.image, VK_IMAGE_LAYOUT_UNDEFINED,
-                  VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                  VK_PIPELINE_STAGE_2_NONE, VK_ACCESS_2_NONE,
-                  VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-                  VK_ACCESS_2_TRANSFER_WRITE_BIT);
+  ctx.one_time_submit([&t = tex, &staging_buf, &copy_regions, mips,
+                       has_custom_mips, &ci](const auto &cmd) {
+    image_barrier(
+        cmd, t.image, VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_PIPELINE_STAGE_2_NONE,
+        VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+        VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 0, mips);
 
-    // Copy buffer -> mip 0
-    const VkBufferImageCopy2 copy{
-        .sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
-        .bufferOffset = 0,
-        .bufferRowLength = 0,
-        .bufferImageHeight = 0,
-        .imageSubresource =
-            {
-                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-                .mipLevel = 0,
-                .baseArrayLayer = 0,
-                .layerCount = 1,
-            },
-        .imageOffset = {.x = 0, .y = 0, .z = 0},
-        .imageExtent = {.width = ci.width, .height = ci.height, .depth = 1},
-    };
+    std::vector<VkBufferImageCopy2> copies;
+    copies.reserve(copy_regions.size());
+
+    for (u32 m = 0; m < copy_regions.size(); ++m) {
+      copies.push_back({
+          .sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
+          .bufferOffset = copy_regions[m].buffer_offset,
+          .bufferRowLength = 0,
+          .bufferImageHeight = 0,
+          .imageSubresource =
+              {
+                  .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                  .mipLevel = m,
+                  .baseArrayLayer = 0,
+                  .layerCount = 1,
+              },
+          .imageOffset = {.x = 0, .y = 0, .z = 0},
+          .imageExtent = {.width = copy_regions[m].width,
+                          .height = copy_regions[m].height,
+                          .depth = 1},
+      });
+    }
+
     const VkCopyBufferToImageInfo2 copy_info{
         .sType = VK_STRUCTURE_TYPE_COPY_BUFFER_TO_IMAGE_INFO_2,
         .srcBuffer = staging_buf,
         .dstImage = t.image,
         .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        .regionCount = 1,
-        .pRegions = &copy,
+        .regionCount = static_cast<u32>(copies.size()),
+        .pRegions = copies.data(),
     };
     vkCmdCopyBufferToImage2(cmd, &copy_info);
 
-    if (ci.generate_mips && mips > 1) {
+    if (has_custom_mips) {
+      image_barrier(cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+                    VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 0,
+                    mips);
+    } else if (ci.generate_mips && mips > 1) {
       VkExtent2D src_extent{.width = ci.width, .height = ci.height};
       for (u32 m = 0; m < mips - 1; ++m) {
         src_extent = blit_mip(cmd, t.image, src_extent, m);
       }
-      // Transition all src mips (0..mips-2: TRANSFER_SRC) + last mip
-      // (TRANSFER_DST)
-      // -> SHADER_READ_ONLY in one barrier each group.
       image_barrier(cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                     VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     VK_ACCESS_2_TRANSFER_READ_BIT,
@@ -412,7 +550,6 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
                     VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
                     mips - 1, 1);
     } else {
-      // No mips: single barrier for mip 0
       image_barrier(cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -424,9 +561,6 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
 
   vmaDestroyBuffer(ctx.allocator, staging_buf, staging_alloc);
 
-  // ------------------------------------------------------------------
-  // 4. Image views
-  // ------------------------------------------------------------------
   const VkImageViewCreateInfo view_ci{
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = tex.image,
@@ -442,12 +576,15 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
           },
   };
   vkCreateImageView(ctx.device, &view_ci, nullptr, &tex.sampled_view);
+  set_view_debug_name(ctx.device, tex.sampled_view,
+                      std::format("{}_sampled_view", tex.name));
 
   if (ci.storage_view) {
-    // Storage views must address a single mip level (base 0).
     auto storage_view_ci = view_ci;
     storage_view_ci.subresourceRange.levelCount = 1;
     vkCreateImageView(ctx.device, &storage_view_ci, nullptr, &tex.storage_view);
+    set_view_debug_name(ctx.device, tex.storage_view,
+                        std::format("{}_storage_view", tex.name));
   }
 
   return tex;
@@ -460,6 +597,7 @@ auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
   tex.extent = {.width = ci.size, .height = ci.size};
   tex.mip_levels = ci.mip_levels;
   tex.array_layers = 6U;
+  tex.name = name;
 
   const VkImageCreateInfo image_ci{
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -486,7 +624,7 @@ auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
 
   vk::check(vmaCreateImage(ctx.allocator, &image_ci, &alloc_ci, &tex.image,
                            &tex.allocation, &tex.allocation_info));
-  vmaSetAllocationName(ctx.allocator, tex.allocation, name.data());
+  vmaSetAllocationName(ctx.allocator, tex.allocation, tex.name.c_str());
   VkDebugUtilsObjectNameInfoEXT name_info{};
   name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
   name_info.pObjectName = name.data();
@@ -497,7 +635,7 @@ auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
   const VkImageViewCreateInfo view_ci{
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = tex.image,
-      .viewType = VK_IMAGE_VIEW_TYPE_CUBE, // ← key
+      .viewType = VK_IMAGE_VIEW_TYPE_CUBE,
       .format = ci.format,
       .subresourceRange =
           {
@@ -509,6 +647,8 @@ auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
           },
   };
   vkCreateImageView(ctx.device, &view_ci, nullptr, &tex.sampled_view);
+  set_view_debug_name(ctx.device, tex.sampled_view,
+                      std::format("{}_sampled_cube_view", tex.name));
 
   if (ci.storage_view) {
     auto s_ci = view_ci;
@@ -516,6 +656,8 @@ auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
     s_ci.subresourceRange.levelCount = 1;
     s_ci.subresourceRange.layerCount = 6;
     vkCreateImageView(ctx.device, &s_ci, nullptr, &tex.storage_view);
+    set_view_debug_name(ctx.device, tex.storage_view,
+                        std::format("{}_storage_array_view", tex.name));
   }
 
   ctx.one_time_submit([&tex, &ci](VkCommandBuffer cmd) {
@@ -582,6 +724,10 @@ auto Texture::register_sub_views(const VulkanContext &ctx,
       vk::check(
           vkCreateImageView(ctx.device, &view_ci, nullptr, &sub_views[idx]));
 
+      set_view_debug_name(
+          ctx.device, sub_views[idx],
+          std::format("subimage_pool_{}_view_m{}_l{}", name, mip, base_layer));
+
       const auto h = sub_images.create(SubImageEntry{
           .view = sub_views[idx],
           .mip_level = mip,
@@ -593,6 +739,75 @@ auto Texture::register_sub_views(const VulkanContext &ctx,
       bindless.mark_dirty();
     }
   }
+}
+
+auto Texture::register_sub_views(const VulkanContext &ctx,
+                                 TexturePool &texture_pool,
+                                 BindlessSet &bindless, SubViewDesc desc)
+    -> void {
+  assert(mip_layer_handles.empty());
+  assert((array_layers % desc.layer_count) == 0u &&
+         "layer_count must evenly divide array_layers");
+
+  const u32 views_per_mip = array_layers / desc.layer_count;
+  const u32 total = mip_levels * views_per_mip;
+  mip_layer_handles.resize(total);
+
+  const VkImageAspectFlags format_aspect =
+      (format == VK_FORMAT_D32_SFLOAT || format == VK_FORMAT_D16_UNORM)
+          ? VK_IMAGE_ASPECT_DEPTH_BIT
+          : VK_IMAGE_ASPECT_COLOR_BIT;
+
+  for (u32 mip = 0u; mip < mip_levels; ++mip) {
+    for (u32 v = 0u; v < views_per_mip; ++v) {
+      const u32 idx = (mip * views_per_mip) + v;
+      const u32 base_layer = v * desc.layer_count;
+
+      const VkImageViewCreateInfo view_ci{
+          .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+          .image = image,
+          .viewType = desc.view_type,
+          .format = format,
+          .subresourceRange =
+              {
+                  .aspectMask = format_aspect,
+                  .baseMipLevel = mip,
+                  .levelCount = 1U,
+                  .baseArrayLayer = base_layer,
+                  .layerCount = desc.layer_count,
+              },
+      };
+
+      VkImageView sub_view = VK_NULL_HANDLE;
+      vk::check(vkCreateImageView(ctx.device, &view_ci, nullptr, &sub_view));
+
+      set_view_debug_name(ctx.device, sub_view,
+                          std::format("texture_pool_{}_mip={}_layer={}", name,
+                                      mip, base_layer));
+
+      mip_layer_views.push_back(sub_view);
+
+      Texture sub_tex{
+          .image = image,
+          .sampled_view = sub_view,
+          .storage_view = sub_view,
+          .format = format,
+          .extent = {.width = std::max(1U, extent.width >> mip),
+                     .height = std::max(1U, extent.height >> mip)},
+          .mip_levels = 1U,
+          .array_layers = desc.layer_count,
+          .owned = false,
+      };
+
+      const auto h = texture_pool.create(TextureEntry{
+          .texture = std::move(sub_tex),
+          .sampled_view_type = desc.view_type,
+      });
+
+      mip_layer_handles[idx] = h;
+    }
+  }
+  bindless.mark_dirty();
 }
 
 } // namespace dy

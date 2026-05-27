@@ -23,6 +23,8 @@
 #include <entt/entt.hpp>
 #include <vk_mem_alloc.h>
 
+#include <tracy/Tracy.hpp>
+
 struct TimeStep {
   double last_time{glfwGetTime()};
   float step() {
@@ -97,12 +99,11 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   int width = find_or_default("--width=", 1280);
   int height = find_or_default("--height=", 720);
   window = glfwCreateWindow(width, height, "Dockyard", nullptr, nullptr);
-  if (!window) {
+  if (window == nullptr) {
     glfw_error_logger();
     return -1;
   }
   DEFER(glfwDestroyWindow(window));
-  glfwHideWindow(window);
 
   entt::dispatcher dispatcher{};
   install_glfw_callbacks(window, dispatcher);
@@ -132,7 +133,6 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
                 if (data->objectCount > 0) {
                   object_names = " | Objects: ";
                   for (u32 i = 0; i < data->objectCount; ++i) {
-                    // pObjectName may be null if the application didn't set it
                     const char *name = data->pObjects[i].pObjectName;
                     object_names += (name ? name : "<unnamed>");
                     if (i < data->objectCount - 1)
@@ -216,10 +216,16 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     init(init_context);
   }
 
-  glfwShowWindow(window);
-
   TimeStep ts{};
   while (running && (glfwWindowShouldClose(window) != VK_TRUE)) {
+    auto &frame = frames.frame_sync[frame_index];
+
+    if (ctx.caps.present_wait && frame.past_presentation_id > 0) {
+      vkWaitForPresentKHR(ctx.device, sc.swapchain.swapchain,
+                          frame.past_presentation_id, UINT64_MAX);
+    } else {
+      vkWaitForFences(ctx.device, 1, &frame.in_flight_fence, VK_TRUE, UINT64_MAX);
+    }
     glfwPollEvents();
     poll_pending_events();
     dispatcher.update();
@@ -230,12 +236,11 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
       continue;
 
     if (render_listener.needs_recreation) {
+      vkDeviceWaitIdle(ctx.device);
       App::recreate_swapchain_manually(window, render_listener);
       continue;
     }
 
-    auto &frame = frames.frame_sync[frame_index];
-    vkWaitForFences(ctx.device, 1, &frame.in_flight_fence, VK_TRUE, UINT64_MAX);
     DeletionQueue::the().begin_frame(frame_index);
 
     auto maybe_index = acquire_swapchain_image(sc, frame);
@@ -244,12 +249,6 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
       continue;
     }
     auto index = std::move(maybe_index).value();
-
-    if (const auto last_use = image_last_frame_id[index]; last_use > 0) {
-      constexpr auto delay =
-          std::chrono::nanoseconds(std::chrono::milliseconds(16)).count();
-      vkWaitForPresentKHR(ctx.device, sc.swapchain.swapchain, last_use, delay);
-    }
 
     auto &image = sc.image_sync[index];
     auto &cb = frames.command_buffers[frame_index];
@@ -283,21 +282,24 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     if (!submit_to_queue(ctx, cb.command_buffer, frame, image, end_val))
       return -1;
 
-    VkPresentIdKHR present_id_info{
-        .sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR,
-        .pNext = nullptr,
-        .swapchainCount = 1,
-        .pPresentIds = &frame_id,
-    };
-
     VkPresentInfoKHR present_info{};
     present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    present_info.pNext = &present_id_info;
     present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores = &image.render_finished_semaphore;
-    present_info.swapchainCount = 1;
-    present_info.pSwapchains = &sc.swapchain.swapchain;
-    present_info.pImageIndices = &index;
+    present_info.pWaitSemaphores    = &image.render_finished_semaphore;
+    present_info.swapchainCount     = 1;
+    present_info.pSwapchains        = &sc.swapchain.swapchain;
+    present_info.pImageIndices      = &index;
+
+    VkPresentIdKHR present_id_info{};
+    if (ctx.caps.present_wait) {
+      present_id_info.sType          = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
+      present_id_info.swapchainCount = 1;
+      present_id_info.pPresentIds    = &frame_id;
+      present_info.pNext             = &present_id_info;
+    }
+
+    frame.past_presentation_id = ctx.caps.present_wait ? frame_id : 0;
+
 
     const auto present_result =
         vkQueuePresentKHR(ctx.present_queue(), &present_info);
@@ -312,7 +314,15 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     frame_id++;
     last_frame_index = frame_index;
     frame_index = (frame_index + 1) % frames_in_flight;
+
+    FrameMark;
   }
+
+  char *stats_json = nullptr;
+  vmaBuildStatsString(ctx.allocator, &stats_json, VK_TRUE);
+  std::ofstream f("vma_stats.json");
+  f << stats_json;
+  vmaFreeStatsString(ctx.allocator, stats_json);
 
   vkDeviceWaitIdle(ctx.device);
   destroy();
@@ -355,7 +365,7 @@ auto acquire_swapchain_image(const SwapchainResources &sc,
     error("Failed to acquire swapchain image: {}", result);
     return std::nullopt;
   }
-  return {index};
+  return std::optional<u32>(std::in_place, index);
 }
 
 auto submit_to_queue(const VulkanContext &ctx, VkCommandBuffer command_buffer,

@@ -19,7 +19,7 @@ public:
 
   ShaderWatcher(std::filesystem::path real_path, std::string_view mount,
                 ChangeCallback on_change);
-  ~ShaderWatcher();
+  ~ShaderWatcher() override;
 
   ShaderWatcher(const ShaderWatcher &) = delete;
   ShaderWatcher &operator=(const ShaderWatcher &) = delete;

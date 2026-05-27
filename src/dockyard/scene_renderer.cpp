@@ -1,17 +1,22 @@
-#include "glm/ext/matrix_float4x4.hpp"
+#include <algorithm>
 #include <dockyard/scene_renderer.hpp>
 
 #include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
 #include <dockyard/shader_watcher.hpp>
+#include <dockyard/texture_upload_pool.hpp>
 #include <dockyard/vfs.hpp>
 
 #include <atomic>
 #include <execution>
 #include <limits>
+#include <numeric>
 #include <ranges>
 
+#include <glm/ext/matrix_float4x4.hpp>
 #include <glm/gtc/packing.hpp>
+
+#include <tracy/Tracy.hpp>
 
 namespace dy {
 
@@ -19,6 +24,7 @@ namespace {
 
 auto compute_cascade_splits(float near_z, float far_z, float lambda = 0.85f)
     -> std::array<float, shadow_map_cascade_count> {
+  ZoneScopedNC("compute_cascade_splits", 0xAAAAAA);
   std::array<float, shadow_map_cascade_count> splits{};
   const float range = far_z - near_z;
   const float ratio = far_z / near_z;
@@ -33,15 +39,11 @@ auto compute_cascade_splits(float near_z, float far_z, float lambda = 0.85f)
   return splits;
 }
 
-// Generic — works for both standard and reverse-Z projections.
-// Reverse-Z: near_z -> 1.0, far_z -> 0.0.
 auto split_to_ndc_z(const glm::mat4 &proj, float view_z) -> float {
   const glm::vec4 clip = proj * glm::vec4(0.0F, 0.0F, view_z, 1.0F);
   return clip.z / clip.w;
 }
 
-// z_near_ndc / z_far_ndc are in the camera's NDC convention.
-// Reverse-Z: pass z_near_ndc=1.0, z_far_ndc<1.0 for each cascade.
 auto frustum_corners_world(const glm::mat4 &inv_view_proj, float z_near_ndc,
                            float z_far_ndc) -> std::array<glm::vec3, 8> {
   const glm::vec4 ndc[8] = {
@@ -60,22 +62,15 @@ auto frustum_corners_world(const glm::mat4 &inv_view_proj, float z_near_ndc,
   return corners;
 }
 
-// light_toward_sun: unit vector pointing *toward* the sun.
-// This is the L vector used in dot(N, L) diffuse lighting — i.e. (0, 1, 0)
-// for a sun directly overhead.
-//
-// Shadow maps use standard (non-reversed) Z.  Ortho projections do not have
-// the precision cliffs that motivate reverse-Z, and standard Z keeps the
-// sampler comparison op straightforward (VK_COMPARE_OP_LESS_OR_EQUAL).
 auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
                      float prev_split_ndc, float curr_split_ndc,
                      float curr_split_view, const glm::vec3 &light_toward_sun)
     -> CascadeData {
+  ZoneScopedNC("compute_cascade", 0xFFAA00);
   const glm::mat4 inv_view_proj = glm::inverse(camera_proj * camera_view);
   const auto corners =
       frustum_corners_world(inv_view_proj, prev_split_ndc, curr_split_ndc);
 
-  // --- 1. Minimum bounding sphere ---
   glm::vec3 center(0.0F);
   for (const auto &c : corners)
     center += c;
@@ -85,15 +80,8 @@ auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
   for (const auto &c : corners)
     radius = std::max(radius, glm::distance(c, center));
 
-  // Snap radius to texel grid to prevent cascade size shimmer.
   radius = std::ceil(radius * 16.0F) / 16.0F;
 
-  // --- 2. Light-view matrix ---
-  // Eye is placed behind the scene *in the direction of the sun*, so the
-  // camera looks from the sun's side toward the scene (correct orientation).
-  //
-  // z_extent is how far the eye is from center in light-view space.
-  // The 500-unit margin buys depth for shadow casters behind the view frustum.
   const glm::vec3 up = std::abs(light_toward_sun.y) > 0.99f
                            ? glm::vec3(0.0F, 0.0F, 1.0F)
                            : glm::vec3(0.0F, 1.0F, 0.0F);
@@ -101,10 +89,6 @@ auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
   const glm::vec3 eye = center + light_toward_sun * z_extent;
   glm::mat4 light_view = glm::lookAtLH(eye, center, up);
 
-  // --- 3. Texel snapping ---
-  // Transform the world origin into light-view "texel" space, round it, and
-  // apply the residual as a translation correction.  This keeps the shadow
-  // texel grid stationary as the camera moves, eliminating edge crawl.
   const float texels_per_unit =
       static_cast<float>(shadow_map_cascade_resolution) / (radius * 2.0F);
   glm::vec4 shadow_origin = light_view * glm::vec4(0.0F, 0.0F, 0.0F, 1.0F);
@@ -112,24 +96,16 @@ auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
 
   const glm::vec4 rounded = glm::round(shadow_origin);
   glm::vec4 offset = (rounded - shadow_origin) / texels_per_unit;
-  offset.z = 0.0F; // never shift depth — that would break near/far
+  offset.z = 0.0F;
   offset.w = 0.0F;
   light_view[3] += offset;
 
-  // --- 4. Orthographic projection ---
-  // In light-view space the eye is at the origin.  The bounding sphere center
-  // is at Z = z_extent (along +Z, since lookAtLH makes +Z point toward center).
-  // The sphere occupies [z_extent - radius, z_extent + radius] on the Z axis.
-  //
-  // We extend near/far by caster_margin to capture shadow casters that lie
-  // outside the camera frustum but still cast into it.
   const float caster_margin = 500.0F;
   const float ortho_near = z_extent - radius - caster_margin;
   const float ortho_far = z_extent + radius + caster_margin;
 
-  const glm::mat4 light_proj = glm::orthoLH_ZO(-radius, radius, // left, right
-                                               -radius, radius, // bottom, top
-                                               ortho_near, ortho_far);
+  const glm::mat4 light_proj =
+      glm::orthoLH_ZO(-radius, radius, -radius, radius, ortho_near, ortho_far);
 
   return {
       .view_proj = light_proj * light_view,
@@ -139,6 +115,7 @@ auto compute_cascade(const glm::mat4 &camera_view, const glm::mat4 &camera_proj,
 
 auto make_default_override_materials(u32) -> std::vector<GPUMaterial>;
 auto grow_pool(SceneRenderer &renderer) -> u32 {
+  ZoneScopedNC("grow_pool", 0xFF4500);
   const u32 old_capacity = renderer.override_pool.capacity;
   const u32 new_capacity = old_capacity * 2;
 
@@ -173,6 +150,7 @@ auto grow_pool(SceneRenderer &renderer) -> u32 {
 }
 
 auto make_default_override_materials(u32 count) -> std::vector<GPUMaterial> {
+  ZoneScopedNC("make_default_override_materials", 0x888888);
   std::vector<GPUMaterial> output(count);
   for (auto &material : output) {
     material.albedo_factor[0] = material.albedo_factor[1] =
@@ -180,7 +158,7 @@ auto make_default_override_materials(u32 count) -> std::vector<GPUMaterial> {
     material.roughness_factor = 1.F;
     material.normal_scale = 1.F;
     material.occlusion_strength = 1.F;
-    material.albedo_index = 0U; // white fallback
+    material.albedo_index = 0U;
   }
   return output;
 }
@@ -216,7 +194,30 @@ auto create_main_pipeline_layout(VkDevice device,
 }
 
 auto SceneRenderer::register_gltf(MeshAsset &&asset) -> MeshAssetHandle {
-  return mesh_registry.create(std::move(asset));
+  ZoneScopedNC("SceneRenderer::register_gltf", 0x00BFFF);
+  for (auto &node : asset.nodes) {
+    for (auto &prim : node.primitives) {
+      prim.flat_index = static_cast<u32>(flat_prim_table.size());
+      flat_prim_table.push_back({
+          .first_index = prim.lod_group.lods[0].first_index,
+          .index_count = prim.lod_group.lods[0].index_count,
+          .vertex_offset = prim.lod_group.vertex_offset,
+          .default_material_id = prim.material_id,
+          .lod_group = nullptr,
+      });
+    }
+  }
+
+  auto handle = mesh_registry.create(std::move(asset));
+
+  auto *stored = mesh_registry.get(handle);
+  for (auto &node : stored->nodes) {
+    for (auto &prim : node.primitives) {
+      flat_prim_table[prim.flat_index].lod_group = &prim.lod_group;
+    }
+  }
+
+  return handle;
 }
 
 auto SceneRenderer::register_external_view(VkImageView view,
@@ -275,20 +276,27 @@ auto SceneRenderer::get_material_view_mut(const MeshAsset &mesh) const
 }
 
 auto SceneRenderer::remove_override(Entity entity) -> void {
+  ZoneScopedNC("SceneRenderer::remove_override", 0xFF6347);
   auto *material_override = entity.try_get<Components::MaterialOverride>();
   if (material_override == nullptr)
     return;
 
-  if (material_override->gpu_slot != ~0U)
+  if (material_override->gpu_slot !=
+      Components::MaterialOverride::invalid_material)
     override_pool.free(material_override->gpu_slot);
 
   entity.remove<Components::MaterialOverride>();
 }
 
+constexpr std::byte operator""_b(unsigned long long val) {
+  return static_cast<std::byte>(val);
+}
+
 SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
     : ctx(c), swapchain(sc),
-      depth_prepass(RenderPassType::DepthPrepass, ctx.allocator),
-      forward_pass(RenderPassType::Forward, ctx.allocator) {
+      depth_prepass(RenderPassType::DepthPrepass, ctx.allocator, *this),
+      forward_pass(RenderPassType::Forward, ctx.allocator, *this) {
+  ZoneScopedNC("SceneRenderer::SceneRenderer", 0x4169E1);
   constexpr auto vertex_count = 1'000'000;
   constexpr auto index_count = 10'000'000;
   constexpr auto material_count = 500;
@@ -297,188 +305,293 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
       vertex_count * sizeof(PositionOnlyVertex), index_count * sizeof(u32),
       material_count * sizeof(GPUMaterial));
 
-  const u32 white = 0xFFFFFFFF;
-  const u32 blue = glm::packUnorm4x8(glm::vec4(0.5f, 0.5f, 1.0F, 1.0F));
-  const u32 mr_default = glm::packUnorm4x8(glm::vec4(0.0F, 1.0F, 0.0F, 1.0F));
-  const u32 occlusion_default = 0xFFFFFFFF;
-  const u32 black = 0xFF000000;
-  white_texture = upload_texture(std::span(&white, 1), "white_fallback_texture",
-                                 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
-  normal_texture =
-      upload_texture(std::span(&blue, 1), "normal_fallback_texture", 1, 1,
+  constexpr auto white_pixel = std::array{255_b, 255_b, 255_b, 255_b};
+  constexpr auto blue_pixel = std::array{127_b, 127_b, 255_b, 255_b};
+  constexpr auto mr_pixel = std::array{0_b, 255_b, 0_b, 255_b};
+  constexpr auto occlusion_pixel = std::array{255_b, 255_b, 255_b, 255_b};
+  constexpr auto black_pixel = std::array{0_b, 0_b, 0_b, 255_b};
+  white_texture = upload_texture(white_pixel, "white_fallback_texture", 1, 1,
+                                 VK_FORMAT_R8G8B8A8_UNORM, false);
+  normal_texture = upload_texture(blue_pixel, "normal_fallback_texture", 1, 1,
+                                  VK_FORMAT_R8G8B8A8_UNORM, false);
+  metallic_roughness_texture =
+      upload_texture(mr_pixel, "metallic_roughness_fallback_texture", 1, 1,
                      VK_FORMAT_R8G8B8A8_UNORM, false);
-  metallic_roughness_texture = upload_texture(
-      std::span(&mr_default, 1), "metallic_roughness_fallback_texture", 1, 1,
-      VK_FORMAT_R8G8B8A8_UNORM, false);
-  occlusion_texture = upload_texture(std::span(&occlusion_default, 1),
-                                     "occlusion_fallback_texture", 1, 1,
-                                     VK_FORMAT_R8G8B8A8_UNORM, false);
-  black_texture = upload_texture(std::span(&black, 1), "black_fallback_texture",
-                                 1, 1, VK_FORMAT_R8G8B8A8_UNORM, false);
+  ambient_occlusion_texture =
+      upload_texture(occlusion_pixel, "occlusion_fallback_texture", 1, 1,
+                     VK_FORMAT_R8G8B8A8_UNORM, false);
+  black_texture = upload_texture(black_pixel, "black_fallback_texture", 1, 1,
+                                 VK_FORMAT_R8G8B8A8_UNORM, false);
+
   assert(white_texture.index() == 0);
   info("White texture index: {}", white_texture.index());
   dummy_texture_handle = white_texture;
 
+  texture_upload_pool = std::make_unique<pool::TextureUploadPool>();
+
   resize();
+
+  tracy_vk_ctx = TracyVkContextHostCalibrated(
+      ctx.instance.instance, ctx.physical_device, ctx.device,
+      vkGetInstanceProcAddr, vkGetDeviceProcAddr);
+  TracyVkContextName(tracy_vk_ctx, "main_gfx", 8);
 }
+
 auto SceneRenderer::initialise_bindless() -> void {
-  constexpr u32 override_material_count_initial = 16U;
-  auto blank = make_default_override_materials(override_material_count_initial);
-  auto offset = geometry_pool->allocate_materials(std::span(blank));
-  override_pool = {
-      .base_slot = offset.start_index,
-      .capacity = override_material_count_initial,
-  };
-
-  const VkSamplerCreateInfo sampler_ci{
-      .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter = VK_FILTER_LINEAR,
-      .minFilter = VK_FILTER_LINEAR,
-      .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-      .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
-      .mipLodBias = 0.0F,
-      .anisotropyEnable = VK_TRUE,
-      .maxAnisotropy = 16,
-      .compareEnable = VK_FALSE,
-      .minLod = 0.0F,
-      .maxLod = 1.0F,
-      .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
-      .unnormalizedCoordinates = VK_FALSE,
-  };
-  vk::check(
-      vkCreateSampler(ctx.device, &sampler_ci, nullptr, &dummy_sampler_vk));
-  dummy_sampler_handle =
-      samplers.create(SamplerEntry{.sampler = dummy_sampler_vk});
-
-  const VkSamplerCreateInfo comparison_ci{
-      .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter = VK_FILTER_LINEAR,
-      .minFilter = VK_FILTER_LINEAR,
-      .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-      .compareEnable = VK_TRUE,
-      .compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL,
-      .minLod = 0.0F,
-      .maxLod = 1.0F,
-      .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
-  };
-  vk::check(vkCreateSampler(ctx.device, &comparison_ci, nullptr,
-                            &comparison_sampler_vk));
-  comparison_samplers.create(SamplerEntry{.sampler = comparison_sampler_vk});
-
-  const BindlessCaps caps = query_bindless_caps(ctx.physical_device);
-  bindless.init(ctx.device, caps,
-                /*initial_textures            =*/1024u,
-                /*initial_samplers            =*/64u,
-                /*initial_comparison_samplers =*/8u,
-                /*initial_storage_images      =*/512u,
-                /*initial_accel_structs       =*/0u,
-                /*initial_sub_images       =*/512u);
-
-  pipeline_layout = create_main_pipeline_layout(ctx.device, bindless.layout);
-  pipeline_registry = std::make_unique<PipelineRegistry>(ctx.device);
+  ZoneScopedNC("SceneRenderer::initialise_bindless", 0x4169E1);
 
   {
-    auto result = pipeline_registry->create_graphics({
-        .shader_path = VFSPath::create("shaders://composite.slang"),
-        .descriptor_set_layout = bindless.layout,
-        .render_targets = {.color_formats = {VK_FORMAT_R8G8B8A8_SRGB}},
-        .cull_mode = VK_CULL_MODE_NONE,
-        .blending = {BlendMode::opaque()},
-    });
-    if (!result) {
-      error("composite pipeline initialization failed: {}", result.error());
-      std::abort();
-    }
-    composite_pipeline = *result;
+    ZoneScopedNC("Override Pool Init", 0x888888);
+    constexpr u32 override_material_count_initial = 16U;
+    auto blank =
+        make_default_override_materials(override_material_count_initial);
+    auto offset = geometry_pool->allocate_materials(std::span(blank));
+    override_pool = {
+        .base_slot = offset.start_index,
+        .capacity = override_material_count_initial,
+    };
   }
 
   {
-    auto result = pipeline_registry->create_graphics({
-        .shader_path = VFSPath::create("shaders://skybox.slang"),
-        .descriptor_set_layout = bindless.layout,
-        .render_targets =
-            {
-                .color_formats = {VK_FORMAT_R16G16B16A16_SFLOAT},
-                .depth_format = VK_FORMAT_D32_SFLOAT,
-            },
-        .cull_mode = VK_CULL_MODE_NONE,
-        .samples = VK_SAMPLE_COUNT_4_BIT,
-        .blending = {BlendMode::opaque()},
-    });
+    ZoneScopedNC("Sampler Creation", 0x708090);
+    const VkSamplerCreateInfo sampler_ci{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+        .mipLodBias = 0.0F,
+        .anisotropyEnable = VK_TRUE,
+        .maxAnisotropy = 16,
+        .compareEnable = VK_FALSE,
+        .minLod = 0.0F,
+        .maxLod = 1.0F,
+        .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+    };
+    vk::check(
+        vkCreateSampler(ctx.device, &sampler_ci, nullptr, &dummy_sampler_vk));
+    dummy_sampler_handle =
+        samplers.create(SamplerEntry{.sampler = dummy_sampler_vk});
 
-    if (!result) {
-      error("skybox pipeline initialization failed: {}", result.error());
-      std::abort();
-    }
-    skybox_pipeline = *result;
+    const VkSamplerReductionModeCreateInfo reduction_ci{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO,
+        .reductionMode = VK_SAMPLER_REDUCTION_MODE_MIN,
+    };
+
+    const VkSamplerCreateInfo hiz_sampler_ci{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .pNext = &reduction_ci,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .mipLodBias = 0.0f,
+        .anisotropyEnable = VK_FALSE,
+        .maxAnisotropy = 1.0f,
+        .compareEnable = VK_FALSE,
+        .minLod = 0.0f,
+        .maxLod = VK_LOD_CLAMP_NONE,
+        .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
+        .unnormalizedCoordinates = VK_FALSE,
+    };
+
+    VkSampler hiz_sampler_vk{};
+    vk::check(
+        vkCreateSampler(ctx.device, &hiz_sampler_ci, nullptr, &hiz_sampler_vk));
+    hiz_sampler_handle =
+        samplers.create(SamplerEntry{.sampler = hiz_sampler_vk});
+
+    constexpr VkSamplerCreateInfo comparison_ci{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .compareEnable = VK_TRUE,
+        .compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL,
+        .minLod = 0.0F,
+        .maxLod = 1.0F,
+        .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
+    };
+    vk::check(vkCreateSampler(ctx.device, &comparison_ci, nullptr,
+                              &comparison_sampler_vk));
+    comparison_samplers.create(SamplerEntry{.sampler = comparison_sampler_vk});
+
+    const VkSamplerCreateInfo shadow_ci{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
+        .compareEnable = VK_TRUE,
+        .compareOp = VK_COMPARE_OP_LESS_OR_EQUAL,
+        .minLod = 0.0F,
+        .maxLod = 1.0F,
+        .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE,
+    };
+    vk::check(vkCreateSampler(ctx.device, &shadow_ci, nullptr,
+                              &shadow_comparison_sampler_vk));
+    shadow_sampler_bindless_idx =
+        comparison_samplers
+            .create(SamplerEntry{.sampler = shadow_comparison_sampler_vk})
+            .index();
   }
 
   {
-    auto result = pipeline_registry->create_compute({
-        .shader_path = VFSPath::create("shaders://culling.slang"),
-        .descriptor_set_layout = bindless.layout,
-        .layout = VK_NULL_HANDLE,
-    });
-    if (!result) {
-      error("culling pipeline initialization failed: {}", result.error());
-      std::abort();
-    }
-    culling_pipeline = *result;
+    ZoneScopedNC("Bindless Set Init", 0x20B2AA);
+    const BindlessCaps caps = query_bindless_caps(ctx.physical_device);
+    bindless.init(ctx.device, caps,
+                  /*initial_textures            =*/1024u,
+                  /*initial_samplers            =*/64u,
+                  /*initial_comparison_samplers =*/8u,
+                  /*initial_storage_images      =*/1024u,
+                  /*initial_accel_structs       =*/0u,
+                  /*initial_sub_images       =*/512u);
+
+    pipeline_layout = create_main_pipeline_layout(ctx.device, bindless.layout);
   }
 
-  const VkSamplerCreateInfo shadow_ci{
-      .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-      .magFilter = VK_FILTER_LINEAR,
-      .minFilter = VK_FILTER_LINEAR,
-      .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-      .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-      .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-      .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,
-      .compareEnable = VK_TRUE,
-      .compareOp = VK_COMPARE_OP_LESS_OR_EQUAL, // shadow maps are conventional
-      .minLod = 0.0F,
-      .maxLod = 1.0F,
-      .borderColor =
-          VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE, // 1.0 = fully lit outside
-  };
-  vk::check(vkCreateSampler(ctx.device, &shadow_ci, nullptr,
-                            &shadow_comparison_sampler_vk));
-  shadow_sampler_bindless_idx =
-      comparison_samplers
-          .create(SamplerEntry{.sampler = shadow_comparison_sampler_vk})
-          .index();
+  {
+    ZoneScopedNC("Pipeline Registry Init", 0x9370DB);
+    pipeline_registry = std::make_unique<PipelineRegistry>(ctx);
+
+    {
+      ZoneScopedNC("Composite Pipeline", 0x9370DB);
+      auto result = pipeline_registry->create_graphics({
+          .shader_path = VFSPath::create("shaders://composite.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .render_targets = {.color_formats = {VK_FORMAT_R8G8B8A8_SRGB}},
+          .cull_mode = VK_CULL_MODE_NONE,
+          .blending = {BlendMode::opaque()},
+      });
+      if (!result) {
+        error("composite pipeline initialization failed: {}", result.error());
+        std::abort();
+      }
+      composite_pipeline = *result;
+    }
+
+    {
+      ZoneScopedNC("Skybox Pipeline", 0x9370DB);
+      auto result = pipeline_registry->create_graphics({
+          .shader_path = VFSPath::create("shaders://skybox.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .render_targets =
+              {
+                  .color_formats = {VK_FORMAT_R16G16B16A16_SFLOAT},
+                  .depth_format = VK_FORMAT_D32_SFLOAT,
+              },
+          .cull_mode = VK_CULL_MODE_NONE,
+          .samples = VK_SAMPLE_COUNT_4_BIT,
+          .blending = {BlendMode::opaque()},
+      });
+      if (!result) {
+        error("skybox pipeline initialization failed: {}", result.error());
+        std::abort();
+      }
+      skybox_pipeline = *result;
+    }
+
+    {
+      ZoneScopedNC("Depth-Only Culling Pipeline", 0x9370DB);
+      auto result = pipeline_registry->create_compute({
+          .shader_path = VFSPath::create("shaders://depth_only_culling.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .layout = VK_NULL_HANDLE,
+      });
+      if (!result) {
+        error("depth-only culling pipeline initialization failed: {}",
+              result.error());
+        std::abort();
+      }
+      depth_only_culling_pipeline = *result;
+    }
+
+    {
+      ZoneScopedNC("Depth-to-R32 Pipeline", 0x9370DB);
+      auto result = pipeline_registry->create_compute({
+          .shader_path = VFSPath::create("shaders://depth_to_r32.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .layout = VK_NULL_HANDLE,
+      });
+      if (!result) {
+        error("depth-to-r32 pipeline initialization failed: {}",
+              result.error());
+        std::abort();
+      }
+      depth_to_r32_pipeline = *result;
+    }
+
+    {
+      ZoneScopedNC("Forward Occlusion Culling Pipeline", 0x9370DB);
+      auto result = pipeline_registry->create_compute({
+          .shader_path =
+              VFSPath::create("shaders://forward_occlusion_culling.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .layout = VK_NULL_HANDLE,
+      });
+      if (!result) {
+        error("forward occlusion culling pipeline initialization failed: {}",
+              result.error());
+        std::abort();
+      }
+      forward_occlusion_pipeline = *result;
+    }
+
+    {
+      ZoneScopedNC("HiZ Downsample Pipeline", 0x9370DB);
+      auto result = pipeline_registry->create_compute({
+          .shader_path = VFSPath::create("shaders://hiz_downsample.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .layout = VK_NULL_HANDLE,
+      });
+      if (!result) {
+        error("hierarchical depth pyramid downsample pipeline initialization "
+              "failed: {}",
+              result.error());
+        std::abort();
+      }
+      hiz_downsample_pipeline = *result;
+    }
+
+    {
+      ZoneScopedNC("Shadow Pipeline", 0x9370DB);
+      auto result = pipeline_registry->create_graphics({
+          .shader_path = VFSPath::create("shaders://shadow.slang"),
+          .layout = pipeline_layout,
+          .render_targets = {.depth_format = VK_FORMAT_D32_SFLOAT},
+          .cull_mode = VK_CULL_MODE_BACK_BIT,
+          .samples = VK_SAMPLE_COUNT_1_BIT,
+          .depth = {.test = true,
+                    .write = true,
+                    .compare_op = VK_COMPARE_OP_LESS_OR_EQUAL},
+          .extra_dynamic_states =
+              {
+                  VK_DYNAMIC_STATE_CULL_MODE,
+                  VK_DYNAMIC_STATE_DEPTH_BIAS,
+              },
+      });
+      if (!result) {
+        error("shadow pipeline: {}", result.error());
+        std::abort();
+      }
+      shadow_pipeline = *result;
+    }
+  }
 
   init_csm();
 
   {
-    auto result = pipeline_registry->create_graphics({
-        .shader_path = VFSPath::create("shaders://shadow.slang"),
-        .layout = pipeline_layout,
-        .render_targets = {.depth_format = VK_FORMAT_D32_SFLOAT},
-        .cull_mode = VK_CULL_MODE_BACK_BIT,
-        .samples = VK_SAMPLE_COUNT_1_BIT, // no MSAA on shadow maps
-        .depth = {.test = true,
-                  .write = true,
-                  .compare_op = VK_COMPARE_OP_LESS_OR_EQUAL}, // conventional
-        .extra_dynamic_states =
-            {
-                VK_DYNAMIC_STATE_CULL_MODE,
-                VK_DYNAMIC_STATE_DEPTH_BIAS,
-            },
-    });
-    if (!result) {
-      error("shadow pipeline: {}", result.error());
-      std::abort();
-    }
-    shadow_pipeline = *result;
-  }
-
-  {
+    ZoneScopedNC("IBL Probe Init", 0xFFD700);
     auto equirect_tex = Texture::load_hdr_texture(
         ctx, VFSPath::create("textures://env/sunset.hdr"));
 
@@ -488,12 +601,16 @@ auto SceneRenderer::initialise_bindless() -> void {
     });
 
     ibl_probe = IblProbe::create(ctx, *this, equirect);
+    textures.get(equirect)->texture.destroy(ctx);
+    textures.destroy(equirect);
   }
 }
-auto SceneRenderer::upload_texture(std::span<const u32> data,
+
+auto SceneRenderer::upload_texture(std::span<const std::byte> data,
                                    std::string_view name, u32 w, u32 h,
                                    VkFormat fmt, bool gen_mips, bool storage)
     -> TextureHandle {
+  ZoneScopedNC("SceneRenderer::upload_texture", 0x00CED1);
   auto tex = Texture::from_bytes(ctx, name,
                                  {
                                      .bytes = data,
@@ -510,22 +627,32 @@ auto SceneRenderer::upload_texture(std::span<const u32> data,
       .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
   });
 }
+
 auto SceneRenderer::resize() -> void {
-  frame_ubo_buffers.clear();
+  ZoneScopedNC("SceneRenderer::resize", 0xFFA500);
   for (u32 i = 0U; i < frames_in_flight; ++i) {
-    frame_ubo_buffers.emplace_back(Buffer::create(
-        ctx.allocator, sizeof(FrameUBO), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT));
+    frame_ubo_buffers[i] = Buffer::create(ctx.allocator, sizeof(FrameUBO),
+                                          VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
   }
 }
+
 auto SceneRenderer::destroy() -> void {
+  ZoneScopedNC("SceneRenderer::destroy", 0xFF0000);
+  TracyVkDestroy(tracy_vk_ctx);
+
   csm.destroy(ctx.device, ctx.allocator);
 
   bindless.destroy();
 
-  std::ranges::for_each(textures.mutable_data(), [&c = ctx](auto &v) {
-    auto &&[tex, view] = v.object;
-    tex.destroy(c);
-  });
+  std::ranges::for_each(textures.mutable_data(), [&c = ctx, this](TexturePool::Slot& v) {
+      if ((v.gen & 1u) == 0u)
+          return;
+      auto& tex = v.object.texture;
+      if (!tex.valid())
+          return;
+      tex.destroy(c, &textures);
+      tex.destroy(c, &subimages);
+      });
   std::ranges::for_each(samplers.mutable_data(), [&c = ctx](auto &v) {
     auto &&[sampler] = v.object;
     DeletionQueue::the().push(
@@ -548,57 +675,27 @@ auto SceneRenderer::destroy() -> void {
 void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
                            u32 pipeline_id, u32 material_id) {
   auto *asset = get_mesh(handle);
-  if (asset == nullptr)
+  if (asset == nullptr) [[unlikely]]
     return;
 
   for (const auto &node : asset->nodes) {
-    const glm::mat4 node_transform = t * node.local_transform;
-
+    const glm::mat4 node_t = t * node.local_transform;
     for (const auto &prim : node.primitives) {
-      const u32 id = static_cast<u32>(submission_queue.size());
       const u32 resolved_mat =
           material_id != 0 ? material_id : prim.material_id;
-      const auto &lg = prim.lod_group;
+      const u64 key = (static_cast<u64>(pipeline_id) << 48) |
+                      (static_cast<u64>(resolved_mat) << 32) |
+                      static_cast<u64>(prim.flat_index & 0xFFFF'FFFFU);
 
-      submission_queue.emplace_back(PendingDraw{
-          .lod_group = &lg,
-          .pipeline_id = pipeline_id,
+      frame_submission.entries.push_back({
+          .sort_key = key,
+          .mesh_prim_flat_index = prim.flat_index,
           .material_id = resolved_mat,
-          .transform = node_transform,
+          .pipeline_id = pipeline_id,
+          .transform = node_t,
           .aabb = prim.aabb,
-          .instance_id = id,
       });
-
-      // Depth — one bucket per primitive; lod_group carries all levels
-      {
-        const u64 depth_key = static_cast<u64>(lg.lods[0].first_index);
-        auto &b = depth_prepass.buckets[depth_key];
-        b.lod_group = &lg;
-        b.pipeline_id = pipeline_id;
-        b.instance_ids.push_back(id);
-      }
-
-      // Forward — one bucket per primitive
-      {
-        const u64 fwd_key =
-            (static_cast<u64>(pipeline_id) << 48) |
-            (static_cast<u64>(resolved_mat) << 32) |
-            static_cast<u64>(lg.lods[0].first_index & 0xFFFFFFFFu);
-        auto &b = forward_pass.buckets[fwd_key];
-        b.lod_group = &lg;
-        b.pipeline_id = pipeline_id;
-        b.material_id = resolved_mat;
-        b.instance_ids.push_back(id);
-      }
     }
-  }
-}
-
-void SceneRenderer::ensure_global_capacity(usize instance_count) {
-  if (const auto size = instance_count * sizeof(CompressedInstanceData);
-      !global_instance_buffer || global_instance_buffer->size() < size) {
-    global_instance_buffer =
-        Buffer::create(ctx.allocator, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   }
 }
 
@@ -633,15 +730,34 @@ auto extract_frustum_planes(const glm::mat4 &vp)
 
   return cached_planes;
 }
+} // namespace
+
+void SceneRenderer::ensure_global_capacity(usize instance_count) {
+  ZoneScopedNC("ensure_global_capacity", 0x708090);
+  auto &current = global_instance_buffer[current_frame_index];
+  if (const auto size = instance_count * sizeof(CompressedInstanceData);
+      !current || current->size() < size) {
+    current =
+        Buffer::create(ctx.allocator, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  }
 }
 
 auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
-                            const glm::mat4 &projection) -> PrepareResult {
+                            const glm::mat4 &projection,
+                            std::span<const GPUPointLight> point_lights)
+    -> PrepareResult {
+  ZoneScopedNC("SceneRenderer::prepare", 0xFF00FF);
+  assert(point_lights.size() <= FrameUBO::max_point_lights &&
+         "too many point lights");
+
   {
+    ZoneScopedNC("Poll Registries", 0x00FF7F);
+    texture_upload_pool->poll_one(*this);
     pipeline_registry->poll_and_update_dirty_pipelines();
   }
 
   if (override_pool.needs_grow) [[unlikely]] {
+    ZoneScopedNC("Grow Pool", 0xFF4500);
     const u32 delta = grow_pool(*this);
     return {
         .status = PrepareResult::Status::SuccessMaterialPoolGrew,
@@ -650,65 +766,92 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
   }
 
   current_frame_index = frame_index;
-  if (submission_queue.empty()) {
+
+  auto &fs = frame_submission;
+  if (fs.entries.empty()) {
     return {
         .status = PrepareResult::Status::SuccessNoSubmissions,
     };
   }
 
-  ensure_global_capacity(submission_queue.size());
-  global_instance_data.clear();
-
-  for (const auto &draw : submission_queue) {
-    const auto half = (draw.aabb.get_max() - draw.aabb.get_min()) * 0.5F;
-    const auto radius = glm::length(half);
-    global_instance_data.emplace_back(draw.transform, draw.material_id, radius,
-                                      draw.lod_group->lod_count);
+  {
+    ZoneScopedNC("Sort Submissions", 0x1E90FF);
+    fs.sort_order.resize(fs.entries.size());
+    std::ranges::iota(fs.sort_order, 0u);
+    std::sort(std::execution::par_unseq, fs.sort_order.begin(),
+              fs.sort_order.end(), [&](u32 a, u32 b) {
+                return fs.entries[a].sort_key < fs.entries[b].sort_key;
+              });
   }
 
-  global_instance_buffer->upload(global_instance_data);
-
-  const glm::mat4 inv_view = glm::inverse(view);
-  const glm::mat4 inv_proj = glm::inverse(projection);
-  const glm::mat4 view_proj = projection * view;
-  const FrameUBO ubo{
-      .view = view,
-      .projection = projection,
-      .view_projection = view_proj,
-      .inverse_projection = inv_proj,
-      .inverse_view = inv_view,
-      .inverse_view_projection = glm::inverse(view_proj),
-      .cascades = csm_frame_data.cascades,
-      .frustum_planes = extract_frustum_planes(view_proj),
-      .camera_position = inv_view[3],
-      .sun_direction = sun_direction,
-      .shadow_array_index = csm_frame_data.shadow_array_index,
-      .shadow_sampler_index = csm_frame_data.shadow_sampler_index,
-      .ibl_irradiance_index = ibl_probe.irradiance.index(),
-      .ibl_prefiltered_index = ibl_probe.prefiltered.index(),
-      .ibl_brdf_lut_index = ibl_probe.brdf_lut.index(),
-      .ibl_sampler_index = dummy_sampler_handle.index(),
-      .ibl_prefiltered_mips = ibl_probe.prefiltered_mip_count,
-  };
-
-  frame_ubo_buffers.at(frame_index)->upload(std::span(&ubo, 1));
-  depth_prepass.bake(global_instance_data.size());
-  forward_pass.bake(global_instance_data.size());
-
-  for (auto &v : depth_prepass.buckets | std::views::values) {
-    v.instance_ids.clear();
+  {
+    ZoneScopedNC("Build & Upload Instances", 0xADFF2F);
+    ensure_global_capacity(fs.entries.size());
+    global_instance_data.resize(fs.entries.size());
+    for (u32 i = 0; i < static_cast<u32>(fs.sort_order.size()); ++i) {
+      const auto &e = fs.entries[fs.sort_order[i]];
+      const auto half = (e.aabb.get_max() - e.aabb.get_min()) * 0.5F;
+      global_instance_data[i] = CompressedInstanceData{
+          e.transform,
+          static_cast<u16>(e.material_id),
+          glm::length(half),
+          flat_prim_table[e.mesh_prim_flat_index].lod_group->lod_count,
+      };
+    }
+    global_instance_buffer[current_frame_index]->upload(global_instance_data);
   }
-  for (auto &v : forward_pass.buckets | std::views::values) {
-    v.instance_ids.clear();
+
+  {
+    ZoneScopedNC("Compute & Upload UBO", 0xFFFF00);
+    const glm::mat4 inv_view = glm::inverse(view);
+    const glm::mat4 inv_proj = glm::inverse(projection);
+    const glm::mat4 view_proj = projection * view;
+    FrameUBO ubo{
+        .view = view,
+        .projection = projection,
+        .view_projection = view_proj,
+        .inverse_projection = inv_proj,
+        .inverse_view = inv_view,
+        .inverse_view_projection = glm::inverse(view_proj),
+        .cascades = csm_frame_data.cascades,
+        .frustum_planes = extract_frustum_planes(view_proj),
+        .camera_position = inv_view[3],
+        .sun_direction = sun_direction,
+        .shadow_array_index = csm_frame_data.shadow_array_index,
+        .shadow_sampler_index = csm_frame_data.shadow_sampler_index,
+        .ibl_irradiance_index = ibl_probe.irradiance.index(),
+        .ibl_prefiltered_index = ibl_probe.prefiltered.index(),
+        .ibl_brdf_lut_index = ibl_probe.brdf_lut.index(),
+        .ibl_sampler_index = dummy_sampler_handle.index(),
+        .ibl_prefiltered_mips = ibl_probe.prefiltered_mip_count,
+    };
+    ubo.point_light_count = static_cast<u32>(point_lights.size());
+    std::copy_n(point_lights.data(), point_lights.size(),
+                ubo.point_lights.data());
+    frame_ubo_buffers.at(frame_index)->upload(std::span(&ubo, 1));
   }
-  submission_queue.clear();
-  return {
-      .status = PrepareResult::Status::Success,
-  };
+
+  const usize submission_hint = fs.entries.size();
+
+  {
+    ZoneScopedNC("Bake Depth Prepass", 0x00FFFF);
+    depth_prepass.bake(fs.sort_order, fs.entries, fs.entries.size());
+  }
+
+  {
+    ZoneScopedNC("Bake Forward Pass", 0xFF69B4);
+    forward_pass.bake(fs.sort_order, fs.entries, fs.entries.size());
+  }
+
+  fs.reset(submission_hint);
+  return {.status = PrepareResult::Status::Success};
 }
 
 void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
                                 VkPipeline override_pipeline) {
+  ZoneScopedNC("SceneRenderer::render_pass", 0x32CD32);
+  TracyVkZoneC(tracy_vk_ctx, cmd, "render_pass", 0x32CD32);
+
   auto &pool = *geometry_pool;
   if (pass.batches.empty())
     return;
@@ -716,6 +859,9 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
   auto &ws = pass.frame_workspaces.at(current_frame_index);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
                           0U, 1U, &bindless.set, 0U, nullptr);
+  vkCmdBindIndexBuffer(cmd,
+      geometry_pool->index_buffer->get_buffer(),
+      0U, VK_INDEX_TYPE_UINT32);
 
   const GpuPushConstants push_constants{
       .vertex_buffer_ptr =
@@ -728,7 +874,7 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
           },
       .transform_buffer_ptr =
           DeviceAddress{
-              global_instance_buffer->get_device_address(),
+              global_instance_buffer[current_frame_index]->get_device_address(),
           },
       .culled_index_remapping_buffer =
           DeviceAddress{
@@ -752,15 +898,397 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_ALL, 0u,
                        sizeof(GpuPushConstants), &push_constants);
-    vkCmdDrawIndexedIndirectCount(
+
+    vkCmdDrawIndexedIndirect(
         cmd, ws.indirect_buffer->get_buffer(),
         batch.first_command_index * sizeof(PaddedDrawCommand),
-        ws.count_buffer->get_buffer(), batch.count_buffer_offset,
         batch.max_command_count, sizeof(PaddedDrawCommand));
   }
 }
 
+void SceneRenderer::depth_frustum_culling_pass(VkCommandBuffer cmd) {
+  ZoneScopedNC("SceneRenderer::depth_frustum_culling_pass", 0x00BFFF);
+  TracyVkZoneC(tracy_vk_ctx, cmd, "depth_frustum_culling_pass", 0x00BFFF);
+
+  auto geometry_count = global_instance_data.size();
+  if (geometry_count == 0 || depth_prepass.batches.empty() ||
+      forward_pass.batches.empty())
+    return;
+  auto &depth_ws = depth_prepass.frame_workspaces.at(current_frame_index);
+
+  {
+    ZoneScopedNC("Clear Indirect Buffer", 0x708090);
+    depth_ws.indirect_buffer->for_each_with_flush<PaddedDrawCommand>(
+        [](PaddedDrawCommand &v) { v.instance_count = 0; });
+  }
+
+  VkBufferMemoryBarrier2 clear_barriers[1] = {
+      {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask =
+              VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+          .buffer = depth_ws.indirect_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+  };
+
+  VkDependencyInfo clear_dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1U,
+      .pBufferMemoryBarriers = clear_barriers,
+  };
+  vkCmdPipelineBarrier2(cmd, &clear_dep);
+
+  CullingPushConstants push{
+      .instance_buffer =
+          global_instance_buffer[current_frame_index]->get_device_address(),
+      .frame_data =
+          frame_ubo_buffers.at(current_frame_index)->get_device_address(),
+
+      .depth_original_remap_buffer =
+          depth_ws.index_remapping_buffer->get_device_address(),
+      .depth_instance_to_command_buffer =
+          depth_ws.instance_to_command_buffer->get_device_address(),
+      .depth_indirect_commands = depth_ws.indirect_buffer->get_device_address(),
+      .depth_culled_remap =
+          depth_ws.culled_index_remapping_buffer->get_device_address(),
+
+      .total_instance_count = static_cast<u32>(geometry_count),
+  };
+
+  const auto &entry = pipeline_registry->get_entry(depth_only_culling_pipeline);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout, 0U,
+                          1U, &bindless.set, 0U, nullptr);
+  vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                     sizeof(push), &push);
+
+  auto dispatch_count = (geometry_count + 63) / 64;
+  vkCmdDispatch(cmd, static_cast<u32>(dispatch_count), 1, 1);
+
+  std::array<VkBufferMemoryBarrier2, 2> post_cull_barriers = {
+      VkBufferMemoryBarrier2{
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+          .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+          .buffer = depth_ws.indirect_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+          .buffer = depth_ws.culled_index_remapping_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+  };
+
+  VkDependencyInfo post_dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = static_cast<u32>(post_cull_barriers.size()),
+      .pBufferMemoryBarriers = post_cull_barriers.data(),
+  };
+  vkCmdPipelineBarrier2(cmd, &post_dep);
+}
+
+auto SceneRenderer::blit_depth_to_pre_hiz_pass(VkCommandBuffer cmd,
+                                               TextureHandle depth_resolved,
+                                               TextureHandle depth_pre_hiz)
+    -> void {
+  ZoneScopedNC("SceneRenderer::blit_depth_to_pre_hiz_pass", 0x7B68EE);
+  TracyVkZoneC(tracy_vk_ctx, cmd, "blit_depth_to_pre_hiz_pass", 0x7B68EE);
+
+  const auto &src = textures.get(depth_resolved);
+  const auto &dst = textures.get(depth_pre_hiz);
+  const auto &pipeline_entry =
+      pipeline_registry->get_entry(depth_to_r32_pipeline);
+
+  const u32 w = src->texture.extent.width;
+  const u32 h = src->texture.extent.height;
+
+  const std::array<VkImageMemoryBarrier2, 2> pre_barriers{{
+      {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+          .srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+          .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .image = src->texture.image,
+          .subresourceRange =
+              {
+                  .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                  .levelCount = 1,
+                  .layerCount = 1,
+              },
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+          .srcAccessMask = VK_ACCESS_2_NONE,
+          .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+          .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .image = dst->texture.image,
+          .subresourceRange =
+              {
+                  .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                  .levelCount = 1,
+                  .layerCount = 1,
+              },
+      },
+  }};
+
+  VkDependencyInfo pre_dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .imageMemoryBarrierCount = static_cast<u32>(pre_barriers.size()),
+      .pImageMemoryBarriers = pre_barriers.data(),
+  };
+  vkCmdPipelineBarrier2(cmd, &pre_dep);
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline_entry.pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          pipeline_entry.layout, 0u, 1u, &bindless.set, 0u,
+                          nullptr);
+
+  struct {
+    u32 src_depth_idx;
+    u32 dst_color_idx;
+    VkExtent2D src_dimension;
+  } pc{
+      .src_depth_idx = depth_resolved.index(),
+      .dst_color_idx = depth_pre_hiz.index(),
+      .src_dimension = {.width = w, .height = h},
+  };
+  vkCmdPushConstants(cmd, pipeline_entry.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                     0u, sizeof(pc), &pc);
+
+  vkCmdDispatch(cmd, (w + 15) / 16, (h + 15) / 16, 1);
+
+  VkImageMemoryBarrier2 post_barrier{
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .image = dst->texture.image,
+      .subresourceRange =
+          {
+              .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+              .levelCount = 1,
+              .layerCount = 1,
+          },
+  };
+
+  VkDependencyInfo post_dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .imageMemoryBarrierCount = 1,
+      .pImageMemoryBarriers = &post_barrier,
+  };
+  vkCmdPipelineBarrier2(cmd, &post_dep);
+}
+
+void SceneRenderer::build_hierarchical_depth_pyramid_pass(
+    VkCommandBuffer cmd, TextureHandle input_depth_image,
+    TextureHandle output_pyramid) {
+  ZoneScopedNC("SceneRenderer::build_hiz_pyramid", 0xDDA0DD);
+  TracyVkZoneC(tracy_vk_ctx, cmd, "build_hiz_pyramid", 0xDDA0DD);
+
+  const auto &resolved_depth = textures.get(input_depth_image);
+  const auto &hiz_target = textures.get(output_pyramid);
+  const auto &pipeline_entry =
+      pipeline_registry->get_entry(hiz_downsample_pipeline);
+
+  VkImageMemoryBarrier2 input_depth_barrier{
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+      .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .image = resolved_depth->texture.image,
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                           .levelCount = 1,
+                           .layerCount = 1}};
+
+  VkDependencyInfo init_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                            .imageMemoryBarrierCount = 1,
+                            .pImageMemoryBarriers = &input_depth_barrier};
+  vkCmdPipelineBarrier2(cmd, &init_dep);
+
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                    pipeline_entry.pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                          pipeline_entry.layout, 0U, 1U, &bindless.set, 0U,
+                          nullptr);
+
+  u32 mip_levels = hiz_target->texture.mip_levels;
+  VkExtent2D current_src_extent = {
+      .width = resolved_depth->texture.extent.width,
+      .height = resolved_depth->texture.extent.height,
+  };
+
+  for (u32 mip = 0; mip < mip_levels; ++mip) {
+    ZoneScopedNC("HiZ Mip Downsample", 0xDDA0DD);
+
+    VkExtent2D current_dst_extent = {
+        .width = std::max(1U, current_src_extent.width / 2),
+        .height = std::max(1U, current_src_extent.height / 2),
+    };
+
+    HizPushConstants pc{
+        .src_texture_idx =
+            (mip == 0)
+                ? input_depth_image.index()
+                : hiz_target->texture.mip_layer_handle(mip - 1, 0).index(),
+        .dst_texture_idx = hiz_target->texture.mip_layer_handle(mip, 0).index(),
+        .src_dimension = current_src_extent,
+    };
+    vkCmdPushConstants(cmd, pipeline_entry.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0U, sizeof(pc), &pc);
+
+    u32 dispatch_x = (current_dst_extent.width + 15) / 16;
+    u32 dispatch_y = (current_dst_extent.height + 15) / 16;
+    vkCmdDispatch(cmd, dispatch_x, dispatch_y, 1);
+
+    VkImageMemoryBarrier2 mip_sync_barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .image = hiz_target->texture.image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                             .baseMipLevel = mip,
+                             .levelCount = 1,
+                             .layerCount = 1}};
+
+    VkDependencyInfo mip_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                             .imageMemoryBarrierCount = 1,
+                             .pImageMemoryBarriers = &mip_sync_barrier};
+    vkCmdPipelineBarrier2(cmd, &mip_dep);
+
+    current_src_extent = current_dst_extent;
+  }
+}
+
+void SceneRenderer::forward_occlusion_culling_pass(
+    VkCommandBuffer cmd, const TextureHandle hiz_target) {
+  ZoneScopedNC("SceneRenderer::forward_occlusion_culling_pass", 0xFF8C00);
+  TracyVkZoneC(tracy_vk_ctx, cmd, "forward_occlusion_culling_pass", 0xFF8C00);
+
+  auto geometry_count = global_instance_data.size();
+  auto &forward_ws = forward_pass.frame_workspaces.at(current_frame_index);
+
+  {
+    ZoneScopedNC("Clear Forward Indirect Buffer", 0x708090);
+    forward_ws.indirect_buffer->for_each_with_flush<PaddedDrawCommand>(
+        [](PaddedDrawCommand &v) { v.instance_count = 0; });
+  }
+
+  VkBufferMemoryBarrier2 clear_barrier = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+      .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask =
+          VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+      .buffer = forward_ws.indirect_buffer->get_buffer(),
+      .size = VK_WHOLE_SIZE,
+  };
+  VkDependencyInfo clear_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                             .bufferMemoryBarrierCount = 1,
+                             .pBufferMemoryBarriers = &clear_barrier};
+  vkCmdPipelineBarrier2(cmd, &clear_dep);
+
+  const auto &resolved_pyramid = textures.get(hiz_target);
+  const u32 mip_levels = resolved_pyramid->texture.mip_levels;
+
+  OcclusionCullingPushConstants push{
+      .instance_buffer =
+          global_instance_buffer[current_frame_index]->get_device_address(),
+      .frame_data =
+          frame_ubo_buffers.at(current_frame_index)->get_device_address(),
+      .forward_original_remap_buffer =
+          forward_ws.index_remapping_buffer->get_device_address(),
+      .forward_instance_to_command_buffer =
+          forward_ws.instance_to_command_buffer->get_device_address(),
+      .forward_indirect_commands =
+          forward_ws.indirect_buffer->get_device_address(),
+      .forward_culled_remap =
+          forward_ws.culled_index_remapping_buffer->get_device_address(),
+      .total_instance_count = static_cast<u32>(geometry_count),
+      .hiz_sampler_idx = hiz_sampler_handle.index(),
+      .hiz_width = static_cast<f32>(resolved_pyramid->texture.extent.width),
+      .hiz_height = static_cast<f32>(resolved_pyramid->texture.extent.height),
+  };
+
+  for (u32 m = 0; m < 15; ++m) {
+    push.hiz_mip_indices[m] =
+        (m < mip_levels)
+            ? resolved_pyramid->texture.mip_layer_handle(m, 0).index()
+            : 0U;
+  }
+  push.hiz_mip_indices[15] = mip_levels;
+
+  const auto &entry = pipeline_registry->get_entry(forward_occlusion_pipeline);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout, 0U,
+                          1U, &bindless.set, 0U, nullptr);
+  vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                     sizeof(push), &push);
+
+  auto dispatch_count = (geometry_count + 63) / 64;
+  vkCmdDispatch(cmd, static_cast<u32>(dispatch_count), 1, 1);
+
+  std::array<VkBufferMemoryBarrier2, 2> post_cull_barriers = {
+      VkBufferMemoryBarrier2{
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+          .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+          .buffer = forward_ws.indirect_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+      {
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+          .buffer = forward_ws.culled_index_remapping_buffer->get_buffer(),
+          .size = VK_WHOLE_SIZE,
+      },
+  };
+
+  VkDependencyInfo post_dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 2U,
+      .pBufferMemoryBarriers = post_cull_barriers.data(),
+  };
+  vkCmdPipelineBarrier2(cmd, &post_dep);
+}
+
 void SceneRenderer::skybox_pass(VkCommandBuffer cmd) {
+  ZoneScopedNC("SceneRenderer::skybox_pass", 0x87CEEB);
+  TracyVkZoneC(tracy_vk_ctx, cmd, "skybox_pass", 0x87CEEB);
+
   const auto &entry = pipeline_registry->get_entry(skybox_pipeline);
 
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.pipeline);
@@ -791,6 +1319,9 @@ void SceneRenderer::skybox_pass(VkCommandBuffer cmd) {
 }
 
 void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
+  ZoneScopedNC("SceneRenderer::composite_pass", 0xFFA07A);
+  TracyVkZoneC(tracy_vk_ctx, cmd, "composite_pass", 0xFFA07A);
+
   const auto &entry = pipeline_registry->get_entry(composite_pipeline);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.pipeline);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.layout,
@@ -805,146 +1336,10 @@ void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
   vkCmdDraw(cmd, 3U, 1u, 0u, 0u);
 }
 
-void SceneRenderer::culling_pass(VkCommandBuffer cmd) {
-  auto geometry_count = global_instance_data.size();
-  if (geometry_count == 0 || depth_prepass.batches.empty() ||
-      forward_pass.batches.empty())
-    return;
-  auto &depth_ws = depth_prepass.frame_workspaces.at(current_frame_index);
-  auto &forward_ws = forward_pass.frame_workspaces.at(current_frame_index);
-  {
-    static constexpr u32 zero_value = 0U;
-    u32 depth_cmd_count = static_cast<u32>(depth_ws.indirect_buffer->size() /
-                                           sizeof(PaddedDrawCommand));
-    for (u32 i = 0; i < depth_cmd_count; ++i) {
-      VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
-                            offsetof(PaddedDrawCommand, instance_count);
-      vkCmdUpdateBuffer(cmd, depth_ws.indirect_buffer->get_buffer(), offset,
-                        sizeof(u32), &zero_value);
-    }
-
-    u32 forward_cmd_count = static_cast<u32>(
-        forward_ws.indirect_buffer->size() / sizeof(PaddedDrawCommand));
-    for (u32 i = 0; i < forward_cmd_count; ++i) {
-      VkDeviceSize offset = (i * sizeof(PaddedDrawCommand)) +
-                            offsetof(PaddedDrawCommand, instance_count);
-      vkCmdUpdateBuffer(cmd, forward_ws.indirect_buffer->get_buffer(), offset,
-                        sizeof(u32), &zero_value);
-    }
-  }
-
-  VkBufferMemoryBarrier2 clear_barriers[2] = {
-      {
-          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-          .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .dstAccessMask =
-              VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-          .buffer = depth_ws.indirect_buffer->get_buffer(),
-          .size = VK_WHOLE_SIZE,
-      },
-      {
-          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
-          .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .dstAccessMask =
-              VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-          .buffer = forward_ws.indirect_buffer->get_buffer(),
-          .size = VK_WHOLE_SIZE,
-      },
-  };
-
-  VkDependencyInfo clear_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                             .bufferMemoryBarrierCount = 2U,
-                             .pBufferMemoryBarriers = clear_barriers};
-  vkCmdPipelineBarrier2(cmd, &clear_dep);
-
-  CullingPushConstants push{
-      .instance_buffer = global_instance_buffer->get_device_address(),
-      .frame_data =
-          frame_ubo_buffers.at(current_frame_index)->get_device_address(),
-
-      .depth_original_remap_buffer =
-          depth_ws.index_remapping_buffer->get_device_address(),
-      .depth_instance_to_command_buffer =
-          depth_ws.instance_to_command_buffer->get_device_address(),
-      .depth_indirect_commands = depth_ws.indirect_buffer->get_device_address(),
-      .depth_culled_remap =
-          depth_ws.culled_index_remapping_buffer->get_device_address(),
-
-      .forward_original_remap_buffer =
-          forward_ws.index_remapping_buffer->get_device_address(),
-      .forward_instance_to_command_buffer =
-          forward_ws.instance_to_command_buffer->get_device_address(),
-      .forward_indirect_commands =
-          forward_ws.indirect_buffer->get_device_address(),
-      .forward_culled_remap =
-          forward_ws.culled_index_remapping_buffer->get_device_address(),
-      .total_instance_count = static_cast<u32>(geometry_count),
-  };
-
-  const auto &entry = pipeline_registry->get_entry(culling_pipeline);
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout, 0U,
-                          1U, &bindless.set, 0U, nullptr);
-  vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
-                     sizeof(push), &push);
-
-  auto dispatch_count = (geometry_count + 63) / 64;
-  vkCmdDispatch(cmd, dispatch_count, 1, 1);
-
-  VkBufferMemoryBarrier2 post_cull_barriers[4] = {
-      // Indirect Commands
-      {
-          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-          .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-          .buffer = depth_ws.indirect_buffer->get_buffer(),
-          .size = VK_WHOLE_SIZE,
-      },
-      {
-          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-          .dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
-          .buffer = forward_ws.indirect_buffer->get_buffer(),
-          .size = VK_WHOLE_SIZE,
-      },
-      // Culled Remapping Arrays
-      {
-          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-          .buffer = depth_ws.culled_index_remapping_buffer->get_buffer(),
-          .size = VK_WHOLE_SIZE,
-      },
-      {
-          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-          .buffer = forward_ws.culled_index_remapping_buffer->get_buffer(),
-          .size = VK_WHOLE_SIZE,
-      },
-  };
-
-  VkDependencyInfo post_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                            .bufferMemoryBarrierCount = 4U,
-                            .pBufferMemoryBarriers = post_cull_barriers};
-  vkCmdPipelineBarrier2(cmd, &post_dep);
-}
-
 auto RenderPass::ensure_capacity(usize command_count, usize instance_count,
                                  usize batch_count,
                                  usize total_global_instances) -> bool {
+  ZoneScopedNC("RenderPass::ensure_capacity", 0x708090);
   constexpr VkBufferUsageFlags indirect_flags =
       VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
   constexpr VkBufferUsageFlags storage_flags =
@@ -962,100 +1357,129 @@ auto RenderPass::ensure_capacity(usize command_count, usize instance_count,
 
   auto ensure_buffer = [alloc = allocator, dev = allocator_info.device](
                            std::unique_ptr<Buffer> &buffer, usize needed_size,
-                           VkBufferUsageFlags flags) {
+                           VkBufferUsageFlags flags, std::string_view name) {
     if (!buffer || buffer->size() < needed_size) {
       if (buffer) {
         vkDeviceWaitIdle(dev);
       }
       buffer = Buffer::create(alloc, needed_size, flags);
+      buffer->set_name(name);
     }
   };
 
   ensure_buffer(ws.indirect_buffer, indirect_needed,
-                indirect_flags | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT);
-  ensure_buffer(ws.count_buffer, count_needed, indirect_flags);
-  ensure_buffer(ws.instance_to_command_buffer, global_needed, storage_flags);
-  ensure_buffer(ws.index_remapping_buffer, instance_needed, storage_flags);
+                indirect_flags | VK_BUFFER_USAGE_2_TRANSFER_DST_BIT,
+                "Indirect Buffer");
+  ensure_buffer(ws.count_buffer, count_needed, indirect_flags, "Count Buffer");
+  ensure_buffer(ws.instance_to_command_buffer, global_needed, storage_flags,
+                "Instance to Command Buffer");
+  ensure_buffer(ws.index_remapping_buffer, instance_needed, storage_flags,
+                "Index Remapping Buffer");
   ensure_buffer(ws.culled_index_remapping_buffer, instance_needed,
-                storage_flags);
+                storage_flags, "Culled Index Remapping Buffer");
 
   return true;
 }
 
-auto RenderPass::bake(usize total_global_instances) -> void {
+auto RenderPass::bake(std::span<const u32> sorted_order,
+                      std::span<const FrameSubmission::Entry> entries,
+                      usize total_global_instances) -> void {
+  ZoneScopedNC("RenderPass::bake", 0x00FFFF);
+
   std::vector<PaddedDrawCommand> commands;
   std::vector<u32> remapped_indices;
   std::vector<u32> draw_counts;
-  std::vector<u32> instance_to_commands(total_global_instances, 0xFFFFFFFFu);
-
+  std::vector<u32> instance_to_commands(total_global_instances, 0xFFFF'FFFFu);
   batches.clear();
   u32 current_pipeline = ~0U;
 
-  for (auto &[key, bucket] : buckets) {
-    if (bucket.pipeline_id != current_pipeline) {
-      current_pipeline = bucket.pipeline_id;
-      draw_counts.push_back(0u);
-      batches.push_back({
-          .pipeline_id = bucket.pipeline_id,
-          .max_command_count = 0U,
-          .first_command_index = static_cast<u32>(commands.size()),
-          .count_buffer_offset =
-              static_cast<u32>((draw_counts.size() - 1) * sizeof(u32)),
-      });
-    }
+  {
+    ZoneScopedNC("Process Submissions", 0xFF8C00);
+    usize i = 0;
+    while (i < sorted_order.size()) {
+      const u32 head_idx = sorted_order[i];
+      const auto &head = entries[head_idx];
 
-    const u32 lod0_cmd_idx = static_cast<u32>(commands.size());
-    for (u32 iid : bucket.instance_ids) {
-      instance_to_commands[iid] = lod0_cmd_idx;
-    }
-
-    const auto &lod_group = bucket.lod_group;
-    for (u8 lod = 0; lod < lod_group->lod_count; ++lod) {
-      const u32 unique_first_instance =
-          static_cast<u32>(remapped_indices.size());
-
-      for (u32 iid : bucket.instance_ids) {
-        remapped_indices.push_back(iid);
+      if (head.pipeline_id != current_pipeline) {
+        ZoneScopedNC("Switch Pipeline Batch", 0xFF00FF);
+        current_pipeline = head.pipeline_id;
+        draw_counts.push_back(0u);
+        batches.push_back({
+            .pipeline_id = head.pipeline_id,
+            .max_command_count = 0u,
+            .first_command_index = static_cast<u32>(commands.size()),
+            .count_buffer_offset =
+                static_cast<u32>((draw_counts.size() - 1) * sizeof(u32)),
+        });
       }
 
-      const auto m = lod_group->resolve(lod);
-      commands.push_back({
-          .index_count = m.index_count,
-          .instance_count = 0U,
-          .first_index = m.first_index,
-          .vertex_offset = m.vertex_offset,
-          .first_instance = unique_first_instance,
-      });
+      const u64 run_key = head.sort_key;
+      const u32 lod0_cmd = static_cast<u32>(commands.size());
+      const usize run_start = i;
 
-      batches.back().max_command_count++;
-      draw_counts.back()++;
+      {
+        ZoneScopedNC("Find Run Group", 0x3CB371);
+        while (i < sorted_order.size() &&
+               entries[sorted_order[i]].sort_key == run_key)
+          ++i;
+      }
+
+      for (usize j = run_start; j < i; ++j)
+        instance_to_commands[j] = lod0_cmd;
+
+      const FlatPrimitive &fp =
+          renderer.flat_prim_table[head.mesh_prim_flat_index];
+
+      {
+        ZoneScopedNC("Generate LOD Commands", 0x1E90FF);
+        for (u8 lod = 0; lod < fp.lod_group->lod_count; ++lod) {
+          const u32 first_instance = static_cast<u32>(remapped_indices.size());
+
+          for (usize j = run_start; j < i; ++j)
+            remapped_indices.push_back(static_cast<u32>(j));
+
+          const auto m = fp.lod_group->resolve(lod);
+          commands.push_back({
+              .index_count = m.index_count,
+              .instance_count = 0u,
+              .first_index = m.first_index,
+              .vertex_offset = m.vertex_offset,
+              .first_instance = first_instance,
+          });
+
+          batches.back().max_command_count++;
+          draw_counts.back()++;
+        }
+      }
     }
-
-    bucket.instance_ids.clear();
   }
 
-  ensure_capacity(commands.size(), remapped_indices.size(), draw_counts.size(),
-                  total_global_instances);
+  {
+    ZoneScopedNC("Ensure Allocation Capacity", 0x708090);
+    ensure_capacity(commands.size(), remapped_indices.size(),
+                    draw_counts.size(), total_global_instances);
+  }
 
-  auto &ws = frame_workspaces.at(current_frame_index);
-  ws.indirect_buffer->upload_with_offset(commands, 0);
-  ws.count_buffer->upload_with_offset(draw_counts, 0);
-  ws.index_remapping_buffer->upload_with_offset(remapped_indices, 0);
-  ws.instance_to_command_buffer->upload_with_offset(instance_to_commands, 0);
+  {
+    ZoneScopedNC("Upload GPU Workspaces", 0xADFF2F);
+    auto &ws = frame_workspaces.at(current_frame_index);
+    ws.indirect_buffer->upload_with_offset(commands, 0);
+    ws.count_buffer->upload_with_offset(draw_counts, 0);
+    ws.index_remapping_buffer->upload_with_offset(remapped_indices, 0);
+    ws.instance_to_command_buffer->upload_with_offset(instance_to_commands, 0);
+  }
 }
 
 void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
                                           u32 cascade_idx) {
+  ZoneScopedNC("SceneRenderer::render_shadow_cascade", 0xB8860B);
+  TracyVkZoneC(tracy_vk_ctx, cmd, "render_shadow_cascade", 0xB8860B);
+
   auto &pass = depth_prepass;
-  const auto &pipeline = pipeline_registry->get(shadow_pipeline);
   if (pass.batches.empty())
     return;
 
   auto &ws = pass.frame_workspaces.at(current_frame_index);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
-                          0U, 1u, &bindless.set, 0u, nullptr);
-  vkCmdBindIndexBuffer(cmd, geometry_pool->index_buffer->get_buffer(), 0u,
-                       VK_INDEX_TYPE_UINT32);
 
   auto &pool = *geometry_pool;
   const GpuPushConstants push_constants{
@@ -1069,7 +1493,7 @@ void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
           },
       .transform_buffer_ptr =
           DeviceAddress{
-              global_instance_buffer->get_device_address(),
+              global_instance_buffer[current_frame_index]->get_device_address(),
           },
       .culled_index_remapping_buffer =
           DeviceAddress{
@@ -1086,21 +1510,20 @@ void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
       .cascade_index = cascade_idx,
   };
 
-  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
   vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_ALL, 0U,
                      sizeof(GpuPushConstants), &push_constants);
 
   for (const auto &batch : pass.batches) {
-    vkCmdDrawIndexedIndirectCount(
+    vkCmdDrawIndexedIndirect(
         cmd, ws.indirect_buffer->get_buffer(),
         batch.first_command_index * sizeof(PaddedDrawCommand),
-        ws.count_buffer->get_buffer(), batch.count_buffer_offset,
         batch.max_command_count, sizeof(PaddedDrawCommand));
   }
 }
 
 void SceneRenderer::update_csm(const glm::mat4 &view, const glm::mat4 &proj,
                                float camera_near, float camera_far) {
+  ZoneScopedNC("SceneRenderer::update_csm", 0xFFAA00);
   const auto splits = compute_cascade_splits(camera_near, camera_far);
 
   float prev_ndc = 1.0F;
@@ -1120,6 +1543,7 @@ void SceneRenderer::update_csm(const glm::mat4 &view, const glm::mat4 &proj,
 }
 
 auto CsmResources::destroy(VkDevice device, VmaAllocator allocator) -> void {
+  ZoneScopedNC("CsmResources::destroy", 0xFF0000);
   vmaDestroyImage(allocator, image, allocation);
   for (auto &v : layer_views)
     vkDestroyImageView(device, v, nullptr);
@@ -1127,6 +1551,7 @@ auto CsmResources::destroy(VkDevice device, VmaAllocator allocator) -> void {
 }
 
 void SceneRenderer::init_csm() {
+  ZoneScopedNC("SceneRenderer::init_csm", 0xFFAA00);
   const VkImageCreateInfo image_ci{
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
@@ -1165,7 +1590,6 @@ void SceneRenderer::init_csm() {
   };
   vkCreateImageView(ctx.device, &array_view_ci, nullptr, &csm.array_view);
 
-  // Per-layer views for rendering into each cascade
   for (u32 i = 0u; i < shadow_map_cascade_count; ++i) {
     const VkImageViewCreateInfo layer_ci{
         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -1181,6 +1605,8 @@ void SceneRenderer::init_csm() {
             },
     };
     vkCreateImageView(ctx.device, &layer_ci, nullptr, &csm.layer_views[i]);
+    csm.layer_handles[i] =
+        register_external_view(csm.layer_views[i], VK_IMAGE_VIEW_TYPE_2D);
   }
 
   csm.bindless_handle =
@@ -1200,8 +1626,6 @@ CompressedInstanceData::CompressedInstanceData(const glm::mat4 &t,
                    ((static_cast<u32>(lod_count) & 0x7u) << 16u);
   material_and_lod = std::bit_cast<float>(meta);
 
-  // fp16 radius compression isn't worth it — you have the space
-  // and half-float precision breaks for large world coordinates
   this->bounding_radius = bounding_radius;
   padding0 = 0.0f;
   padding1 = 0.0f;

@@ -13,8 +13,9 @@ struct PC
     float4 LRTB;
     Vertex *vertices;
     uint base_vertex;
-    uint texture_id;
+    TextureHandle texture_id;
     SamplerHandle sampler_id;
+    uint pad;
 }
 
 struct VertexOutput

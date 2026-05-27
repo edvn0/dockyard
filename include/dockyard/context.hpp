@@ -26,6 +26,17 @@ struct VulkanContext {
   u32 graphics_queue_index{};
   u32 present_queue_index{};
 
+  struct Caps {
+    bool unified_image_layouts  = false;
+    bool present_wait           = false;
+    bool maintenance5           = false;
+    bool maintenance6           = false;
+    bool smooth_lines           = false;
+    bool stippled_smooth_lines  = false;
+    bool executable_properties = false;
+    bool push_descriptor        = false;  // promoted in 1.4, but guard anyway
+  } caps;
+
   auto graphics_queue() const -> VkQueue;
   auto present_queue() const -> VkQueue;
   auto destroy() -> void;
@@ -34,6 +45,10 @@ struct VulkanContext {
   one_time_submit(std::function<void(VkCommandBuffer)> &&func,
                   std::source_location = std::source_location::current()) const
       -> void;
+  auto
+one_time_submit_without_being_end(std::function<void(VkCommandBuffer)> &&func,
+                std::source_location = std::source_location::current()) const
+    -> void;
   auto transition_to_general(
       VkImage, VkImageAspectFlags aspect, u32 mip_count, u32 layer_count,
       std::source_location = std::source_location::current()) const -> void;
@@ -45,6 +60,7 @@ struct FrameSync {
   u64 last_value{0};                       // Current GPU progress
   VkFence in_flight_fence{};               // Legacy backup / non-present sync
   VkSemaphore image_available_semaphore{}; // Binary (Acquire)
+  u64 past_presentation_id = 0;
 
   auto destroy(const VulkanContext &ctx) -> void;
   static auto create(const VulkanContext &ctx) -> FrameSync;
@@ -90,7 +106,11 @@ struct ViewportResources {
   Texture forward_target_msaa{};
 
   TextureHandle forward_target{};
+  TextureHandle depth_resolved_target{};
+  TextureHandle depth_pre_hiz{};
   TextureHandle display_target{};
+
+  TextureHandle hierarchical_depth_pyramid_target{};
 
   [[nodiscard]] auto extent() const { return forward_target_msaa.extent; }
 
