@@ -37,83 +37,99 @@ auto sorted_copy(R range, Compare comp = {})
   return result;
 }
 
-struct TransientStage {
+  struct TransientStage {
   std::vector<u32> code{};
   VkShaderModuleCreateInfo module_ci{};
   VkPipelineShaderStageCreateInfo stage_ci{};
   std::string entry_name{};
+  VkShaderModule owned_module{VK_NULL_HANDLE};
 
   TransientStage() = default;
 
   TransientStage(TransientStage &&o) noexcept {
-    code = std::move(o.code);
-    entry_name = std::move(o.entry_name);
-    module_ci = o.module_ci;
-    module_ci.pCode = code.data();
-    stage_ci = o.stage_ci;
-    stage_ci.pName = entry_name.c_str();
-    stage_ci.pNext = &module_ci;
+    code             = std::move(o.code);
+    entry_name       = std::move(o.entry_name);
+    owned_module     = o.owned_module;
+    o.owned_module   = VK_NULL_HANDLE;
+
+    module_ci        = o.module_ci;
+    module_ci.pCode  = code.data();
+
+    stage_ci         = o.stage_ci;
+    stage_ci.pName   = entry_name.c_str();
+
+    // Re-seat pNext only if we're using the inline maintenance5 path
+    if (o.stage_ci.pNext == &o.module_ci)
+      stage_ci.pNext = &module_ci;
   }
 
   TransientStage &operator=(TransientStage &&) = delete;
-  TransientStage(const TransientStage &) = delete;
+  TransientStage(const TransientStage &)       = delete;
 
   static constexpr auto to_vk_stage(shader::Stage stage)
       -> VkShaderStageFlagBits {
     switch (stage) {
-    case shader::Stage::Vertex:
-      return VK_SHADER_STAGE_VERTEX_BIT;
-    case shader::Stage::Fragment:
-      return VK_SHADER_STAGE_FRAGMENT_BIT;
-    case shader::Stage::Mesh:
-      return VK_SHADER_STAGE_MESH_BIT_EXT;
-    case shader::Stage::Task:
-      return VK_SHADER_STAGE_TASK_BIT_EXT;
-    case shader::Stage::Compute:
-      return VK_SHADER_STAGE_COMPUTE_BIT;
-    case shader::Stage::None:
-      std::abort();
+    case shader::Stage::Vertex:   return VK_SHADER_STAGE_VERTEX_BIT;
+    case shader::Stage::Fragment: return VK_SHADER_STAGE_FRAGMENT_BIT;
+    case shader::Stage::Mesh:     return VK_SHADER_STAGE_MESH_BIT_EXT;
+    case shader::Stage::Task:     return VK_SHADER_STAGE_TASK_BIT_EXT;
+    case shader::Stage::Compute:  return VK_SHADER_STAGE_COMPUTE_BIT;
+    case shader::Stage::None:     std::abort();
     }
   }
 
-  static auto from_entry_point(shader::CompiledEntryPoint ep)
-      -> TransientStage {
+  static auto from_entry_point(shader::CompiledEntryPoint ep,
+                                bool maintenance5) -> TransientStage {
     TransientStage ts{};
-    ts.code = std::move(ep.spirv);
+    ts.code       = std::move(ep.spirv);
     ts.entry_name = std::move(ep.entry_point.name);
-    ts.module_ci = {
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
+    ts.module_ci  = {
+        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .codeSize = ts.code.size() * sizeof(u32),
-        .pCode = ts.code.data(),
+        .pCode    = ts.code.data(),
     };
     ts.stage_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-        .pNext = &ts.module_ci,
-        .flags = 0,
+        .pNext = maintenance5 ? &ts.module_ci : nullptr,
         .stage = to_vk_stage(ep.entry_point.stage),
         .module = VK_NULL_HANDLE,
-        .pName = ts.entry_name.c_str(),
-        .pSpecializationInfo = nullptr,
+        .pName  = ts.entry_name.c_str(),
     };
     return ts;
   }
 
-  static auto compile_all(shader::CompiledShader shader)
+  auto materialise(VkDevice device) -> bool {
+    if (owned_module != VK_NULL_HANDLE)
+      return true;
+
+    if (vkCreateShaderModule(device, &module_ci, nullptr, &owned_module)
+        != VK_SUCCESS)
+      return false;
+
+    stage_ci.module = owned_module;
+    stage_ci.pNext  = nullptr;
+    return true;
+  }
+
+  auto destroy_module(VkDevice device) -> void {
+    if (owned_module != VK_NULL_HANDLE) {
+      vkDestroyShaderModule(device, owned_module, nullptr);
+      owned_module = VK_NULL_HANDLE;
+    }
+  }
+
+  static auto compile_all(shader::CompiledShader shader, bool has_maintenance5 = true)
       -> std::vector<TransientStage> {
     std::vector<TransientStage> stages;
     stages.reserve(shader.entry_points.size());
     for (auto &ep : shader.entry_points)
-      stages.push_back(from_entry_point(std::move(ep)));
-
+      stages.push_back(from_entry_point(std::move(ep), has_maintenance5));
     return sorted_copy(std::move(stages),
                        [](const TransientStage &a, const TransientStage &b) {
                          return a.stage_ci.stage < b.stage_ci.stage;
                        });
   }
 };
-
 auto create_layout_from_reflection(
     VkDevice device, const shader::CompiledShader &compiled,
     VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE)
@@ -154,7 +170,7 @@ auto create_layout_from_reflection(
   return pipeline_layout;
 }
 
-auto build_graphics_pipeline(VkDevice device,
+auto build_graphics_pipeline(VulkanContext& ctx,
                              const GraphicsPipelineDescription &desc,
                              VkPipelineLayout active_layout)
     -> std::expected<VkPipeline, std::string> {
@@ -190,7 +206,7 @@ auto build_graphics_pipeline(VkDevice device,
       static_cast<VkBool32>(desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
                             desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
   line_smoothness.lineRasterizationMode =
-      VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH;
+      !ctx.caps.smooth_lines ? VK_LINE_RASTERIZATION_MODE_DEFAULT : VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH;
   line_smoothness.stippledLineEnable = VK_FALSE;
   line_smoothness.lineStipplePattern = 0xCC;
   line_smoothness.lineStippleFactor = 1;
@@ -257,6 +273,8 @@ auto build_graphics_pipeline(VkDevice device,
   VkGraphicsPipelineCreateInfo pipeline_ci{};
   pipeline_ci.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
   pipeline_ci.pNext = &rendering_info;
+  pipeline_ci.flags =
+      VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR;
   pipeline_ci.stageCount = static_cast<u32>(stage_cis.size());
   pipeline_ci.pStages = stage_cis.data();
   pipeline_ci.pVertexInputState = &vertex_input;
@@ -271,7 +289,7 @@ auto build_graphics_pipeline(VkDevice device,
   pipeline_ci.renderPass = VK_NULL_HANDLE;
 
   VkPipeline pipeline = VK_NULL_HANDLE;
-  const auto vr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1U,
+  const auto vr = vkCreateGraphicsPipelines(ctx.device, VK_NULL_HANDLE, 1U,
                                             &pipeline_ci, nullptr, &pipeline);
   if (vr != VK_SUCCESS)
     return std::unexpected(std::format("vkCreateGraphicsPipelines failed ({})",
@@ -286,12 +304,12 @@ auto build_graphics_pipeline(VkDevice device,
       desc.layout != VK_NULL_HANDLE ? "with user-provided layout"
                                     : "with auto-reflection layout");
   name_info.pObjectName = resolved_name.c_str();
-  vk::check(vkSetDebugUtilsObjectNameEXT(device, &name_info));
+  vk::check(vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info));
 
   return pipeline;
 }
 
-auto build_compute_pipeline(VkDevice device,
+auto build_compute_pipeline(VulkanContext& ctx,
                             const ComputePipelineDescription &desc,
                             VkPipelineLayout active_layout)
     -> std::expected<VkPipeline, std::string> {
@@ -310,12 +328,13 @@ auto build_compute_pipeline(VkDevice device,
 
   const VkComputePipelineCreateInfo ci{
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+      .flags = VK_PIPELINE_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_KHR,
       .stage = stages[0].stage_ci,
       .layout = active_layout,
   };
 
   VkPipeline pipeline = VK_NULL_HANDLE;
-  const VkResult vr = vkCreateComputePipelines(device, VK_NULL_HANDLE, 1u, &ci,
+  const VkResult vr = vkCreateComputePipelines(ctx.device, VK_NULL_HANDLE, 1u, &ci,
                                                nullptr, &pipeline);
   if (vr != VK_SUCCESS)
     return std::unexpected(std::format("vkCreateComputePipelines failed ({})",
@@ -330,7 +349,7 @@ auto build_compute_pipeline(VkDevice device,
       desc.layout != VK_NULL_HANDLE ? "with user-provided layout"
                                     : "with auto-reflection layout");
   name_info.pObjectName = resolved_name.c_str();
-  vk::check(vkSetDebugUtilsObjectNameEXT(device, &name_info));
+  vk::check(vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info));
 
   return pipeline;
 }
@@ -361,7 +380,7 @@ auto PipelineRegistry::create_graphics(GraphicsPipelineDescription desc)
   bool owns_layout = false;
 
   if (active_layout == VK_NULL_HANDLE) {
-    auto layout_res = create_layout_from_reflection(device, *maybe_compiled,
+    auto layout_res = create_layout_from_reflection(device(), *maybe_compiled,
                                                     desc.descriptor_set_layout);
     if (!layout_res)
       return std::unexpected(layout_res.error());
@@ -369,10 +388,10 @@ auto PipelineRegistry::create_graphics(GraphicsPipelineDescription desc)
     owns_layout = true;
   }
 
-  auto pipeline = build_graphics_pipeline(device, desc, active_layout);
+  auto pipeline = build_graphics_pipeline(context, desc, active_layout);
   if (!pipeline) {
     if (owns_layout)
-      vkDestroyPipelineLayout(device, active_layout, nullptr);
+      vkDestroyPipelineLayout(device(), active_layout, nullptr);
     return std::unexpected(std::move(pipeline.error()));
   }
 
@@ -395,7 +414,7 @@ auto PipelineRegistry::create_compute(ComputePipelineDescription desc)
   bool owns_layout = false;
 
   if (active_layout == VK_NULL_HANDLE) {
-    auto layout_res = create_layout_from_reflection(device, *maybe_compiled,
+    auto layout_res = create_layout_from_reflection(device(), *maybe_compiled,
                                                     desc.descriptor_set_layout);
     if (!layout_res)
       return std::unexpected(layout_res.error());
@@ -403,10 +422,10 @@ auto PipelineRegistry::create_compute(ComputePipelineDescription desc)
     owns_layout = true;
   }
 
-  auto pipeline = build_compute_pipeline(device, desc, active_layout);
+  auto pipeline = build_compute_pipeline(context, desc, active_layout);
   if (!pipeline) {
     if (owns_layout)
-      vkDestroyPipelineLayout(device, active_layout, nullptr);
+      vkDestroyPipelineLayout(device(), active_layout, nullptr);
     return std::unexpected(std::move(pipeline.error()));
   }
 
@@ -419,6 +438,11 @@ auto PipelineRegistry::create_compute(ComputePipelineDescription desc)
 }
 
 auto PipelineRegistry::poll_and_update_dirty_pipelines() -> void {
+  const auto now = std::chrono::steady_clock::now();
+  if (now - last_dirty_check < std::chrono::milliseconds(500))
+    return;
+  last_dirty_check = now;
+
   std::unordered_set<std::string> dirty_paths;
 
   for (u32 i = 0u; i < pool.capacity(); ++i) {
@@ -502,9 +526,9 @@ auto PipelineRegistry::destroy(PipelineHandle h) -> void {
   if (!e)
     return;
 
-  vkDestroyPipeline(device, e->pipeline, nullptr);
+  vkDestroyPipeline(device(), e->pipeline, nullptr);
   if (e->owns_layout)
-    vkDestroyPipelineLayout(device, e->layout, nullptr);
+    vkDestroyPipelineLayout(device(), e->layout, nullptr);
 
   pool.destroy(h);
 }
@@ -564,7 +588,7 @@ auto PipelineRegistry::reload(PipelineHandle h)
   bool new_owns_layout = false;
 
   if (new_layout == VK_NULL_HANDLE) {
-    auto layout_res = create_layout_from_reflection(device, *maybe_compiled,
+    auto layout_res = create_layout_from_reflection(device(), *maybe_compiled,
                                                     descriptor_set_layout);
     if (!layout_res)
       return std::unexpected(layout_res.error());
@@ -573,12 +597,12 @@ auto PipelineRegistry::reload(PipelineHandle h)
   }
 
   auto new_pipeline = std::visit(
-      [&](const auto &desc) -> std::expected<VkPipeline, std::string> {
-        using T = std::decay_t<decltype(desc)>;
+      [&]<typename V>(const V &desc) -> std::expected<VkPipeline, std::string> {
+        using T = std::decay_t<V>;
         if constexpr (std::is_same_v<T, GraphicsPipelineDescription>)
-          return build_graphics_pipeline(device, desc, new_layout);
+          return build_graphics_pipeline(context, desc, new_layout);
         else if constexpr (std::is_same_v<T, ComputePipelineDescription>)
-          return build_compute_pipeline(device, desc, new_layout);
+          return build_compute_pipeline(context, desc, new_layout);
         else
           return std::unexpected{"invalid pipeline type"};
       },
@@ -586,17 +610,17 @@ auto PipelineRegistry::reload(PipelineHandle h)
 
   if (!new_pipeline) {
     if (new_owns_layout)
-      vkDestroyPipelineLayout(device, new_layout, nullptr);
+      vkDestroyPipelineLayout(device(), new_layout, nullptr);
     return std::unexpected{new_pipeline.error()};
   }
 
-  vkDeviceWaitIdle(device);
+  vkDeviceWaitIdle(device());
 
   if (entry->pipeline != VK_NULL_HANDLE)
-    vkDestroyPipeline(device, entry->pipeline, nullptr);
+    vkDestroyPipeline(device(), entry->pipeline, nullptr);
 
   if (entry->owns_layout && entry->layout != VK_NULL_HANDLE)
-    vkDestroyPipelineLayout(device, entry->layout, nullptr);
+    vkDestroyPipelineLayout(device(), entry->layout, nullptr);
 
   entry->pipeline = *new_pipeline;
   entry->layout = new_layout;

@@ -1,5 +1,6 @@
 #define VMA_STATIC_VULKAN_FUNCTIONS 0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
+#define VMA_ASSERT_LEAK
 
 /*#define VMA_DEBUG_LOG_FORMAT(format, ...) \
   do {                                                                         \

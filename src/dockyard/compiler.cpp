@@ -8,6 +8,7 @@
 #include <slang-com-ptr.h>
 #include <slang.h>
 
+#include <span>
 #include <atomic>
 #include <format>
 #include <shared_mutex>
@@ -250,7 +251,7 @@ static auto extract_entry_point_info(slang::EntryPointLayout *ep)
 }
 
 #ifdef DOCKYARD_DEBUG
-constexpr auto debug_level = SLANG_DEBUG_INFO_LEVEL_STANDARD;
+constexpr auto debug_level = SLANG_DEBUG_INFO_LEVEL_MAXIMAL;
 constexpr auto optimisation_level = SLANG_OPTIMIZATION_LEVEL_NONE;
 #else
 constexpr auto debug_level = SLANG_DEBUG_INFO_LEVEL_NONE;
@@ -359,10 +360,9 @@ auto Compiler::compile(const VFSPath &vfs_path)
   using enum CompilationError::Type;
 
   const std::string cache_key{vfs_path.view()};
-  const std::string path_str{VFS::get().resolve(vfs_path)};
+  const std::string path_str{VFS::get().resolve(vfs_path).string()};
   auto absolute_path = std::filesystem::path{path_str};
 
-  // 1. Instantly read the last write time from the OS file system
   std::error_code ec{};
   auto last_write = std::filesystem::last_write_time(absolute_path, ec);
   u64 current_timestamp = 0;
@@ -379,18 +379,15 @@ auto Compiler::compile(const VFSPath &vfs_path)
     }};
   }
 
-  // 2. Early out if the file is cached and the timestamp hasn't nudged
   {
     std::shared_lock read_lock{impl->cache_mutex};
     if (auto it = impl->cache.find(cache_key); it != impl->cache.end()) {
-      // Use timestamp validation instead of hashing file bytes!
       if (it->second.content_hash == current_timestamp) {
         return it->second.shader;
       }
     }
   }
 
-  // 3. Cache missed or file changed: Proceed to read file bytes safely
   auto source_bytes = VFS::get().read_bytes(vfs_path);
   if (!source_bytes)
     return std::unexpected{
@@ -403,11 +400,10 @@ auto Compiler::compile(const VFSPath &vfs_path)
   auto stem = std::filesystem::path{vfs_path.relative_path()}.stem().string();
   const std::string source_str(source_bytes->begin(), source_bytes->end());
 
-  // Use a high-precision steady token for Slang's query-string bypass
-  const auto unique_token =
-      std::chrono::steady_clock::now().time_since_epoch().count();
-  std::string unique_module_name = std::format("{}_{}", stem, unique_token);
-  std::string unique_path_str = std::format("{}?{}", path_str, unique_token);
+  const u64 source_hash = hash_source(*source_bytes);
+  const std::string module_name = std::format("{}_{:016x}", stem, source_hash);
+  const std::string module_path =
+      std::format("{}?{:016x}", path_str, source_hash);
 
   std::vector<CompiledEntryPoint> compiled_entry_points;
   std::vector<DescriptorBinding> bindings;
@@ -418,12 +414,11 @@ auto Compiler::compile(const VFSPath &vfs_path)
 
     Slang::ComPtr<ISlangBlob> diag;
     slang::IModule *mod = impl->session->loadModuleFromSourceString(
-        unique_module_name.c_str(), unique_path_str.c_str(), source_str.c_str(),
+        module_name.c_str(), module_path.c_str(), source_str.c_str(),
         diag.writeRef());
     if (mod == nullptr)
       return std::unexpected{CompilationError{
-          .type =
-              Compilation, // Change to Compilation if load fails syntax/linking
+          .type = Compilation,
           .message = blob_to_string(diag),
       }};
 
@@ -502,7 +497,6 @@ auto Compiler::compile(const VFSPath &vfs_path)
       .push_constants = push_constants,
   };
 
-  // 4. Update memory cache associating the unique OS write timestamp
   {
     std::unique_lock write_lock{impl->cache_mutex};
     impl->cache.insert_or_assign(
@@ -515,7 +509,7 @@ auto Compiler::compile(const VFSPath &vfs_path)
 
 auto Compiler::is_dirty(const std::string_view vfs_path) -> bool {
   const std::string cache_key{vfs_path};
-  const std::string path_str = VFS::get().resolve(vfs_path);
+  const std::string path_str = VFS::get().resolve(vfs_path).string();
 
   std::error_code ec{};
   auto last_write = std::filesystem::last_write_time(path_str, ec);
@@ -529,12 +523,9 @@ auto Compiler::is_dirty(const std::string_view vfs_path) -> bool {
 
   std::shared_lock read_lock{impl->cache_mutex};
   if (auto it = impl->cache.find(cache_key); it != impl->cache.end()) {
-    // If the timestamp on disk doesn't match what's in our cache, it's dirty!
     return it->second.content_hash != current_timestamp;
   }
 
-  // If it's not even in the cache yet, treat it as dirty so it compiles
-  // initially
   return true;
 }
 
@@ -555,24 +546,41 @@ auto Compiler::clear_cache() -> void {
   impl->cache.clear();
 }
 
-auto Compiler::precache_shaders(Badge<App>) -> std::future<void> {
+  auto Compiler::precache_shaders(Badge<App>) -> std::future<void> {
   using namespace std::literals;
+
   return std::async(std::launch::async, [this] {
     auto shader_paths = VFS::get().list(
-        "shaders://", {
-                          .ignored_dirs = {"include"sv, "includes"sv},
-                          .included_extensions = {".slang"sv},
-                      });
+        "shaders://",
+        {
+            .ignored_dirs = {"include"sv, "includes"sv},
+            .included_extensions = {".slang"sv},
+        });
+
+    std::vector<std::future<void>> futures;
+    futures.reserve(shader_paths.size());
+
     for (const auto &path : shader_paths) {
-      if (path.extension() == ".slang") {
-        auto result = compile(VFSPath::create("shaders://{}", path.filename()));
+      if (path.extension() != ".slang") {
+        continue;
+      }
+
+      const auto shader_name = path.filename();
+
+      futures.emplace_back(std::async(std::launch::async, [this, shader_name] {
+        auto result = compile(VFSPath::create("shaders://{}", shader_name));
+
         if (!result) {
-          error("Failed to compile shader {}: {}", path.filename(),
+          error("Failed to compile shader {}: {}", shader_name,
                 result.error().message);
         } else {
-          info("Precompiled shader: {}", path.filename());
+          info("Precompiled shader: {}", shader_name);
         }
-      }
+      }));
+    }
+
+    for (auto &future : futures) {
+      future.get();
     }
   });
 }

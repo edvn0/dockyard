@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dockyard/vfs_path.hpp"
+#include <cstddef>
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/types.hpp>
 
@@ -14,6 +15,14 @@ template <typename Tag, typename Impl> class Pool;
 struct SubImageTag;
 struct SubImageEntry;
 using SubImagePool = Pool<SubImageTag, SubImageEntry>;
+
+struct TextureTag;
+struct TextureEntry;
+using TexturePool = Pool<TextureTag, TextureEntry>;
+
+namespace pool {
+struct MipData;
+}
 } // namespace dy
 
 namespace dy {
@@ -32,6 +41,7 @@ struct Texture {
   VkExtent2D extent{};
   u32 mip_levels{1U};
   u32 array_layers{1U};
+  std::string name;
   bool owned{true};
 
   [[nodiscard]] auto valid() const -> bool { return image != VK_NULL_HANDLE; }
@@ -41,7 +51,8 @@ struct Texture {
   }
 
   struct CreateInfo {
-    std::span<const u32> bytes{}; // one f32 per pixel
+    std::span<const std::byte> bytes;
+    std::span<const pool::MipData> mips;
     u32 width{};
     u32 height{};
     VkFormat format{VK_FORMAT_R8G8B8A8_SRGB};
@@ -54,7 +65,8 @@ struct Texture {
   static auto create(const VulkanContext &ctx, std::string_view name, u32 width,
                      u32 height, VkFormat format, VkImageUsageFlags usage,
                      VkImageAspectFlags aspect,
-                     VkSampleCountFlagBits = VK_SAMPLE_COUNT_1_BIT) -> Texture;
+                     VkSampleCountFlagBits = VK_SAMPLE_COUNT_1_BIT,
+                     u32 mip_levels = 1U) -> Texture;
   static auto load_hdr_texture(const VulkanContext &, const VFSPath &)
       -> Texture;
 
@@ -69,12 +81,22 @@ struct Texture {
 
   std::vector<VkImageView> sub_views;
   std::vector<SubImageHandle> sub_handles;
+  std::vector<TextureHandle> mip_layer_handles;
+  std::vector<VkImageView> mip_layer_views;
 
   [[nodiscard]] auto sub_view_handle(u32 mip, u32 view_within_mip = 0U) const
       -> SubImageHandle {
     const u32 views_per_mip = static_cast<u32>(sub_handles.size()) / mip_levels;
     assert(mip < mip_levels && view_within_mip < views_per_mip);
     return sub_handles[(mip * views_per_mip) + view_within_mip];
+  }
+
+  [[nodiscard]] auto mip_layer_handle(u32 mip, u32 view_within_mip = 0U) const
+      -> TextureHandle {
+    const u32 views_per_mip =
+        static_cast<u32>(mip_layer_handles.size()) / mip_levels;
+    assert(mip < mip_levels && view_within_mip < views_per_mip);
+    return mip_layer_handles[(mip * views_per_mip) + view_within_mip];
   }
 
   [[nodiscard]] auto has_sub_views() const -> bool {
@@ -85,14 +107,20 @@ struct Texture {
     VkImageViewType view_type = VK_IMAGE_VIEW_TYPE_2D;
     u32 layer_count = 1U;
   };
-  auto register_sub_views(const VulkanContext &ctx, SubImagePool &sub_images,
-                          BindlessSet &bindless,
+  auto register_sub_views(const VulkanContext &, SubImagePool &, BindlessSet &,
                           SubViewDesc = {
                               .view_type = VK_IMAGE_VIEW_TYPE_2D,
                               .layer_count = 1U,
                           }) -> void;
-  auto destroy(const VulkanContext &ctx, SubImagePool *sub_images = nullptr)
-      -> void;
+  auto register_sub_views(const VulkanContext &, TexturePool &, BindlessSet &,
+                          SubViewDesc = {
+                              .view_type = VK_IMAGE_VIEW_TYPE_2D,
+                              .layer_count = 1U,
+                          }) -> void;
+
+  auto destroy(const VulkanContext &, SubImagePool *) -> void;
+  auto destroy(const VulkanContext &, TexturePool *) -> void;
+  auto destroy(const VulkanContext &) -> void;
 };
 
 } // namespace dy

@@ -9,6 +9,7 @@
 #include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/vk_check.hpp>
+#include <vulkan/vulkan_core.h>
 
 namespace dy {
 
@@ -70,15 +71,15 @@ auto SwapchainResources::rebuild(const VulkanContext &ctx, VkSurfaceKHR surface,
     is.destroy(ctx);
   image_sync.clear();
 
-  constexpr auto requested_min_images = 2;
   auto maybe_new_swapchain =
       vkb::SwapchainBuilder{ctx.physical_device, ctx.device, surface,
                             ctx.graphics_queue_index, ctx.present_queue_index}
           .set_desired_extent(width, height)
           .set_old_swapchain(swapchain)
           .use_default_format_selection()
-          .set_desired_min_image_count(requested_min_images)
-          .set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+          .set_desired_present_mode(VK_PRESENT_MODE_FIFO_RELAXED_KHR)
+          .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR)
+          .set_desired_min_image_count(frames_in_flight + 1) // 3
           .set_image_usage_flags(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
           .build();
 
@@ -119,6 +120,8 @@ auto SwapchainResources::create(const VulkanContext &ctx, VkSurfaceKHR surface,
 
 auto ViewportResources::resize(const VulkanContext &ctx,
                                SceneRenderer &renderer, u32 w, u32 h) -> void {
+  // ── 1. Unmanaged MSAA Attachments (Destroy and recreate inline)
+  // ─────────────────────────
   depth_msaa.destroy(ctx);
   depth_msaa =
       Texture::create(ctx, "depth_msaa", w, h, VK_FORMAT_D32_SFLOAT,
@@ -131,9 +134,85 @@ auto ViewportResources::resize(const VulkanContext &ctx,
                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                       VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_4_BIT);
 
+  // ── 2. Depth Resolved Target
+  // ────────────────────────────────────────────────────────────
+  if (depth_resolved_target.valid()) {
+    auto *entry = renderer.textures.get(depth_resolved_target);
+    entry->texture.destroy(ctx, &renderer.textures);
+    entry->texture = Texture::create(
+        ctx, "depth_resolved_target", w, h, VK_FORMAT_D32_SFLOAT,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        VK_IMAGE_ASPECT_DEPTH_BIT);
+    renderer.bindless.mark_dirty();
+  } else {
+    auto tex = Texture::create(
+        ctx, "depth_resolved_target", w, h, VK_FORMAT_D32_SFLOAT,
+        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        VK_IMAGE_ASPECT_DEPTH_BIT);
+    depth_resolved_target = renderer.textures.create(TextureEntry{
+        .texture = std::move(tex),
+        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+    });
+  }
+
+  if (depth_pre_hiz.valid()) {
+    auto *entry = renderer.textures.get(depth_pre_hiz);
+    entry->texture.destroy(ctx, &renderer.textures);
+    entry->texture = Texture::create(
+        ctx, "depth_pre_hiz", w, h, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_STORAGE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT);
+    renderer.bindless.mark_dirty();
+  } else {
+    auto tex = Texture::create(ctx, "depth_pre_hiz", w, h, VK_FORMAT_R32_SFLOAT,
+                               VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                   VK_IMAGE_USAGE_SAMPLED_BIT |
+                                   VK_IMAGE_USAGE_STORAGE_BIT,
+                               VK_IMAGE_ASPECT_COLOR_BIT);
+    depth_pre_hiz = renderer.textures.create(TextureEntry{
+        .texture = std::move(tex),
+        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+    });
+  }
+
+  // ── 3. Hierarchical Depth Pyramid Target (Hi-Z)
+  // ──────────────────────────────────────────
+  u32 hiz_w = std::max(1U, w / 2);
+  u32 hiz_h = std::max(1U, h / 2);
+  u32 hiz_mips = static_cast<u32>(std::bit_width(std::max(hiz_w, hiz_h)));
+
+  if (hierarchical_depth_pyramid_target.valid()) {
+    auto *entry = renderer.textures.get(hierarchical_depth_pyramid_target);
+    entry->texture.destroy(ctx, &renderer.textures);
+
+    entry->texture = Texture::create(
+        ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips);
+
+    entry->texture.register_sub_views(ctx, renderer.textures,
+                                      renderer.bindless);
+  } else {
+    auto tex = Texture::create(
+        ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips);
+
+    tex.register_sub_views(ctx, renderer.textures, renderer.bindless);
+    hierarchical_depth_pyramid_target = renderer.textures.create(TextureEntry{
+        .texture = std::move(tex),
+        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+    });
+  }
+
+  // ── 4. Forward HDR Target
+  // ───────────────────────────────────────────────────────────────
   if (forward_target.valid()) {
     auto *entry = renderer.textures.get(forward_target);
-    entry->texture.destroy(ctx);
+    entry->texture.destroy(ctx, &renderer.textures);
     entry->texture = Texture::create(
         ctx, "forward_target", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
@@ -152,26 +231,23 @@ auto ViewportResources::resize(const VulkanContext &ctx,
     });
   }
 
-  // display_target: tonemapped LDR output, sampled by ImGui as a widget.
-  // RGBA8 is sufficient post-tonemapping, and matches what ImGui expects to
-  // display. NOTE: ensure your composite pipeline is also created with
-  // VK_FORMAT_R8G8B8A8_UNORM.
+  // ── 5. LDR Display Target
+  // ───────────────────────────────────────────────────────────────
   if (display_target.valid()) {
     auto *entry = renderer.textures.get(display_target);
-    entry->texture.destroy(ctx);
+    entry->texture.destroy(ctx, &renderer.textures);
     entry->texture = Texture::create(
         ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT);
     renderer.bindless.mark_dirty();
-
   } else {
     auto tex = Texture::create(
         ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT);
     display_target = renderer.textures.create(TextureEntry{
-        .texture = tex,
+        .texture = std::move(tex), // Move it cleanly
         .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
     });
   }
@@ -209,85 +285,165 @@ auto VulkanContext::destroy() -> void {
 auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
     -> VulkanContext {
   VulkanContext ctx{};
-
   ctx.surface = s;
   ctx.instance = inst;
   volkLoadInstance(ctx.instance.instance);
 
+  auto bare_ret = vkb::PhysicalDeviceSelector{ctx.instance}
+      .set_surface(ctx.surface)
+      .set_minimum_version(1, 4)
+      .select();
+  if (!bare_ret) {
+    error("Failed to find a Vulkan 1.4 GPU: {}", bare_ret.error().message());
+    std::abort();
+  }
+  VkPhysicalDevice phys_handle = bare_ret.value().physical_device;
+
+  VkPhysicalDeviceVulkan14Features avail_14{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+  };
+  VkPhysicalDevicePresentWaitFeaturesKHR avail_present_wait{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+      .pNext = &avail_14,
+  };
+  VkPhysicalDevicePresentIdFeaturesKHR avail_present_id{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
+      .pNext = &avail_present_wait,
+  };
+  VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR avail_unified{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR,
+      .pNext = &avail_present_id,
+  };
+  VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR avail_pipeline_exec{
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
+      .pNext = &avail_unified,
+  };
+  VkPhysicalDeviceFeatures2 avail2{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
+      .pNext = &avail_pipeline_exec,
+  };
+  vkGetPhysicalDeviceFeatures2(phys_handle, &avail2);
+
+  ctx.caps.maintenance5          = avail_14.maintenance5             == VK_TRUE;
+  ctx.caps.maintenance6          = avail_14.maintenance6             == VK_TRUE;
+  ctx.caps.smooth_lines          = avail_14.smoothLines              == VK_TRUE;
+  ctx.caps.stippled_smooth_lines = avail_14.stippledSmoothLines      == VK_TRUE;
+  ctx.caps.push_descriptor       = avail_14.pushDescriptor           == VK_TRUE;
+  ctx.caps.present_wait          = avail_present_wait.presentWait    == VK_TRUE;
+  ctx.caps.unified_image_layouts = avail_unified.unifiedImageLayouts == VK_TRUE;
+  ctx.caps.executable_properties =
+      avail_pipeline_exec.pipelineExecutableInfo == VK_TRUE;
+
+  info("Caps: maintenance5={} maintenance6={} smooth_lines={} stippled_smooth_lines={} push_descriptor={} present_wait={} unified_image_layouts={}",
+       ctx.caps.maintenance5, ctx.caps.maintenance6, ctx.caps.smooth_lines,
+       ctx.caps.stippled_smooth_lines, ctx.caps.push_descriptor,
+       ctx.caps.present_wait, ctx.caps.unified_image_layouts);
+
   VkPhysicalDeviceFeatures features{};
-  features.multiDrawIndirect = VK_TRUE;
-  features.samplerAnisotropy = VK_TRUE;
+  features.multiDrawIndirect    = VK_TRUE;
+  features.samplerAnisotropy    = VK_TRUE;
   features.textureCompressionBC = VK_TRUE;
-  features.wideLines = VK_TRUE;
+  features.wideLines            = VK_TRUE;
+  features.drawIndirectFirstInstance = VK_TRUE;
 
   VkPhysicalDeviceVulkan11Features features_11{};
   features_11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-  features_11.storageBuffer16BitAccess = VK_TRUE;
-  features_11.variablePointersStorageBuffer = VK_TRUE;
-  features_11.variablePointers = VK_TRUE;
-  features_11.shaderDrawParameters = VK_TRUE;
-  features_11.multiview = VK_TRUE;
+  features_11.storageBuffer16BitAccess        = VK_TRUE;
+  features_11.variablePointersStorageBuffer   = VK_TRUE;
+  features_11.variablePointers                = VK_TRUE;
+  features_11.shaderDrawParameters            = VK_TRUE;
+  features_11.multiview                       = VK_TRUE;
 
   VkPhysicalDeviceVulkan12Features features_12{};
   features_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-  features_12.drawIndirectCount = VK_TRUE;
-  features_12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
-  features_12.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
-  features_12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
-  features_12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
-  features_12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
-  features_12.descriptorBindingPartiallyBound = VK_TRUE;
-  features_12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
-  features_12.descriptorBindingVariableDescriptorCount = VK_TRUE;
-  features_12.runtimeDescriptorArray = VK_TRUE;
-  features_12.scalarBlockLayout = VK_TRUE;
-  features_12.timelineSemaphore = VK_TRUE;
-  features_12.bufferDeviceAddress = VK_TRUE;
+  features_12.drawIndirectCount                                = VK_TRUE;
+  features_12.shaderSampledImageArrayNonUniformIndexing        = VK_TRUE;
+  features_12.shaderStorageBufferArrayNonUniformIndexing       = VK_TRUE;
+  features_12.shaderStorageImageArrayNonUniformIndexing        = VK_TRUE;
+  features_12.descriptorBindingSampledImageUpdateAfterBind     = VK_TRUE;
+  features_12.descriptorBindingUpdateUnusedWhilePending        = VK_TRUE;
+  features_12.descriptorBindingPartiallyBound                  = VK_TRUE;
+  features_12.descriptorBindingStorageImageUpdateAfterBind     = VK_TRUE;
+  features_12.descriptorBindingVariableDescriptorCount         = VK_TRUE;
+  features_12.runtimeDescriptorArray                           = VK_TRUE;
+  features_12.scalarBlockLayout                                = VK_TRUE;
+  features_12.timelineSemaphore                                = VK_TRUE;
+  features_12.bufferDeviceAddress                              = VK_TRUE;
+  features_12.samplerFilterMinmax = VK_TRUE;
+  features_12.hostQueryReset = VK_TRUE;
 
   VkPhysicalDeviceVulkan13Features features_13{};
   features_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
   features_13.shaderDemoteToHelperInvocation = VK_TRUE;
-  features_13.synchronization2 = VK_TRUE;
-  features_13.dynamicRendering = VK_TRUE;
-  features_13.maintenance4 = VK_TRUE;
+  features_13.synchronization2               = VK_TRUE;
+  features_13.dynamicRendering               = VK_TRUE;
+  features_13.maintenance4                   = VK_TRUE;
 
-  VkPhysicalDeviceVulkan14Features features_14{};
-  features_14.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES;
-  features_14.dynamicRenderingLocalRead = VK_TRUE;
-  features_14.maintenance5 = VK_TRUE;
-  features_14.maintenance6 = VK_TRUE;
-  features_14.pushDescriptor = VK_TRUE;
-  features_14.smoothLines = VK_TRUE;
-  features_14.stippledSmoothLines = VK_TRUE;
+  VkPhysicalDeviceVulkan14Features features_14{
+      .sType                     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+      .smoothLines               = ctx.caps.smooth_lines          ? VK_TRUE : VK_FALSE,
+      .stippledSmoothLines       = ctx.caps.stippled_smooth_lines ? VK_TRUE : VK_FALSE,
+      .dynamicRenderingLocalRead = VK_TRUE,
+      .maintenance5              = ctx.caps.maintenance5          ? VK_TRUE : VK_FALSE,
+      .maintenance6              = ctx.caps.maintenance6          ? VK_TRUE : VK_FALSE,
+      .pushDescriptor            = ctx.caps.push_descriptor       ? VK_TRUE : VK_FALSE,
+  };
 
   VkPhysicalDevicePresentIdFeaturesKHR present_id_features{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
-      .pNext = nullptr,
+      .sType     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
+      .pNext     = nullptr,
       .presentId = VK_TRUE,
   };
-
   VkPhysicalDevicePresentWaitFeaturesKHR present_wait_features{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
-      .pNext = nullptr,
+      .sType       = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+      .pNext       = nullptr,
       .presentWait = VK_TRUE,
   };
+  VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR
+      pipeline_executable_features{
+          .sType =
+              VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
+          .pNext = nullptr,
+          .pipelineExecutableInfo = VK_TRUE,
+      };
 
-  auto phys_ret = vkb::PhysicalDeviceSelector{ctx.instance}
-                      .set_surface(ctx.surface)
-                      .set_minimum_version(1, 4)
-                      .set_required_features(features)
-                      .set_required_features_11(features_11)
-                      .set_required_features_12(features_12)
-                      .set_required_features_13(features_13)
-                      .set_required_features_14(features_14)
-                      .add_required_extension_features(present_id_features)
-                      .add_required_extension_features(present_wait_features)
-                      .add_required_extensions({
-                          VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
-                          VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
-                          VK_KHR_PRESENT_ID_EXTENSION_NAME,
-                      })
-                      .select();
+  auto selector = vkb::PhysicalDeviceSelector{ctx.instance}
+      .set_surface(ctx.surface)
+      .set_minimum_version(1, 4)
+      .set_required_features(features)
+      .set_required_features_11(features_11)
+      .set_required_features_12(features_12)
+      .set_required_features_13(features_13)
+      .set_required_features_14(features_14);
+
+  selector = selector.add_required_extensions({
+      VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
+  });
+
+  if (ctx.caps.present_wait) {
+    selector = selector
+        .add_required_extension_features(present_id_features)
+        .add_required_extension_features(present_wait_features)
+        .add_required_extensions({
+            VK_KHR_PRESENT_ID_EXTENSION_NAME,
+            VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
+        });
+  }
+  if (ctx.caps.unified_image_layouts) {
+    selector = selector.add_required_extensions({
+        VK_KHR_UNIFIED_IMAGE_LAYOUTS_EXTENSION_NAME,
+    });
+  }
+  if (ctx.caps.executable_properties) {
+    selector =
+        selector.add_required_extension_features(pipeline_executable_features)
+            .add_required_extensions({
+                VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME,
+            });
+  }
+
+  auto phys_ret = selector.select();
   if (!phys_ret) {
     error("Failed to select physical device: {}", phys_ret.error().message());
     std::abort();
@@ -307,16 +463,16 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
       ctx.device.get_queue_index(vkb::QueueType::graphics).value();
   ctx.present_queue_index =
       ctx.device.get_queue_index(vkb::QueueType::present).value();
-  info("Graphics queue: {}, Present queue: {}", ctx.graphics_queue_index,
-       ctx.present_queue_index);
+  info("Graphics queue: {}, Present queue: {}",
+       ctx.graphics_queue_index, ctx.present_queue_index);
 
   VmaVulkanFunctions vma_fns{};
   VmaAllocatorCreateInfo alloc_info{};
-  alloc_info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
-  alloc_info.physicalDevice = ctx.physical_device;
-  alloc_info.device = ctx.device;
+  alloc_info.flags            = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+  alloc_info.physicalDevice   = ctx.physical_device;
+  alloc_info.device           = ctx.device;
   alloc_info.pVulkanFunctions = &vma_fns;
-  alloc_info.instance = ctx.instance;
+  alloc_info.instance         = ctx.instance;
   alloc_info.vulkanApiVersion = VK_API_VERSION_1_4;
   vmaImportVulkanFunctionsFromVolk(&alloc_info, &vma_fns);
 
@@ -518,6 +674,50 @@ auto VulkanContext::one_time_submit(std::function<void(VkCommandBuffer)> &&func,
   vkDestroyCommandPool(device, pool, nullptr);
 }
 
+auto VulkanContext::one_time_submit_without_being_end(
+    std::function<void(VkCommandBuffer)> &&func, std::source_location loc) const
+    -> void {
+  VkCommandPoolCreateInfo pool_info{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+      .queueFamilyIndex = graphics_queue_index,
+  };
+  VkCommandPool pool;
+  vkCreateCommandPool(device, &pool_info, nullptr, &pool);
+
+  VkCommandBufferAllocateInfo alloc_info{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+  };
+  VkCommandBuffer cmd;
+  vkAllocateCommandBuffers(device, &alloc_info, &cmd);
+
+  func(cmd);
+
+  VkCommandBufferSubmitInfo cbsi{};
+  cbsi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+  cbsi.commandBuffer = cmd;
+  VkSubmitInfo2 submit_info{
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+      .commandBufferInfoCount = 1,
+      .pCommandBufferInfos = &cbsi,
+  };
+
+  PROFILE_SCOPE(std::format("One time submit: {}", loc.function_name()));
+  VkFence fence{};
+  VkFenceCreateInfo fence_info{};
+  fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+  vkCreateFence(device, &fence_info, nullptr, &fence);
+  vkResetFences(device, 1, &fence);
+  vkQueueSubmit2(graphics_queue(), 1, &submit_info, fence);
+  vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+  vkDestroyFence(device, fence, nullptr);
+
+  vkDestroyCommandPool(device, pool, nullptr);
+}
+
 auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
                       TextureHandle equirect) -> IblProbe {
   IblProbe probe{};
@@ -533,7 +733,7 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
   };
 
   const u32 prefiltered_size = 512u;
-  const u32 prefiltered_mips =
+  constexpr u32 prefiltered_mips =
       static_cast<u32>(std::bit_width(prefiltered_size));
   probe.prefiltered_mip_count = prefiltered_mips;
 
@@ -575,7 +775,7 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
                               }),
       VK_IMAGE_VIEW_TYPE_CUBE);
 
-  auto bytes = std::vector<u32>(512u * 512u, {});
+  auto bytes = std::vector<std::byte>(512u * 512u * sizeof(u32), {});
   probe.brdf_lut =
       register_tex(Texture::from_bytes(ctx, "ibl/brdf_lut",
                                        {
@@ -710,7 +910,6 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
     const auto pref_entry = renderer.textures.get(probe.prefiltered);
     const auto lut_entry = renderer.textures.get(probe.brdf_lut);
 
-    // ── [1] Transition all outputs UNDEFINED → GENERAL ───────────────────
     {
       const VkImageMemoryBarrier2 init_barriers[] = {
           cube_barrier(env_entry->texture.image, 1u, VK_PIPELINE_STAGE_2_NONE,
@@ -735,7 +934,6 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       submit_barriers(cmd, init_barriers);
     }
 
-    // ── equirect → env cubemap ────────────────────────────────────────────
     {
       const auto &entry = renderer.pipeline_registry->get_entry(pipe_equirect);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
@@ -751,11 +949,9 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
                          sizeof(pc), &pc);
 
-      // 512 / 8 = 64 groups per dim, z = 6 faces
       vkCmdDispatch(cmd, 64u, 64u, 6u);
     }
 
-    // ── [2] env_map write → irradiance + prefilter read ───────────────────
     {
       const VkImageMemoryBarrier2 b = cube_barrier(
           env_entry->texture.image, 1u, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -765,7 +961,6 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       submit_barriers(cmd, {&b, 1});
     }
 
-    // ── irradiance convolution ────────────────────────────────────────────
     {
       const auto &entry =
           renderer.pipeline_registry->get_entry(pipe_irradiance);
@@ -773,17 +968,22 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
                               0u, 1u, &renderer.bindless.set, 0u, nullptr);
 
+      const auto target_size = irr_entry->texture.extent.width;
+
       const PushConstants pc{
           .equirect_index = probe.env_map.index(),
-          .size = 32u,
+          .size = target_size, // 1. Pass the dynamic size here
           .sampler_index = renderer.dummy_sampler_handle.index(),
           .out_index = irr_entry->texture.sub_view_handle(0u, 0u).index(),
       };
       vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
                          sizeof(pc), &pc);
 
-      // 32 / 8 = 4 groups per dim, z = 6 faces
-      vkCmdDispatch(cmd, 4u, 4u, 6u);
+      const auto group_count_x = (target_size + 7u) / 8u;
+      const auto group_count_y = (target_size + 7u) / 8u;
+      const auto group_count_z = 6u; // Always 6 cubemap faces
+
+      vkCmdDispatch(cmd, group_count_x, group_count_y, group_count_z);
     }
 
     // ── specular prefilter — one dispatch per mip ─────────────────────────

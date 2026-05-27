@@ -25,6 +25,8 @@
 
 #include <ImGuizmo.h>
 
+#include <implot.h>
+
 #include <dockforge/component_inspector.hpp>
 
 #include <dockforge/component_renderers.hpp>
@@ -96,31 +98,34 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
         mesh::load_from_memory(*renderer, cube_verts, cube_indices).value();
 
     auto &scene = *active_scene;
-    const int grid_side = 10;
-    const float spacing = 0.5F;
-    const float offset = (grid_side - 1) * spacing / 2.F;
+    constexpr int grid_side = 10;
 
-    auto parent = scene.make("Cubes");
-
-    for (int x = 0; x < grid_side; ++x) {
-      for (int y = 0; y < grid_side; ++y) {
-        for (int z = 0; z < grid_side; ++z) {
-          auto name = std::format("Cube_{}_{}_{}", x, y, z);
-          auto entity = scene.make(name);
-          entity.get<Components::Transform>().mut().position = {
-              (static_cast<float>(x) * spacing) - offset,
-              (static_cast<float>(y) * spacing) - offset,
-              (static_cast<float>(z) * spacing) - offset,
-          };
-          entity.emplace<Components::Mesh>(mesh_handle);
-          entity.emplace<Components::ParentOf>(parent.handle());
-        }
-      }
-    }
+    auto cube = scene.make("Cube");
+    cube.emplace<Components::Mesh>(mesh_handle);
+    cube.get<Components::Transform>().mut().scale = {
+        grid_side,
+        grid_side,
+        grid_side,
+    };
     auto floor = scene.make("Floor");
     floor.emplace<Components::Mesh>(mesh_handle);
     floor.get<Components::Transform>().mut().scale = {30, 1, 30};
     floor.get<Components::Transform>().mut().position = {0, -10, 0};
+
+    auto light_parent = scene.make("Light parent");
+    // Create some random point lights on top of the floor
+    const auto floor_pos = glm::vec3{0, -10, 0};
+    for (int i = 0; i < 128; i++) {
+      auto light = scene.make("Light", light_parent);
+      auto &l = light.emplace<Components::PointLight>();
+      l.color = glm::linearRand(glm::vec3{0.5F}, glm::vec3{1.F});
+      l.intensity = glm::linearRand(0.5F, 5.F);
+      l.radius = glm::linearRand(5.F, 20.F);
+      auto &t = light.get<Components::Transform>();
+      t.mut().position =
+          floor_pos + glm::vec3{glm::linearRand(-15.F, 15.F), 2.F,
+                                glm::linearRand(-15.F, 15.F)};
+    }
   }
 
   auto &registry = *renderer->pipeline_registry;
@@ -174,20 +179,21 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       renderer->subimages);
 
   auto loaded = mesh::load_from_path(
-      VFSPath::create("meshes://DamagedHelmet.glb"), *renderer);
+      VFSPath::create("meshes://damaged_helmet/DamagedHelmet.glb"), *renderer);
   if (loaded) {
-    constexpr auto size = 50.0F;
+    constexpr auto size = 25.0F;
     auto parent = active_scene->make("Helmet parent");
-    for (auto i = 0; i < 5000; i++) {
+    for (auto i = 0; i < 300; i++) {
       auto entity = active_scene->make("Helmet", parent);
       entity.emplace<Components::Mesh>(*loaded);
       entity.get<Components::Transform>().mut().position = glm::linearRand(
-          glm::vec3{-size, -size, -size}, glm::vec3{size, size, size});
+          glm::vec3{-size}, glm::vec3{size});
     }
   }
 
   if (auto loaded_sponza = mesh::load_from_path(
-          VFSPath::create("meshes://main_sponza.glb"), *renderer)) {
+          VFSPath::create("meshes://Sponza/MISSING_main_sponza.glb"),
+          *renderer)) {
     auto sponza = active_scene->make("Sponza");
     sponza.emplace<Components::Mesh>(*loaded_sponza);
     sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
@@ -200,8 +206,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   df.projection_config = {
       .fov_degrees = 30.0F,
       .aspect = 1.77F,
-      .near = 0.1F,
-      .far = 30.0F,
+      .near_plane = 0.1F,
+      .far_plane = 30.0F,
   };
   df.color = glm::vec4{1.F, 1.F, 0.F, 1.F};
 }
@@ -210,9 +216,17 @@ auto Dockforge::on_mouse_moved(const events::MouseMoved &e) -> void {
   if (glfwGetMouseButton(get_window(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
     editor_camera->on_mouse_delta(e.dx, e.dy);
 }
+
+auto Dockforge::on_mouse_scrolled(const events::MouseScrolled& e) -> void {
+	editor_camera->on_mouse_scrolled(e);
+}
+
+
 auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
-  if (e.key == GLFW_KEY_ESCAPE)
+  if (e.key == GLFW_KEY_ESCAPE) {
+    renderer->texture_upload_pool->drop();
     glfwSetWindowShouldClose(get_window(), GLFW_TRUE);
+  }
 
   if (e.key == GLFW_KEY_F2 && e.mods == GLFW_MOD_SHIFT)
     editor_camera->save_keyframe(2.F);
@@ -361,9 +375,9 @@ auto Dockforge::draw_inspector() -> void {
 
   ImGui::Separator();
   ImGui::Spacing();
-
-  ComponentInspector::draw(*renderer, entity);
-  //  state.hierarchy_dirty = true;
+  if (ComponentInspector::draw(*renderer, entity)) {
+    state.hierarchy_dirty = true;
+  }
   ImGui::End();
 }
 
@@ -404,7 +418,7 @@ void Dockforge::draw_scene_outliner() {
         continue;
 
       const std::string_view label = tag->tag;
-      if (!filter.PassFilter(label.data(), std::cend(label)))
+      if (!filter.PassFilter(label.data()))
         continue;
 
       // 1. Handle Indentation
@@ -622,7 +636,7 @@ auto Dockforge::duplicate_entity(Entity src) -> Entity {
     tag->tag += " (copy)";
 
   if (auto *ov = dst.try_get<Components::MaterialOverride>()) {
-    ov->gpu_slot = ~0U;
+    ov->gpu_slot = Components::MaterialOverride::invalid_material;
     ov->dirty = true;
   }
 
@@ -658,6 +672,64 @@ auto Dockforge::draw_debug_shapes() -> void {
     auto &&[view, proj] = frustum.matrices(pos, rot);
     canvas_renderer->frustum(view, proj, frustum.color);
   }
+}
+
+namespace {
+struct SpanTelemetry {
+  static constexpr size_t max_points = 500;
+
+  std::array<double, max_points * 2> storage_pool{};
+  size_t write_index = 0;
+
+  auto push(double dt_ms) -> void {
+    storage_pool[write_index] = dt_ms;
+    storage_pool[write_index + max_points] = dt_ms;
+
+    write_index = (write_index + 1) % max_points;
+  }
+
+  [[nodiscard]] auto get_history_span() const noexcept
+      -> std::span<const double, max_points> {
+    return std::span<const double, max_points>(&storage_pool[write_index],
+                                               max_points);
+  }
+};
+SpanTelemetry telemetry;
+} // namespace
+
+auto draw_performance_overlay() -> void {
+  auto current_dt_ms = static_cast<double>(ImGui::GetIO().DeltaTime * 1000.0F);
+  telemetry.push(current_dt_ms);
+
+  if (ImGui::Begin("Telemetry Profiler")) {
+    ImGui::Text("FPS: %.1f | Current Frame: %.2f ms", ImGui::GetIO().Framerate,
+                current_dt_ms);
+
+    ImPlot::SetNextAxesToFit();
+    ImPlot::SetNextAxisLimits(ImAxis_Y1, 0.0, 40.0, ImGuiCond_Always);
+
+    if (ImPlot::BeginPlot("##FrametimeGraph", ImVec2(-1, 150),
+                          ImPlotFlags_NoLegend)) {
+
+      ImPlot::SetupAxis(ImAxis_X1, "Frames (History)", ImPlotAxisFlags_None);
+      ImPlot::SetupAxis(ImAxis_Y1, "Frametime (ms)", ImPlotAxisFlags_None);
+
+      double budget_60fps = 16.66;
+      double budget_30fps = 33.33;
+      ImPlot::DragLineY(0, &budget_60fps, ImVec4(0.0f, 1.0f, 0.0f, 0.4f), 1.0f,
+                        1);
+      ImPlot::DragLineY(1, &budget_30fps, ImVec4(1.0f, 0.5f, 0.0f, 0.4f), 1.0f,
+                        1);
+
+      auto history_view = telemetry.get_history_span();
+
+      ImPlot::PlotLine("Frametime", history_view.data(),
+                       static_cast<int>(history_view.size()), 1.0, 0.0);
+
+      ImPlot::EndPlot();
+    }
+  }
+  ImGui::End();
 }
 
 auto Dockforge::build_ui() -> void {
@@ -731,6 +803,15 @@ auto Dockforge::build_ui() -> void {
 
     glm::mat4 world_matrix = ltw.matrix;
 
+    if (auto *mesh = selected_entity.try_get<Components::Mesh>();
+        mesh != nullptr) {
+      const auto *asset = renderer->resolve(mesh->handle);
+      const auto &aabb = asset->mesh_aabb;
+
+      canvas_renderer->box(transform.matrix_without_rotation(), aabb,
+                           glm::vec4{0.9F, 0.1F, 0.1F, 1.0F});
+    }
+
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj), gizmo_op,
                          ImGuizmo::LOCAL, glm::value_ptr(world_matrix));
 
@@ -772,18 +853,51 @@ auto Dockforge::build_ui() -> void {
   canvas_renderer->render_2d();
 
   if (ImGui::Begin("Sun direction")) {
-    glm::vec4 copy = renderer->sun_direction;
-    if (ImGui::DragFloat4("Sun direction", glm::value_ptr(copy), 0.1F)) {
-      renderer->sun_direction =
-          glm::vec4(glm::normalize(glm::vec3(copy)), 0.0F);
+    if (ImGui::DragFloat3("Sun direction",
+                          glm::value_ptr(renderer->sun_direction), 0.1F, -1.0F,
+                          1.0F)) {
+      state.hierarchy_dirty = true;
     }
   }
   ImGui::End();
 
   draw_scene_outliner();
-
   draw_inspector();
 
+  draw_performance_overlay();
+
+  auto draw_csm = [](CsmResources &resources) {
+    if (ImGui::Begin("Cascaded Shadow Map Debug")) {
+      static int selected_cascade = 0;
+      if (selected_cascade >= shadow_map_cascade_count) {
+        selected_cascade = 0;
+      }
+
+      std::string preview_text = "Cascade " + std::to_string(selected_cascade);
+
+      if (ImGui::BeginCombo("Level", preview_text.c_str())) {
+        for (int i = 0; i < shadow_map_cascade_count; i++) {
+          const bool is_selected = (selected_cascade == i);
+          std::string item_text = "Cascade " + std::to_string(i);
+
+          if (ImGui::Selectable(item_text.c_str(), is_selected)) {
+            selected_cascade = i;
+          }
+
+          if (is_selected) {
+            ImGui::SetItemDefaultFocus();
+          }
+        }
+        ImGui::EndCombo();
+      }
+
+      ImGui::Image(ImTextureRef{ImTextureID{
+                       resources.layer_handles[selected_cascade].index()}},
+                   ImVec2(256, 256));
+    }
+    ImGui::End();
+  };
+  draw_csm(renderer->csm);
   if (viewport_hovered || viewport_focused) {
     ImGui::GetIO().WantCaptureMouse = false;
     ImGui::GetIO().WantCaptureKeyboard = false;
@@ -818,11 +932,9 @@ auto update_local_to_world_matrices(entt::registry &registry) -> void {
 
     auto &&[position, rotation, scale] = transform.get();
 
-    // Compute the matrix
     ltw.matrix = glm::translate(glm::mat4{1.0F}, position) *
                  glm::mat4_cast(rotation) * glm::scale(glm::mat4{1.0F}, scale);
 
-    // Reset the flag
     transform.set_dirty(false);
   }
 }
@@ -832,6 +944,15 @@ auto Dockforge::update(float ts) -> void {
     editor_camera->update(ts);
 
   update_local_to_world_matrices(active_scene->registry());
+
+  /*  active_scene->registry().view<Components::MeshRequest>().each([&](auto e,
+   auto &req) { if (auto loaded = mesh::load_from_path(req.path, *renderer)) {
+       req.result = *loaded;
+     } else {
+       warn("Failed to load mesh from path: {}", req.path.string());
+     }
+     active_scene->registry().remove<Components::MeshRequest>(e);
+   }); */
 }
 
 void emit_barrier(VkCommandBuffer cmd,
@@ -851,32 +972,36 @@ void emit_barrier(VkCommandBuffer cmd,
   vkCmdPipelineBarrier2(cmd, &dependency_info);
 }
 
-auto Dockforge::resolve_material_slot(Entity e) -> u32 {
-  constexpr auto default_material = 0U;
-
-  auto *material_override = e.try_get<Components::MaterialOverride>();
-  if (material_override == nullptr)
-    return default_material;
-
-  if (material_override->gpu_slot == ~0U) {
-    if (auto slot = renderer->override_pool.alloc()) {
-      material_override->gpu_slot = *slot;
-      material_override->dirty = true;
-    } else {
-      warn("MaterialOverridePool full — override skipped this frame");
-      return default_material;
+void Dockforge::flush_material_overrides() {
+    auto view = active_scene->registry().view<Components::MaterialOverride>();
+    for (auto&& [e, override_slot] : view.each()) {
+      if (override_slot.gpu_slot ==
+          Components::MaterialOverride::invalid_material) {
+        if (auto slot = renderer->override_pool.alloc()) {
+          override_slot.gpu_slot = *slot;
+          override_slot.dirty = true;
+        } else {
+          warn("MaterialOverridePool full — override skipped this frame");
+        }
+      }
+        if (override_slot.dirty) {
+            renderer->geometry_pool->get_materials_mut(override_slot.gpu_slot, 1)[0] = override_slot.material;
+            renderer->geometry_pool->flush_material(override_slot.gpu_slot);
+            override_slot.dirty = false;
+        }
     }
-  }
-
-  if (material_override->dirty) {
-    renderer->geometry_pool->get_materials_mut(
-        material_override->gpu_slot, 1)[0] = material_override->material;
-    renderer->geometry_pool->flush_material(material_override->gpu_slot);
-    material_override->dirty = false;
-  }
-
-  return material_override->gpu_slot;
 }
+
+namespace {
+auto resolve_material_slot(Entity e) -> u32 {
+  constexpr u32 default_material = 0U;
+  auto *ov = e.try_get<Components::MaterialOverride>();
+  if (ov == nullptr ||
+      ov->gpu_slot == Components::MaterialOverride::invalid_material)
+    return default_material;
+  return ov->gpu_slot;
+}
+} // namespace
 
 void compute_world_matrices(entt::registry &registry) {
   registry.sort<Components::ParentOf>(
@@ -895,7 +1020,7 @@ void compute_world_matrices(entt::registry &registry) {
   auto base_view =
       registry.view<Components::Transform, Components::LocalToWorld>();
   for (auto &&[entity, xt, ltw] : base_view.each()) {
-    ltw.matrix = xt.matrix(); // Or xt.to_mat4() based on your implementation
+    ltw.matrix = xt.matrix(); 
   }
 
   auto hierarchy_view =
@@ -915,8 +1040,11 @@ void compute_world_matrices(entt::registry &registry) {
 }
 
 auto Dockforge::render(RenderContext &ctx) -> u64 {
+  TracyVkCollectHost(renderer->tracy_vk_ctx);
+
   if (state.hierarchy_dirty) [[unlikely]] {
     compute_world_matrices(active_scene->registry());
+    shadow_map_state.invalid = true;
     state.hierarchy_dirty = false;
   }
 
@@ -935,16 +1063,42 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   auto render_group =
       active_scene->group<Components::Transform, Components::LocalToWorld,
                           Components::Mesh>();
+  
+  flush_material_overrides();
 
   for (auto &&[e, xt, ltw, m] : render_group.each()) {
     renderer->submit(m.handle, ltw.matrix, forward_pipeline.index(),
                      resolve_material_slot({*active_scene, e}));
   }
   auto [view, projection] = resolve_camera();
-  renderer->update_csm(view, projection, editor_camera->near_plane(),
-                       editor_camera->far_plane());
+  const auto camera_moved = view != shadow_map_state.last_view_matrix;
+  if (camera_moved) {
+    shadow_map_state.last_view_matrix = view;
+    shadow_map_state.invalid = true;
+  }
+  if (shadow_map_state.invalid) {
+    renderer->update_csm(view, projection, editor_camera->near_plane(),
+                         editor_camera->far_plane());
+  }
 
-  auto prepare_result = renderer->prepare(ctx.frame_index, view, projection);
+  std::array<GPUPointLight, FrameUBO::max_point_lights> gpu_lights;
+  u32 light_count = 0;
+  for (auto &&[e, ltw, light] : active_scene
+                                    ->view<const Components::LocalToWorld,
+                                           const Components::PointLight>()
+                                    .each()) {
+    if (light_count >= FrameUBO::max_point_lights)
+      break;
+    gpu_lights[light_count++] = {
+        .position = glm::vec4(ltw.matrix[3]), // extract translation
+        .radius = light.radius,
+        .color = light.color,
+        .intensity = light.intensity,
+    };
+  }
+
+  auto prepare_result =
+      renderer->prepare(ctx.frame_index, view, projection, gpu_lights);
   if (prepare_result.failed()) {
     return ctx.next_frame_wait_value();
   }
@@ -991,10 +1145,10 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       renderer->resolve(viewport_resources.display_target);
 
   {
-    renderer->culling_pass(ctx.main_cb);
+    renderer->depth_frustum_culling_pass(ctx.main_cb);
   }
 
-  {
+  if (shadow_map_state.invalid) {
     const VkExtent2D shadow_extent{
         .width = shadow_map_cascade_resolution,
         .height = shadow_map_cascade_resolution,
@@ -1016,6 +1170,13 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         .extent = shadow_extent,
     };
 
+
+    const auto& pipeline = renderer->pipeline_registry->get(renderer->shadow_pipeline);
+    vkCmdBindPipeline(ctx.main_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindDescriptorSets(ctx.main_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->pipeline_layout,
+        0U, 1u, &renderer->bindless.set, 0u, nullptr);
+    vkCmdBindIndexBuffer(ctx.main_cb, renderer->geometry_pool->index_buffer->get_buffer(), 0u,
+        VK_INDEX_TYPE_UINT32);
     for (u32 cascade_idx = 0U; cascade_idx < shadow_map_cascade_count;
          ++cascade_idx) {
       VkRenderingAttachmentInfo depth_att{};
@@ -1046,6 +1207,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       renderer->render_shadow_cascade(ctx.main_cb, cascade_idx);
 
       vkCmdEndRendering(ctx.main_cb);
+      shadow_map_state.invalid = false;
     }
 
     VkImageMemoryBarrier2 csm_to_sampled{};
@@ -1068,14 +1230,18 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     emit_barrier(ctx.main_cb, csm_to_sampled);
   }
 
-  // ── 2. Depth pre-pass ───────────────────────────────────────────────
   {
+    const auto &resolve_target =
+        renderer->resolve(viewport_resources.depth_resolved_target);
     VkRenderingAttachmentInfo depth_attachment{};
     depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     depth_attachment.imageView = viewport_resources.depth_msaa.sampled_view;
     depth_attachment.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     depth_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depth_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depth_attachment.resolveMode = VK_RESOLVE_MODE_MIN_BIT;
+    depth_attachment.resolveImageView = resolve_target.sampled_view;
+    depth_attachment.resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL;
     depth_attachment.clearValue = {
         .depthStencil =
             {
@@ -1094,13 +1260,63 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     vkCmdSetScissor(ctx.main_cb, 0u, 1u, &scissor);
     vkCmdSetCullMode(ctx.main_cb, VK_CULL_MODE_BACK_BIT);
     vkCmdSetFrontFace(ctx.main_cb, VK_FRONT_FACE_CLOCKWISE);
-    vkCmdSetDepthBias(ctx.main_cb, 1.25f, 0.F, 1.75f);
-    vkCmdBindIndexBuffer(ctx.main_cb,
-                         renderer->geometry_pool->index_buffer->get_buffer(),
-                         0U, VK_INDEX_TYPE_UINT32);
+    vkCmdSetDepthCompareOp(ctx.main_cb, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    
     renderer->render_pass(ctx.main_cb, renderer->depth_prepass,
                           renderer->pipeline_registry->get(depth_pipeline));
     vkCmdEndRendering(ctx.main_cb);
+
+    VkImageMemoryBarrier2 depth_barrier{};
+    depth_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    depth_barrier.srcStageMask = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+    depth_barrier.srcAccessMask =
+        VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    depth_barrier.dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT;
+    depth_barrier.dstAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+    depth_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    depth_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    depth_barrier.image = viewport_resources.depth_msaa.image;
+    depth_barrier.subresourceRange = {
+        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+        .levelCount = 1u,
+        .layerCount = 1u,
+    };
+    emit_barrier(ctx.main_cb, depth_barrier);
+  }
+
+  // Occlusion culling pass
+  {
+    renderer->blit_depth_to_pre_hiz_pass(
+        ctx.main_cb, viewport_resources.depth_resolved_target,
+        viewport_resources.depth_pre_hiz);
+    renderer->build_hierarchical_depth_pyramid_pass(
+        ctx.main_cb, viewport_resources.depth_pre_hiz,
+        viewport_resources.hierarchical_depth_pyramid_target);
+
+    const auto &resolve_target =
+        renderer->resolve(viewport_resources.hierarchical_depth_pyramid_target);
+    VkImageMemoryBarrier2 hiz_barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .image = resolve_target.image,
+        .subresourceRange =
+            {
+                .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                .levelCount = VK_REMAINING_MIP_LEVELS,
+                .layerCount = 1,
+            },
+    };
+    emit_barrier(ctx.main_cb, hiz_barrier);
+  }
+
+  {
+    renderer->forward_occlusion_culling_pass(
+        ctx.main_cb, viewport_resources.hierarchical_depth_pyramid_target);
   }
 
   // ── 4. Forward MSAA pass ────────────────────────────────────────────
@@ -1142,7 +1358,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     }
 
     vkCmdSetCullMode(ctx.main_cb, VK_CULL_MODE_BACK_BIT);
-    vkCmdSetDepthCompareOp(ctx.main_cb, VK_COMPARE_OP_GREATER_OR_EQUAL);
+    vkCmdSetDepthCompareOp(ctx.main_cb, VK_COMPARE_OP_EQUAL);
     vkCmdSetDepthWriteEnable(ctx.main_cb, VK_FALSE);
     vkCmdSetDepthTestEnable(ctx.main_cb, VK_TRUE);
     vkCmdSetFrontFace(ctx.main_cb, VK_FRONT_FACE_CLOCKWISE);
@@ -1157,6 +1373,20 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
                                             scissor));
 
     vkCmdEndRendering(ctx.main_cb);
+
+    VkImageMemoryBarrier2 forward_to_composite{};
+    forward_to_composite.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    forward_to_composite.srcStageMask =
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    forward_to_composite.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    forward_to_composite.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    forward_to_composite.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    forward_to_composite.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    forward_to_composite.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    forward_to_composite.image =
+        forward_texture.image; // resolved target, not MSAA
+    forward_to_composite.subresourceRange = color_range;
+    emit_barrier(ctx.main_cb, forward_to_composite);
   }
 
   {
@@ -1176,6 +1406,20 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     vkCmdBeginRendering(ctx.main_cb, &composite_ri);
     renderer->composite_pass(ctx.main_cb);
     vkCmdEndRendering(ctx.main_cb);
+
+    VkImageMemoryBarrier2 composite_to_imgui{};
+    composite_to_imgui.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+
+    composite_to_imgui.srcStageMask =
+        VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+    composite_to_imgui.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    composite_to_imgui.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    composite_to_imgui.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    composite_to_imgui.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    composite_to_imgui.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    composite_to_imgui.image = display_texture.image;
+    composite_to_imgui.subresourceRange = color_range;
+    emit_barrier(ctx.main_cb, composite_to_imgui);
   }
 
   {
@@ -1183,7 +1427,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         VkImageMemoryBarrier2{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
             .pNext = nullptr,
-            .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+            .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
             .srcAccessMask = 0,
             .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,

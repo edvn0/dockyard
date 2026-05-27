@@ -32,7 +32,6 @@ auto ShaderWatcher::stop() -> void {
     watch_id = -1;
   }
 
-  // Safely stop and join the debounce thread
   {
     std::scoped_lock lock(debounce_mutex);
     is_running = false;
@@ -64,27 +63,35 @@ void ShaderWatcher::handleFileAction(efsw::WatchID, const std::string &dir,
   debounce_cv.notify_all();
 }
 
-void ShaderWatcher::debounce_loop() {
+  void ShaderWatcher::debounce_loop() {
   while (true) {
     std::unordered_set<std::string> changes_to_fire;
 
     {
-      std::unique_lock<std::mutex> lock(debounce_mutex);
+      std::unique_lock lock(debounce_mutex);
 
-      debounce_cv.wait(
-          lock, [this] { return !is_running || !pending_changes.empty(); });
+      debounce_cv.wait(lock, [this] {
+        return !is_running || !pending_changes.empty();
+      });
 
       if (!is_running)
         return;
 
-      while (debounce_cv.wait_for(lock, std::chrono::milliseconds(100)) ==
-             std::cv_status::no_timeout) {
-        if (!is_running)
+      while (!pending_changes.empty()) {
+        const auto status =
+            debounce_cv.wait_for(lock, std::chrono::milliseconds(100));
+
+        if (!is_running) {
+          warn("Got here for some reason.");
           return;
+        }
+
+        if (status == std::cv_status::timeout)
+          break;
+
       }
 
       changes_to_fire = std::move(pending_changes);
-      pending_changes.clear();
     }
 
     for (const auto &path : changes_to_fire) {

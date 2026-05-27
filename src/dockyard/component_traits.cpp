@@ -185,6 +185,20 @@ void ComponentSerializer<Components::LocalToWorld>::load(
   archive.reader.read(&value.matrix, sizeof(glm::mat4));
 }
 
+void ComponentSerializer<Components::PointLight>::save(
+    auto &archive, const Components::PointLight &value) {
+  archive.writer.write(&value.color, sizeof(glm::vec3));
+  archive.writer.write(&value.intensity, sizeof(float));
+  archive.writer.write(&value.radius, sizeof(float));
+}
+
+void ComponentSerializer<Components::PointLight>::load(
+    auto &archive, Components::PointLight &value) {
+  archive.reader.read(&value.color, sizeof(glm::vec3));
+  archive.reader.read(&value.intensity, sizeof(float));
+  archive.reader.read(&value.radius, sizeof(float));
+}
+
 template void
 ComponentSerializer<Components::Tag>::load(CompileTimeInputArchive &,
                                            Components::Tag &);
@@ -213,5 +227,10 @@ ComponentSerializer<Components::LocalToWorld>::load(CompileTimeInputArchive &,
                                                     Components::LocalToWorld &);
 template void ComponentSerializer<Components::LocalToWorld>::save(
     CompileTimeOutputArchive &, const Components::LocalToWorld &);
+template void
+ComponentSerializer<Components::PointLight>::load(CompileTimeInputArchive &,
+                                                  Components::PointLight &);
+template void ComponentSerializer<Components::PointLight>::save(
+    CompileTimeOutputArchive &, const Components::PointLight &);
 
 } // namespace dy

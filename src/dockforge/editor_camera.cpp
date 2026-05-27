@@ -35,6 +35,15 @@ auto EditorCamera::on_mouse_delta(float dx, float dy) -> void {
 
 auto EditorCamera::set_aspect(u32 w, u32 h) -> void { camera.set_aspect(w, h); }
 
+auto EditorCamera::on_mouse_scrolled(const events::MouseScrolled& e) -> void {
+    if (use_path)
+        return;
+
+    constexpr f32 zoom_speed = 1.0f;
+
+    camera.position += camera.forward() * e.dy * zoom_speed;
+}
+
 auto EditorCamera::set_pose(glm::vec3 position, glm::vec3 look_at) -> void {
   camera.position = position;
   auto [y, p] = Components::Camera::facing_toward(position, look_at);

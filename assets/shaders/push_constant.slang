@@ -10,12 +10,14 @@ struct InstanceData
 };
 
 enum class MaterialFlags {
-    None = 0,
+    none = 0,
     depth_prepass = 1 << 0,    // Render in depth prepass (opaque/masked)
     alpha_mask = 1 << 1,       // Alpha testing enabled
     has_transmission = 1 << 2, // Shader: check before sampling transmission
     has_anisotropy = 1 << 3,   // Shader: check before using anisotropy
     two_sided = 1 << 4,        // Backface rendering enabled
+    combined_orm = 1 << 5,     // Shader: occlusion packed in ORM (XYZ=ORM, W=unused)
+    no_occlusion = 1 << 6,     // Shader: skip occlusion sampling, use occlusion_strength only
 };
 
 struct GPUMaterial {
@@ -59,6 +61,14 @@ struct CascadeData {
 };
 // 64 + 16 = 80 bytes
 
+struct PointLight {
+    float3 position;
+    float radius; // falloff distance
+    float3 color;
+    float intensity;
+};
+static const int max_point_lights = 256;
+
 struct FrameUBO
 {
     float4x4 view;                                         // 64 bytes
@@ -78,7 +88,12 @@ struct FrameUBO
     uint ibl_brdf_lut_index;                               // binding 0 (sampled_images)
     uint ibl_sampler_index;                                // binding 1 (samplers) — linear + mip
     uint ibl_prefiltered_mips;                             // needed for roughness LOD selection
-    uint _pad[3];                                          // pad to 16-byte multiple                                        // padding to make size a multiple of 16 bytes
+    uint pad_pre_lights;
+    Array<PointLight, max_point_lights> point_lights; // 32 * 256 = 8192 bytes
+    uint point_light_count;                           // 4 bytes
+    uint pad0;
+    uint pad1;
+    uint pad2; // pad to 16-byte multiple                                        // padding to make size a multiple of 16 bytes
 }
 
 struct Vertex
@@ -109,7 +124,7 @@ struct GpuPushConstants
     ImmutablePtr<PositionOnlyVertex, AddressSpace.Device> position_only_buffer_ptr;
     ImmutablePtr<InstanceData, AddressSpace.Device> instance_buffer_ptr;
     ImmutablePtr<uint, AddressSpace.Device> culled_index_remapping_buffer;
-    ImmutablePtr<FrameUBO, AddressSpace.Device> frame_ubo;
+    Ptr<FrameUBO, Access.Read, AddressSpace.Device> frame_ubo;
     ImmutablePtr<GPUMaterial, AddressSpace.Device> material_buffer_ptr;
     uint cascade_index;
     uint _pad[3];

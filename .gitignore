@@ -4,3 +4,14 @@ CMakeUserPresets.json
 compile_commands.json
 .idea
 .env
+log
+*.log
+
+.cache
+.vs
+assets/meshes/**/*.glb
+assets/meshes/**/*.ktx2
+assets/meshes/**/*.ktx
+assets/meshes/**/*.png
+assets/meshes/**/*.jpg
+assets/meshes/**/*.jpeg

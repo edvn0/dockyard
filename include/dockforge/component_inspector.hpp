@@ -42,13 +42,13 @@ concept has_valid_renderer =
 
 class ComponentInspector {
 public:
-  static auto draw(dy::SceneRenderer &, dy::Entity &) -> void;
+  static auto draw(dy::SceneRenderer &, dy::Entity &) -> bool;
 
 private:
   template <typename T>
   static auto draw_one(dy::SceneRenderer &, dy::Entity &,
                        std::optional<std::function<void()>> &pending_remove)
-      -> void;
+      -> bool;
 
   static auto draw_add_button(dy::SceneRenderer &, dy::Entity &,
                               std::optional<std::function<void()>> &pending_add)

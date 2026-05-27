@@ -1,8 +1,7 @@
 import push_constant;
 
-struct CullingPushConstants
+struct DepthCullingPushConstants
 {
-
     ImmutablePtr<InstanceData, AddressSpace.Device> instance_buffer;
     ImmutablePtr<FrameUBO, AddressSpace.Device> frame_data;
 
@@ -10,11 +9,6 @@ struct CullingPushConstants
     ImmutablePtr<uint, AddressSpace.Device> depth_instance_to_command;
     Ptr<VkDrawIndexedIndirectCommand, Access.ReadWrite, AddressSpace.Device> depth_indirect_commands;
     Ptr<uint, Access.ReadWrite, AddressSpace.Device> depth_culled_remap;
-
-    ImmutablePtr<uint, AddressSpace.Device> forward_original_remap;
-    ImmutablePtr<uint, AddressSpace.Device> forward_instance_to_command;
-    Ptr<VkDrawIndexedIndirectCommand, Access.ReadWrite, AddressSpace.Device> forward_indirect_commands;
-    Ptr<uint, Access.ReadWrite, AddressSpace.Device> forward_culled_remap;
 
     uint total_instance_count;
     uint padding[3];
@@ -71,7 +65,7 @@ bool is_visible(float4x4 model_matrix, float local_radius, Array<float4, 6> frus
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
-void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID, uniform CullingPushConstants pc)
+void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID, uniform DepthCullingPushConstants pc)
 {
     uint item_idx = dispatchThreadID.x;
     if (item_idx >= pc.total_instance_count)
@@ -79,12 +73,18 @@ void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID, uniform CullingPus
 
     var instance = unpack_instance_data(pc.instance_buffer[item_idx]);
 
+    bool visible = is_visible(instance.transform, instance.bounding_radius,
+                              pc.frame_data.frustum_planes,
+                              pc.frame_data.camera_pos.xyz, 100.0f * 100.0f);
+
+    if (!visible)
+        return;
+
     float3 world_pos = float3(instance.transform[0][3], instance.transform[1][3], instance.transform[2][3]);
     float dist_sq = dot(world_pos - pc.frame_data.camera_pos.xyz,
                         world_pos - pc.frame_data.camera_pos.xyz);
     uint lod_idx = select_lod(instance.bounding_radius, dist_sq, instance.lod_count);
 
-    // Depth prepass + shadow maps: always pass, still LOD-select
     uint depth_base_cmd_id = pc.depth_instance_to_command[item_idx];
     if (depth_base_cmd_id != 0xFFFFFFFF)
     {
@@ -95,25 +95,5 @@ void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID, uniform CullingPus
         uint depth_slot;
         InterlockedAdd((*cmd_ptr).instanceCount, 1, depth_slot);
         pc.depth_culled_remap[(*cmd_ptr).firstInstance + depth_slot] = item_idx;
-    }
-
-    // Forward pass: frustum + distance culled
-    bool visible = is_visible(instance.transform, instance.bounding_radius,
-                              pc.frame_data.frustum_planes,
-                              pc.frame_data.camera_pos.xyz, 100.0f * 100.0f);
-    if (visible)
-    {
-        uint forward_base_cmd_id = pc.forward_instance_to_command[item_idx];
-        if (forward_base_cmd_id != 0xFFFFFFFF)
-        {
-            uint forward_lod_cmd_id = forward_base_cmd_id + lod_idx;
-            Ptr<VkDrawIndexedIndirectCommand, Access.ReadWrite, AddressSpace.Device> cmd_ptr =
-                pc.forward_indirect_commands + forward_lod_cmd_id;
-
-            uint forward_slot;
-            InterlockedAdd((*cmd_ptr).instanceCount, 1, forward_slot);
-            pc.forward_culled_remap[(*cmd_ptr).firstInstance + forward_slot] =
-                item_idx | (lod_idx << 28u);
-        }
     }
 }

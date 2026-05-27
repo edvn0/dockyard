@@ -22,6 +22,13 @@ using namespace dy;
 
 struct EditorCamera;
 
+struct ShadowMapState {
+  glm::mat4 last_view_matrix{1.0F};
+  bool invalid = true;
+  float near_plane = 0.01F;
+  float far_plane = 100.0F;
+};
+
 struct Dockforge : App {
   std::shared_ptr<Scene> editor_scene;
   std::shared_ptr<Scene> runtime_scene;
@@ -52,6 +59,7 @@ struct Dockforge : App {
   std::optional<VkExtent2D> pending_viewport_resize{std::nullopt};
   std::optional<VkExtent2D> candidate_viewport_resize{std::nullopt};
   SceneOutlinerState state;
+  ShadowMapState shadow_map_state;
 
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
@@ -61,7 +69,8 @@ struct Dockforge : App {
   auto on_changed_tag(entt::registry &, entt::entity) -> void {}
   auto init(const InitialisationContext &ctx) -> void override;
   auto on_mouse_moved(const events::MouseMoved &e) -> void override;
-  auto on_key_released(const events::KeyReleased &e) -> void override;
+  auto on_key_released(const events::KeyReleased& e) -> void override;
+  auto on_mouse_scrolled(const events::MouseScrolled&) -> void override;
   [[nodiscard]] auto resolve_camera() const -> std::pair<glm::mat4, glm::mat4>;
   [[nodiscard]] auto resolve_camera_with_position() const
       -> std::tuple<glm::mat4, glm::mat4, glm::vec3>;
@@ -74,7 +83,7 @@ struct Dockforge : App {
   auto build_ui() -> void;
   auto draw_debug_shapes() -> void;
   auto duplicate_entity(Entity) -> Entity;
-  [[nodiscard]] auto resolve_material_slot(Entity) -> u32;
+  void flush_material_overrides();
 
   auto destroy() -> void override;
   auto update(float ts) -> void override;

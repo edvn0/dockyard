@@ -11,8 +11,10 @@
 #include <fastgltf/tools.hpp>
 #include <fastgltf/types.hpp>
 
-#include <mikktspace.h>
+#include <ktx.h>
+#include <ktxvulkan.h>
 
+#include <mikktspace.h>
 #include <stb_image.h>
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -21,13 +23,14 @@
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/packing.hpp>
 
+#include <algorithm>
+#include <execution>
 #include <expected>
 #include <format>
+#include <numeric>
+#include <ranges>
 #include <string>
 #include <vector>
-
-#include <taskflow/algorithm/for_each.hpp>
-#include <taskflow/taskflow.hpp>
 
 #include <meshoptimizer.h>
 
@@ -43,6 +46,32 @@ struct PrimitiveResult {
 };
 
 } // namespace dy
+
+namespace {
+struct GeometryRequirements {
+  dy::usize total_vertices = 0;
+  dy::usize total_indices = 0;
+};
+
+auto calculate_requirements(const auto &extracted_prims)
+    -> GeometryRequirements {
+  GeometryRequirements reqs;
+  for (const auto &res : extracted_prims) {
+    if (res) {
+      reqs.total_vertices += res->data.vertices.size();
+      reqs.total_indices += res->data.indices.size();
+    }
+  }
+  return reqs;
+}
+
+template <typename O> auto cast(void *ptr, dy::usize offset) -> O * {
+  return reinterpret_cast<O *>(static_cast<dy::u8 *>(ptr) + offset);
+}
+} // namespace
+
+// ── MikkTSpace (unchanged)
+// ────────────────────────────────────────────────────
 
 namespace mikkt {
 struct MikkContext {
@@ -110,7 +139,6 @@ static auto generate_mikktspace_tangents(dy::PrimitiveData &prim)
   MikkContext mctx;
   mctx.prim = &prim;
 
-  // Unpack once up front — cheaper than re-unpacking per mikk callback
   const dy::usize vtx_count = prim.vertices.size();
   mctx.positions.resize(vtx_count);
   mctx.normals.resize(vtx_count);
@@ -145,102 +173,190 @@ static auto generate_mikktspace_tangents(dy::PrimitiveData &prim)
 namespace dy {
 namespace {
 
-struct DecodedImage {
-  std::vector<u32> pixels;
+// ── KTX2 transcode ───────────────────────────────────────────────────────────
+
+// Target formats after UASTC transcode.
+// BC7  — best quality colour/RGBA (requires BC7 feature, universally supported
+//         on desktop Vulkan)
+// BC5  — two-channel RG, ideal for normal maps (xy only, reconstruct z)
+// BC1  — fallback for very simple single-channel data (not used by default)
+//
+// We pick the transcode target based on the intended VkFormat so the caller
+// can stay format-agnostic.
+struct KtxMip {
+  std::vector<std::byte> data;
   u32 width{};
   u32 height{};
 };
 
-[[nodiscard]] auto decode_stbi(const stbi_uc *data, int len,
-                               std::string_view debug_name)
-    -> std::expected<DecodedImage, std::string> {
-  int w{};
-  int h{};
-  int ch{};
-  stbi_uc *raw = stbi_load_from_memory(data, len, &w, &h, &ch, STBI_rgb_alpha);
-  if (!raw)
+struct KtxDecodeResult {
+  std::vector<KtxMip> mips; // mips[0] = full res
+  VkFormat vk_format{VK_FORMAT_UNDEFINED};
+  u32 base_width{};
+  u32 base_height{};
+};
+
+[[nodiscard]] auto ktx_transcode_format(VkFormat, bool is_normal)
+    -> ktx_transcode_fmt_e {
+  if (is_normal) {
+    return KTX_TTF_BC5_RG;
+  }
+  return KTX_TTF_BC7_RGBA;
+}
+
+[[nodiscard]] auto vk_format_for_transcode(ktx_transcode_fmt_e tf, bool srgb)
+    -> VkFormat {
+  switch (tf) {
+  case KTX_TTF_BC7_RGBA:
+    return srgb ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+  case KTX_TTF_BC5_RG:
+    return VK_FORMAT_BC5_UNORM_BLOCK;
+  case KTX_TTF_BC1_RGB:
+    return srgb ? VK_FORMAT_BC1_RGB_SRGB_BLOCK : VK_FORMAT_BC1_RGB_UNORM_BLOCK;
+  default:
+    return VK_FORMAT_UNDEFINED;
+  }
+}
+
+constexpr auto is_normal_mode = [](auto texture) -> bool {
+  char *value{};
+  u32 length{};
+
+  if (KTX_SUCCESS == ktxHashList_FindValue(&texture->kvDataHead,
+                                           "KTXwriterScParams", &length,
+                                           reinterpret_cast<void **>(&value))) {
+    std::string params(value, length);
+
+    if (params.find("--normal-mode") != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+};
+
+[[nodiscard]] static auto decode_ktx2_bytes(std::span<const std::byte> bytes,
+                                            VkFormat hint, bool srgb)
+    -> std::expected<KtxDecodeResult, std::string> {
+  ktxTexture2 *ktx = nullptr;
+  const KTX_error_code create_err = ktxTexture2_CreateFromMemory(
+      reinterpret_cast<const ktx_uint8_t *>(bytes.data()),
+      static_cast<ktx_size_t>(bytes.size()),
+      KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT, &ktx);
+
+  if (create_err != KTX_SUCCESS)
     return std::unexpected(
-        std::format("stbi '{}': {}", debug_name, stbi_failure_reason()));
+        std::format("ktxTexture2_CreateFromMemory failed: {}",
+                    std::to_underlying(create_err)));
 
-  DecodedImage img;
-  img.width = static_cast<u32>(w);
-  img.height = static_cast<u32>(h);
-  img.pixels.resize(static_cast<usize>(w * h));
-  std::memcpy(img.pixels.data(), raw, img.pixels.size() * sizeof(u32));
-  stbi_image_free(raw);
-  return std::expected<DecodedImage, std::string>{
-      std::in_place,
-      std::move(img),
-  };
+  struct KtxGuard {
+    ktxTexture2 *p;
+    ~KtxGuard() { ktxTexture2_Destroy(p); }
+  } guard{ktx};
+
+  // Transcode UASTC → BC7 (or whatever target) if supercompressed
+  const auto is_normal = is_normal_mode(ktx);
+  if (ktxTexture2_NeedsTranscoding(ktx)) {
+    const auto tf = ktx_transcode_format(hint, is_normal);
+    const KTX_error_code transcode_err = ktxTexture2_TranscodeBasis(ktx, tf, 0);
+    if (transcode_err != KTX_SUCCESS)
+      return std::unexpected(
+          std::format("ktxTexture2_TranscodeBasis failed: {}",
+                      std::to_underlying(transcode_err)));
+  }
+
+  KtxDecodeResult out;
+  out.base_width = ktx->baseWidth;
+  out.base_height = ktx->baseHeight;
+
+  // Pick VkFormat — if the KTX2 file already has a native Vulkan format
+  // (non-supercompressed path), use that; otherwise derive from transcode.
+  if (ktx->vkFormat != VK_FORMAT_UNDEFINED) {
+    // Patch sRGB-ness if the caller knows better (e.g. albedo vs linear)
+    out.vk_format = static_cast<VkFormat>(ktx->vkFormat);
+  } else {
+    out.vk_format =
+        vk_format_for_transcode(ktx_transcode_format(hint, is_normal), srgb);
+  }
+
+  const u32 mip_count = ktx->numLevels;
+  out.mips.reserve(mip_count);
+
+  for (u32 level = 0; level < mip_count; ++level) {
+    ktx_size_t offset = 0;
+    ktxTexture_GetImageOffset(ktxTexture(ktx), level, 0, 0, &offset);
+
+    const ktx_size_t size = ktxTexture_GetImageSize(ktxTexture(ktx), level);
+
+    const auto *src = reinterpret_cast<const std::byte *>(ktx->pData + offset);
+
+    KtxMip mip;
+    mip.width = std::max(1u, ktx->baseWidth >> level);
+    mip.height = std::max(1u, ktx->baseHeight >> level);
+    mip.data.assign(src, src + size);
+
+    out.mips.push_back(std::move(mip));
+  }
+
+  return out;
 }
 
-[[nodiscard]] auto load_image(const fastgltf::Asset &asset,
-                              const fastgltf::Image &image,
-                              const std::filesystem::path &gltf_dir)
-    -> std::expected<DecodedImage, std::string> {
-  const std::string_view name = image.name;
+[[nodiscard]] static auto decode_ktx2_file(const std::filesystem::path &path,
+                                           VkFormat hint, bool srgb)
+    -> std::expected<KtxDecodeResult, std::string> {
+  ktxTexture2 *ktx = nullptr;
+  const KTX_error_code err = ktxTexture2_CreateFromNamedFile(
+      path.string().c_str(), KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT, &ktx);
 
-  return std::visit(
-      fastgltf::visitor{
-          [&](const fastgltf::sources::URI &uri)
-              -> std::expected<DecodedImage, std::string> {
-            const auto full = gltf_dir / uri.uri.fspath();
-            int w{};
-            int h{};
-            int ch{};
-            stbi_uc *raw =
-                stbi_load(full.string().c_str(), &w, &h, &ch, STBI_rgb_alpha);
-            if (!raw)
-              return std::unexpected(std::format("stbi '{}': {}", full.string(),
-                                                 stbi_failure_reason()));
-            DecodedImage img;
-            img.width = static_cast<u32>(w);
-            img.height = static_cast<u32>(h);
-            img.pixels.resize(static_cast<usize>(w * h));
-            std::memcpy(img.pixels.data(), raw,
-                        img.pixels.size() * sizeof(u32));
-            stbi_image_free(raw);
-            return img;
-          },
-          [&](const fastgltf::sources::Array &arr)
-              -> std::expected<DecodedImage, std::string> {
-            return decode_stbi(
-                reinterpret_cast<const stbi_uc *>(arr.bytes.data()),
-                static_cast<int>(arr.bytes.size()), name);
-          },
-          [&](const fastgltf::sources::BufferView &bv)
-              -> std::expected<DecodedImage, std::string> {
-            const auto &view = asset.bufferViews[bv.bufferViewIndex];
-            const auto &buf = asset.buffers[view.bufferIndex];
-            return std::visit(
-                fastgltf::visitor{
-                    [&](const fastgltf::sources::Array &arr)
-                        -> std::expected<DecodedImage, std::string> {
-                      return decode_stbi(
-                          reinterpret_cast<const stbi_uc *>(arr.bytes.data() +
-                                                            view.byteOffset),
-                          static_cast<int>(view.byteLength), name);
-                    },
-                    [&](const auto &)
-                        -> std::expected<DecodedImage, std::string> {
-                      return std::unexpected(std::format(
-                          "Unsupported buffer backing for image '{}'", name));
-                    },
-                },
-                buf.data);
-          },
-          [&](const auto &) -> std::expected<DecodedImage, std::string> {
-            return std::unexpected(
-                std::format("Unsupported image source type for '{}'", name));
-          },
-      },
-      image.data);
+  if (err != KTX_SUCCESS)
+    return std::unexpected(std::format(
+        "ktxTexture2_CreateFromNamedFile failed: {}", std::to_underlying(err)));
+
+  struct KtxGuard {
+    ktxTexture2 *p;
+    ~KtxGuard() { ktxTexture2_Destroy(p); }
+  } guard{ktx};
+
+  const auto is_normal = is_normal_mode(ktx);
+  if (ktxTexture2_NeedsTranscoding(ktx)) {
+    const auto tf = ktx_transcode_format(hint, is_normal);
+    if (ktxTexture2_TranscodeBasis(ktx, tf, 0) != KTX_SUCCESS)
+      return std::unexpected("ktxTexture2_TranscodeBasis failed");
+  }
+
+  KtxDecodeResult out;
+  out.base_width = ktx->baseWidth;
+  out.base_height = ktx->baseHeight;
+  out.vk_format = ktx->vkFormat != VK_FORMAT_UNDEFINED
+                      ? static_cast<VkFormat>(ktx->vkFormat)
+                      : vk_format_for_transcode(
+                            ktx_transcode_format(hint, is_normal), srgb);
+
+  const u32 mip_count = ktx->numLevels;
+  out.mips.reserve(mip_count);
+
+  for (u32 level = 0; level < mip_count; ++level) {
+    ktx_size_t offset = 0;
+    ktxTexture_GetImageOffset(ktxTexture(ktx), level, 0, 0, &offset);
+    const ktx_size_t size = ktxTexture_GetImageSize(ktxTexture(ktx), level);
+    const auto *src = reinterpret_cast<const std::byte *>(ktx->pData + offset);
+
+    KtxMip mip;
+    mip.width = std::max(1u, ktx->baseWidth >> level);
+    mip.height = std::max(1u, ktx->baseHeight >> level);
+    mip.data.assign(src, src + size);
+    out.mips.push_back(std::move(mip));
+  }
+
+  return out;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// sRGB classification — scan materials before uploading so format is known
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Image colour-space classification (unchanged) ────────────────────────────
 
+struct DecodedImage {
+  std::vector<std::byte> pixels;
+  u32 width{};
+  u32 height{};
+};
 enum class ImageColorSpace : u8 { linear, srgb };
 
 [[nodiscard]] auto classify_images(const fastgltf::Asset &asset)
@@ -262,13 +378,6 @@ enum class ImageColorSpace : u8 { linear, srgb };
   return cs;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Texture slot resolution
-// Fallback slots match upload order in Dockforge::init():
-//   0 = white, 1 = normal blue, 2 = metallic-roughness, 3 = occlusion, 4 =
-//   black
-// ─────────────────────────────────────────────────────────────────────────────
-
 constexpr u32 k_fb_albedo = 0u;
 constexpr u32 k_fb_normal = 1u;
 constexpr u32 k_fb_mr = 2u;
@@ -285,10 +394,6 @@ constexpr u32 k_fb_emissive = 4u;
     return fallback;
   return handles[*tex.imageIndex].index();
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Material building
-// ─────────────────────────────────────────────────────────────────────────────
 
 [[nodiscard]] auto build_gpu_material(const fastgltf::Material &mat,
                                       const fastgltf::Asset &asset,
@@ -326,14 +431,24 @@ constexpr u32 k_fb_emissive = 4u;
   gpu.occlusion_index =
       resolve_tex(asset, handles, mat.occlusionTexture, k_fb_occlusion);
 
-  // Base flags: depth prepass for opaque/masked
   gpu.flags = MaterialFlags::depth_prepass;
   if (mat.alphaMode == fastgltf::AlphaMode::Mask)
     set_flag(gpu.flags, MaterialFlags::alpha_mask);
-
-  // Two-sided rendering
   if (mat.doubleSided)
     set_flag(gpu.flags, MaterialFlags::two_sided);
+
+  const bool has_occlusion_ref = mat.occlusionTexture.has_value();
+  const bool has_mr = pbr.metallicRoughnessTexture.has_value();
+
+  if (has_occlusion_ref && has_mr &&
+      mat.occlusionTexture->textureIndex ==
+          pbr.metallicRoughnessTexture->textureIndex) {
+    set_flag(gpu.flags, MaterialFlags::combined_orm);
+  } else if (!has_occlusion_ref && has_mr) {
+    set_flag(gpu.flags, MaterialFlags::combined_orm);
+  } else if (!has_occlusion_ref && !has_mr) {
+    set_flag(gpu.flags, MaterialFlags::no_occlusion);
+  }
 
   if (auto *ext = mat.transmission.get(); ext != nullptr) {
     gpu.transmission_factor = ext->transmissionFactor;
@@ -352,16 +467,13 @@ constexpr u32 k_fb_emissive = 4u;
   gpu.uv_scale_y = 1.0F;
   gpu.uv_offset_x = 0.0F;
   gpu.uv_offset_y = 0.0F;
-
   gpu.cull_mode = mat.doubleSided ? static_cast<u32>(CullMode::None)
                                   : static_cast<u32>(CullMode::Back);
 
   return gpu;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Primitive extraction
-// ─────────────────────────────────────────────────────────────────────────────
+// ── Primitive extraction (unchanged) ─────────────────────────────────────────
 
 [[nodiscard]] auto extract_primitive(const fastgltf::Asset &asset,
                                      const fastgltf::Primitive &prim)
@@ -392,7 +504,7 @@ constexpr u32 k_fb_emissive = 4u;
       a != prim.attributes.end()) {
     fastgltf::iterateAccessorWithIndex<glm::vec3>(
         asset, asset.accessors[a->accessorIndex], [&](glm::vec3 n, usize i) {
-          out.vertices[i].normal = glm::packSnorm4x8({n, 1.0F});
+          out.vertices[i].normal = glm::packSnorm4x8(glm::vec4(n, 0.0F));
         });
   }
 
@@ -435,7 +547,6 @@ constexpr u32 k_fb_emissive = 4u;
     if (!has_normals || !has_uvs)
       return std::unexpected(
           "Cannot generate tangents: missing NORMAL or TEXCOORD_0");
-
     if (auto res = mikkt::generate_mikktspace_tangents(out); !res)
       return std::unexpected(res.error());
   }
@@ -444,47 +555,54 @@ constexpr u32 k_fb_emissive = 4u;
 }
 
 [[nodiscard]] auto generate_lods(const PrimitiveData &lod0)
-    -> std::vector<std::vector<u32>> // [0] = LOD1 indices, [1] = LOD2, ...
-{
+    -> std::vector<std::vector<u32>> {
+
+  // Progressively lower target ratios
   static constexpr std::array<f32, 5> k_lod_targets = {0.50F, 0.25F, 0.125F,
                                                        0.0625F, 0.03125F};
-  static constexpr f32 k_lod_error = 0.8F;
 
   std::vector<std::vector<u32>> result;
-
-  std::vector<f32> positions;
-  positions.reserve(lod0.vertices.size() * 3);
-  for (const auto &v : lod0.vertices) {
-    positions.push_back(v.position[0]);
-    positions.push_back(v.position[1]);
-    positions.push_back(v.position[2]);
-  }
+  thread_local std::vector<u32> tl_simplified;
 
   const auto *prev_indices = lod0.indices.data();
   usize prev_count = lod0.indices.size();
 
-  for (const f32 target_ratio : k_lod_targets) {
+  const f32 *position_ptr = &lod0.vertices[0].position[0];
+  const usize vertex_stride = sizeof(Vertex);
+
+  for (size_t i = 0; i < k_lod_targets.size(); ++i) {
+    const f32 target_ratio = k_lod_targets[i];
+
     const usize target_count =
         std::max(static_cast<usize>(3),
                  static_cast<usize>(static_cast<f32>(lod0.indices.size()) *
                                     target_ratio));
     const usize rounded = (target_count / 3) * 3;
 
-    std::vector<u32> simplified(lod0.indices.size());
-    f32 error = 0.0F;
-    const usize out_count = meshopt_simplify(
-        simplified.data(), prev_indices, prev_count, positions.data(),
-        lod0.vertices.size(), sizeof(f32) * 3, rounded, k_lod_error, 0, &error);
+    tl_simplified.resize(prev_count);
+    usize out_count = 0;
 
-    simplified.resize(out_count);
+    if (i < 3) {
+      const f32 current_lod_error = 0.1F + (static_cast<f32>(i) * 0.3F);
+      f32 result_error = 0.0F;
 
-    // Stop early if simplification stalled (< 10% reduction vs previous)
-    if (out_count >= static_cast<usize>(static_cast<f32>(prev_count) * 0.9F)) {
-      info("Stopping at {}", target_ratio);
+      out_count =
+          meshopt_simplify(tl_simplified.data(), prev_indices, prev_count,
+                           position_ptr, lod0.vertices.size(), vertex_stride,
+                           rounded, current_lod_error, 0, &result_error);
+    } else {
+      const f32 sloppy_error = 0.5F;
+      out_count = meshopt_simplifySloppy(
+          tl_simplified.data(), prev_indices, prev_count, position_ptr,
+          lod0.vertices.size(), vertex_stride, rounded, sloppy_error, nullptr);
+    }
+
+    if (out_count == 0 || out_count == prev_count) {
       break;
     }
 
-    result.push_back(std::move(simplified));
+    result.emplace_back(tl_simplified.begin(),
+                        tl_simplified.begin() + out_count);
     prev_indices = result.back().data();
     prev_count = result.back().size();
   }
@@ -492,17 +610,12 @@ constexpr u32 k_fb_emissive = 4u;
   return result;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Node transform helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
 [[nodiscard]] auto node_local_matrix(const fastgltf::Node &node) -> glm::mat4 {
   return std::visit(
       fastgltf::visitor{
           [](const fastgltf::TRS &trs) -> glm::mat4 {
             const glm::vec3 t{trs.translation[0], trs.translation[1],
                               trs.translation[2]};
-            // fastgltf: [x,y,z,w]; glm ctor: (w,x,y,z)
             const glm::quat q{trs.rotation[3], trs.rotation[0], trs.rotation[1],
                               trs.rotation[2]};
             const glm::vec3 s{trs.scale[0], trs.scale[1], trs.scale[2]};
@@ -518,10 +631,6 @@ constexpr u32 k_fb_emissive = 4u;
       node.transform);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Node hierarchy flattening — pure output into MeshAsset::nodes
-// ─────────────────────────────────────────────────────────────────────────────
-
 void flatten_nodes(const fastgltf::Asset &asset,
                    std::span<const std::size_t> root_indices, MeshAsset &out) {
   struct Frame {
@@ -533,11 +642,7 @@ void flatten_nodes(const fastgltf::Asset &asset,
   std::vector<Frame> dfs;
   dfs.reserve(root_indices.size());
   for (const auto idx : root_indices)
-    dfs.push_back({
-        .node_idx = idx,
-        .parent_flat_idx = -1,
-        .is_root = true,
-    });
+    dfs.push_back({.node_idx = idx, .parent_flat_idx = -1, .is_root = true});
 
   while (!dfs.empty()) {
     auto [node_idx, parent_flat, is_root] = dfs.back();
@@ -566,7 +671,6 @@ void flatten_nodes(const fastgltf::Asset &asset,
             gltf_mesh.primitives[pi].materialIndex.has_value()
                 ? out.material_slots[*gltf_mesh.primitives[pi].materialIndex]
                 : 0u;
-
         desc.primitives.push_back({
             .lod_group = lod_groups[pi],
             .material_id = mat_id,
@@ -577,9 +681,9 @@ void flatten_nodes(const fastgltf::Asset &asset,
 
     out.nodes.push_back(std::move(desc));
 
-    for (auto it = node.children.rbegin(); it != node.children.rend(); ++it)
+    for (usize i = node.children.size(); i-- > 0;)
       dfs.push_back({
-          .node_idx = *it,
+          .node_idx = node.children[i],
           .parent_flat_idx = flat_idx,
           .is_root = false,
       });
@@ -590,12 +694,563 @@ void flatten_nodes(const fastgltf::Asset &asset,
 
 namespace mesh {
 
-[[nodiscard]] static auto hash_bytes(const void *data, usize len) -> u64 {
-  const auto *p = static_cast<const u8 *>(data);
-  u64 h = 14695981039346656037ULL;
-  for (usize i = 0; i < len; ++i)
-    h = (h ^ p[i]) * 1099511628211ULL;
-  return h;
+struct MaterialTexturePatch {
+  u32 pool_slot;
+  std::function<void(GPUMaterial &, TextureHandle)> apply;
+};
+
+struct ImageSource {
+  std::variant<std::filesystem::path, std::vector<std::byte>> data;
+  std::optional<std::filesystem::path> ktx_sidecar_path;
+  std::string debug_name;
+  std::string cache_key;
+  VkFormat format;
+  bool srgb{false};
+  usize image_idx;
+};
+
+struct PendingUpload {
+  std::future<pool::CpuTextureData> fut;
+  usize image_idx;
+  std::stop_source stop_src;
+  std::vector<MaterialTexturePatch> patches;
+};
+
+struct PrimWork {
+  usize mesh_idx;
+  usize prim_idx;
+  const fastgltf::Primitive *ptr;
+};
+
+struct PrimLods {
+  std::vector<std::vector<u32>> extra;
+};
+
+static auto parse_gltf_file(const std::filesystem::path &fs_path,
+                            const std::filesystem::path &gltf_dir)
+    -> std::expected<fastgltf::Asset, std::string> {
+  fastgltf::Parser parser;
+  auto data = fastgltf::GltfDataBuffer::FromPath(fs_path);
+  auto result = parser.loadGltf(data.get(), gltf_dir,
+                                fastgltf::Options::GenerateMeshIndices);
+  if (!result)
+    return std::unexpected("Parse error");
+  return std::move(result.get());
+}
+
+[[nodiscard]] static auto
+sidecar_path_for(const std::filesystem::path &gltf_dir,
+                 const std::string &image_name, usize image_idx)
+    -> std::optional<std::filesystem::path> {
+  if (!image_name.empty()) {
+    auto candidate = gltf_dir / "ktx2" / (image_name + ".ktx2");
+    if (std::filesystem::exists(candidate)) {
+      return candidate;
+    }
+  }
+
+  auto indexed = gltf_dir / "ktx2" / std::format("img{}.ktx2", image_idx);
+  if (std::filesystem::exists(indexed)) {
+    return indexed;
+  }
+
+  info("No suitable image source found for image {}", image_idx);
+  return std::nullopt;
+}
+
+// ── collect_image_sources
+// ─────────────────────────────────────────────────────
+
+static auto
+collect_image_sources(const fastgltf::Asset &asset,
+                      const std::filesystem::path &gltf_dir,
+                      const std::filesystem::path &fs_path,
+                      const std::vector<ImageColorSpace> &color_spaces)
+    -> std::vector<ImageSource> {
+
+  std::vector<ImageSource> sources;
+  sources.reserve(asset.images.size());
+
+  for (usize i = 0; i < asset.images.size(); ++i) {
+    const bool srgb = (color_spaces[i] == ImageColorSpace::srgb);
+    const VkFormat fmt =
+        srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    const std::string fmt_suffix = srgb ? ":srgb" : ":linear";
+    const std::string image_name = std::string(asset.images[i].name);
+    const std::string debug_name =
+        image_name.empty()
+            ? std::format("{}#img{}", fs_path.filename().string(), i)
+            : image_name;
+
+    auto sidecar = sidecar_path_for(gltf_dir, image_name, i);
+
+    std::visit(
+        fastgltf::visitor{
+            [&](const fastgltf::sources::URI &uri) {
+              const auto full = gltf_dir / uri.uri.fspath();
+              const std::string cache_key =
+                  sidecar ? (sidecar->string() + fmt_suffix)
+                          : (full.string() + fmt_suffix);
+              sources.push_back({
+                  .data = full,
+                  .ktx_sidecar_path = sidecar,
+                  .debug_name = debug_name,
+                  .cache_key = cache_key,
+                  .format = fmt,
+                  .srgb = srgb,
+                  .image_idx = i,
+              });
+            },
+            [&](const fastgltf::sources::Array &arr) {
+              std::vector<std::byte> buf(arr.bytes.size());
+              std::memcpy(buf.data(), arr.bytes.data(), arr.bytes.size());
+              sources.push_back({
+                  .data = std::move(buf),
+                  .ktx_sidecar_path = sidecar,
+                  .debug_name = debug_name,
+                  .cache_key = {},
+                  .format = fmt,
+                  .srgb = srgb,
+                  .image_idx = i,
+              });
+            },
+            [&](const fastgltf::sources::BufferView &bv) {
+              const auto &view = asset.bufferViews[bv.bufferViewIndex];
+              const auto &buf = asset.buffers[view.bufferIndex];
+              std::visit(fastgltf::visitor{
+                             [&](const fastgltf::sources::Array &arr) {
+                               std::vector<std::byte> copy(view.byteLength);
+                               std::memcpy(copy.data(),
+                                           arr.bytes.data() + view.byteOffset,
+                                           view.byteLength);
+                               sources.push_back({
+                                   .data = std::move(copy),
+                                   .ktx_sidecar_path = sidecar,
+                                   .debug_name = debug_name,
+                                   .cache_key = {},
+                                   .format = fmt,
+                                   .srgb = srgb,
+                                   .image_idx = i,
+                               });
+                             },
+                             [&](const auto &) {
+                               warn("Unsupported buffer backing for image '{}'",
+                                    debug_name);
+                             },
+                         },
+                         buf.data);
+            },
+            [&](const auto &) {
+              warn("Unsupported image source for '{}'", debug_name);
+            },
+        },
+        asset.images[i].data);
+  }
+
+  return sources;
+}
+
+static constexpr std::array<std::byte, 12> k_ktx2_magic = {
+    std::byte{0xAB}, std::byte{0x4B}, std::byte{0x54}, std::byte{0x58},
+    std::byte{0x20}, std::byte{0x32}, std::byte{0x30}, std::byte{0xBB},
+    std::byte{0x0D}, std::byte{0x0A}, std::byte{0x1A}, std::byte{0x0A},
+};
+
+[[nodiscard]] static auto is_ktx2(std::span<const std::byte> bytes) -> bool {
+  if (bytes.size() < k_ktx2_magic.size())
+    return false;
+  return std::equal(k_ktx2_magic.begin(), k_ktx2_magic.end(), bytes.begin());
+}
+
+static auto launch_texture_futures(std::vector<ImageSource> &sources,
+                                   SceneRenderer &renderer, MeshAsset &result)
+    -> std::vector<PendingUpload> {
+  PROFILE_SCOPE("Launch deferred texture futures");
+
+  std::vector<PendingUpload> pending;
+  pending.reserve(sources.size());
+
+  for (auto &src : sources) {
+    if (auto cached = renderer.texture_cache.get(src.cache_key)) {
+      result.texture_handles[src.image_idx] = *cached;
+      continue;
+    }
+
+    auto stop_src = std::stop_source{};
+    auto token = stop_src.get_token();
+
+    auto fut = renderer.thread_pool.submit_task(
+        [src = std::move(src), token]() mutable -> pool::CpuTextureData {
+          if (token.stop_requested())
+            return {};
+
+          // ── Path 1: KTX2 sidecar ──────────────────────────────────────────
+          if (src.ktx_sidecar_path) {
+            auto ktx_result =
+                decode_ktx2_file(*src.ktx_sidecar_path, src.format, src.srgb);
+            if (ktx_result) {
+              auto &kr = *ktx_result;
+              std::vector<pool::MipData> mips;
+              mips.reserve(kr.mips.size());
+              for (auto &m : kr.mips)
+                mips.push_back({
+                    .pixels = std::move(m.data),
+                    .width = m.width,
+                    .height = m.height,
+                });
+              return pool::CpuTextureData{
+                  .mips = std::move(mips),
+                  .name = std::move(src.debug_name),
+                  .cache_key = src.cache_key,
+                  .width = kr.base_width,
+                  .height = kr.base_height,
+                  .format = kr.vk_format,
+                  .generate_mips = false, // already have all mips
+              };
+            }
+            // Sidecar failed — fall through to embedded data
+            warn("KTX2 sidecar decode failed for '{}', falling back to "
+                 "embedded data",
+                 src.debug_name);
+          }
+
+          // ── Path 2: embedded KTX2 (BufferView sources) ───────────────────
+          if (auto *buf = std::get_if<std::vector<std::byte>>(&src.data)) {
+            if (is_ktx2(*buf)) {
+              auto ktx_result = decode_ktx2_bytes(*buf, src.format, src.srgb);
+              if (ktx_result) {
+                auto &kr = *ktx_result;
+                std::vector<pool::MipData> mips;
+                mips.reserve(kr.mips.size());
+                for (auto &m : kr.mips)
+                  mips.push_back({
+                      .pixels = std::move(m.data),
+                      .width = m.width,
+                      .height = m.height,
+                  });
+                return pool::CpuTextureData{
+                    .mips = std::move(mips),
+                    .name = std::move(src.debug_name),
+                    .cache_key = src.cache_key,
+                    .width = kr.base_width,
+                    .height = kr.base_height,
+                    .format = kr.vk_format,
+                    .generate_mips = false,
+                };
+              }
+            }
+          }
+
+          // ── Path 3: stbi fallback ─────────────────────────────────────────
+          int w{};
+          int h{};
+          int ch{};
+          stbi_uc *raw = nullptr;
+
+          if (auto *file_path = std::get_if<std::filesystem::path>(&src.data)) {
+            raw = stbi_load(file_path->string().c_str(), &w, &h, &ch,
+                            STBI_rgb_alpha);
+          } else {
+            auto &raw_buf = std::get<std::vector<std::byte>>(src.data);
+            raw = stbi_load_from_memory(
+                reinterpret_cast<const stbi_uc *>(raw_buf.data()),
+                static_cast<int>(raw_buf.size()), &w, &h, &ch, STBI_rgb_alpha);
+          }
+
+          if (!raw) {
+            warn("stbi failed for '{}': {}", src.debug_name,
+                 stbi_failure_reason());
+            return {};
+          }
+
+          if (token.stop_requested()) {
+            stbi_image_free(raw);
+            return {};
+          }
+
+          std::vector<std::byte> pixels(static_cast<usize>(w * h * 4));
+          std::memcpy(pixels.data(), raw, pixels.size());
+          stbi_image_free(raw);
+
+          const std::string cache_key =
+              src.cache_key.empty()
+                  ? std::format("hash:{:016x}{}",
+                                hash_bytes(pixels.data(), pixels.size()),
+                                src.format == VK_FORMAT_R8G8B8A8_SRGB
+                                    ? ":srgb"
+                                    : ":linear")
+                  : src.cache_key;
+
+          // Single mip entry — upload path will generate the rest
+          std::vector<pool::MipData> mips;
+          mips.push_back({
+              .pixels = std::move(pixels),
+              .width = static_cast<u32>(w),
+              .height = static_cast<u32>(h),
+          });
+
+          return pool::CpuTextureData{
+              .mips = std::move(mips),
+              .name = std::move(src.debug_name),
+              .cache_key = std::move(cache_key),
+              .width = static_cast<u32>(w),
+              .height = static_cast<u32>(h),
+              .format = src.format,
+              .generate_mips = true,
+          };
+        });
+
+    pending.push_back(PendingUpload{
+        .fut = std::move(fut),
+        .image_idx = src.image_idx,
+        .stop_src = std::move(stop_src),
+        .patches = {},
+    });
+  }
+
+  return pending;
+}
+
+// ── The rest is unchanged from the original
+// ───────────────────────────────────
+
+static auto
+extract_primitives_parallel(const fastgltf::Asset &asset,
+                            const std::vector<PrimWork> &prim_work_list,
+                            BS::priority_thread_pool &thread_pool)
+    -> std::vector<std::expected<PrimitiveResult, std::string>> {
+  PROFILE_SCOPE("Extract primitives");
+
+  const auto n = prim_work_list.size();
+  std::vector<std::expected<PrimitiveResult, std::string>> results(
+      n, std::unexpected<std::string>("Could not extract"));
+
+  thread_pool
+      .submit_blocks(usize{0}, n,
+                     [&](usize begin, usize end) {
+                       for (usize i = begin; i < end; ++i)
+                         results[i] =
+                             extract_primitive(asset, *prim_work_list[i].ptr);
+                     })
+      .wait();
+
+  return results;
+}
+
+static auto generate_lods_parallel(
+    const std::vector<PrimWork> &prim_work_list,
+    const std::vector<std::expected<PrimitiveResult, std::string>>
+        &extracted_prims,
+    BS::priority_thread_pool &thread_pool)
+    -> std::pair<std::vector<PrimLods>, usize> {
+  PROFILE_SCOPE("Generate LODs (Parallel)");
+
+  const auto n = prim_work_list.size();
+  std::vector<PrimLods> prim_lods(n);
+  std::vector<usize> indices_per_prim(n, 0);
+
+  thread_pool
+      .submit_blocks(usize{0}, n,
+                     [&](usize begin, usize end) {
+                       for (usize i = begin; i < end; ++i) {
+                         if (!extracted_prims[i])
+                           continue;
+                         const auto &[pdata, aabb] = *extracted_prims[i];
+                         if (!should_generate_lods(pdata))
+                           continue;
+                         prim_lods[i].extra = generate_lods(pdata);
+                         for (const auto &lod_indices : prim_lods[i].extra)
+                           indices_per_prim[i] += lod_indices.size();
+                       }
+                     })
+      .wait();
+
+  usize total_lod_indices = 0;
+  for (usize c : indices_per_prim)
+    total_lod_indices += c;
+
+  return {std::move(prim_lods), total_lod_indices};
+}
+
+static void allocate_materials(const fastgltf::Asset &asset, GeometryPool &pool,
+                               MeshAsset &result) {
+  if (asset.materials.empty())
+    return;
+  PROFILE_SCOPE("Allocate materials");
+
+  std::vector<GPUMaterial> gpu_mats;
+  gpu_mats.reserve(asset.materials.size());
+  for (const auto &mat : asset.materials)
+    gpu_mats.push_back(build_gpu_material(mat, asset, result.texture_handles));
+
+  const auto mat_offset = pool.allocate_materials(gpu_mats);
+  result.material_base_slot = mat_offset.start_index;
+  result.material_count = static_cast<u32>(gpu_mats.size());
+  for (usize i = 0; i < gpu_mats.size(); ++i)
+    result.material_slots[i] = result.material_base_slot + static_cast<u32>(i);
+}
+
+static void
+upload_geometry(const fastgltf::Asset &asset,
+                const std::vector<PrimWork> &prim_work_list,
+                const std::vector<std::expected<PrimitiveResult, std::string>>
+                    &extracted_prims,
+                const std::vector<PrimLods> &prim_lods, usize total_lod_indices,
+                GeometryPool &pool, MeshAsset &result) {
+  PROFILE_SCOPE("Allocate geometry TOTAL");
+
+  {
+    PROFILE_SCOPE("Pool Reserve & Transaction Init");
+    auto [total_v, total_i] = calculate_requirements(extracted_prims);
+    pool.reserve(total_v, total_i + total_lod_indices);
+  }
+
+  auto batch = pool.begin_transaction();
+
+  result.meshes.resize(asset.meshes.size());
+  result.submesh_aabbs.resize(asset.meshes.size());
+  result.vertex_base_offset = pool.vertex_offset;
+
+  auto *v_base = cast<Vertex>(pool.vertex_buffer->get_mapped_pointer(),
+                              pool.vertex_offset);
+  auto *sv_base = cast<PositionOnlyVertex>(
+      pool.position_only_vertex_buffer->get_mapped_pointer(),
+      pool.shadow_vertex_offset);
+  auto *i_base =
+      cast<u32>(pool.index_buffer->get_mapped_pointer(), pool.index_offset);
+
+  usize cur_v = 0;
+  usize cur_sv = 0;
+  usize cur_i = 0;
+
+  {
+    PROFILE_SCOPE("Serial Processing Loop");
+
+    for (usize i = 0; i < prim_work_list.size(); ++i) {
+      const usize mesh_idx = prim_work_list[i].mesh_idx;
+      const auto &res = extracted_prims[i];
+
+      if (!res) {
+        result.submesh_aabbs[mesh_idx].push_back(AABB::create());
+        continue;
+      }
+
+      const auto &[pdata, aabb] = *res;
+      const auto vspan = std::span(pdata.vertices);
+      const auto ispan = std::span(pdata.indices);
+
+      AllocatedOffset offsets{
+          .vertex_offset = pool.vertex_offset + cur_v,
+          .shadow_vertex_offset = pool.shadow_vertex_offset + cur_sv,
+          .index_offset = pool.index_offset + cur_i,
+      };
+
+      auto *v_dst = cast<Vertex>(v_base, cur_v);
+      auto *sv_dst = cast<PositionOnlyVertex>(sv_base, cur_sv);
+      auto *i_dst = cast<u32>(i_base, cur_i);
+
+      std::memcpy(v_dst, vspan.data(), vspan.size_bytes());
+      std::memcpy(i_dst, ispan.data(), ispan.size_bytes());
+      for (usize idx = 0; idx < vspan.size(); ++idx) {
+        sv_dst[idx].position[0] = vspan[idx].position[0];
+        sv_dst[idx].position[1] = vspan[idx].position[1];
+        sv_dst[idx].position[2] = vspan[idx].position[2];
+      }
+
+      cur_v += vspan.size_bytes();
+      cur_sv += vspan.size() * sizeof(PositionOnlyVertex);
+      cur_i += ispan.size_bytes();
+
+      MeshLodGroup lod_group;
+      lod_group.vertex_offset =
+          static_cast<i32>(offsets.vertex_offset / sizeof(Vertex));
+      lod_group.lods[0].first_index =
+          static_cast<u32>(offsets.index_offset / sizeof(u32));
+      lod_group.lods[0].index_count = static_cast<u32>(pdata.indices.size());
+      lod_group.lod_count = 1;
+
+      for (const auto &lod_indices : prim_lods[i].extra) {
+        const auto as_span = std::span(lod_indices);
+        auto *lod_i_dst = cast<u32>(i_base, cur_i);
+        std::memcpy(lod_i_dst, lod_indices.data(), as_span.size_bytes());
+
+        auto &lod = lod_group.lods[lod_group.lod_count++];
+        lod.first_index =
+            static_cast<u32>((pool.index_offset + cur_i) / sizeof(u32));
+        lod.index_count = static_cast<u32>(as_span.size());
+        cur_i += as_span.size_bytes();
+      }
+
+      result.submesh_aabbs[mesh_idx].push_back(aabb);
+      result.mesh_aabb.merge(aabb);
+      result.meshes[mesh_idx].push_back(lod_group);
+    }
+  }
+
+  pool.vertex_offset += cur_v;
+  pool.shadow_vertex_offset += cur_sv;
+  pool.index_offset += cur_i;
+
+  {
+    PROFILE_SCOPE("Transaction Commit & VMA Flush");
+    batch.commit();
+  }
+}
+
+static void submit_texture_uploads(std::vector<PendingUpload> &pending,
+                                   SceneRenderer &renderer,
+                                   MeshAssetHandle handle) {
+  for (auto &pu : pending) {
+    renderer.texture_upload_pool->submit(
+        std::move(pu.fut), std::move(pu.stop_src),
+        [&renderer, mesh_handle = handle, image_idx = pu.image_idx,
+         patches = std::move(pu.patches)](TextureHandle h) mutable {
+          auto *mesh_asset = renderer.resolve_mut(mesh_handle);
+          mesh_asset->texture_handles[image_idx] = h;
+          for (auto &[slot, apply] : patches) {
+            auto &mat = renderer.geometry_pool->get_material(slot);
+            apply(mat, h);
+            renderer.geometry_pool->update_material(slot, mat);
+          }
+        });
+  }
+}
+
+auto build_patch_list(const fastgltf::Asset &asset, usize image_idx,
+                      u32 material_base_slot)
+    -> std::vector<MaterialTexturePatch> {
+  std::vector<MaterialTexturePatch> patches;
+
+  for (usize mi = 0; mi < asset.materials.size(); ++mi) {
+    const auto &mat = asset.materials[mi];
+    const u32 slot = material_base_slot + static_cast<u32>(mi);
+
+    auto try_add = [&](const auto &tex_opt, auto setter) {
+      if (!tex_opt.has_value())
+        return;
+      const auto &tex = asset.textures[tex_opt->textureIndex];
+      if (tex.imageIndex.has_value() && *tex.imageIndex == image_idx)
+        patches.push_back({slot, std::move(setter)});
+    };
+
+    try_add(mat.pbrData.baseColorTexture, [](GPUMaterial &g, TextureHandle h) {
+      g.albedo_index = h.index();
+    });
+    try_add(mat.normalTexture, [](GPUMaterial &g, TextureHandle h) {
+      g.normal_index = h.index();
+    });
+    try_add(mat.pbrData.metallicRoughnessTexture,
+            [](GPUMaterial &g, TextureHandle h) {
+              g.metallic_roughness_index = h.index();
+            });
+    try_add(mat.occlusionTexture, [](GPUMaterial &g, TextureHandle h) {
+      g.occlusion_index = h.index();
+    });
+    try_add(mat.emissiveTexture, [](GPUMaterial &g, TextureHandle h) {
+      g.emissive_index = h.index();
+    });
+  }
+  return patches;
 }
 
 auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
@@ -603,9 +1258,7 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
     -> std::expected<MeshAssetHandle, std::string> {
   auto &pool = *renderer.geometry_pool;
 
-  MeshAsset result{
-      .mesh_aabb = AABB::create(),
-  };
+  MeshAsset result{.mesh_aabb = AABB::create()};
   result.material_base_slot = 0u;
   result.material_count = 1u;
   result.material_slots = {0u};
@@ -634,13 +1287,11 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
   desc.name = "mesh_from_memory";
   desc.local_transform = glm::mat4{1.f};
   desc.parent_index = -1;
-  desc.primitives = {
-      {
-          .lod_group = lod_group,
-          .material_id = 0u,
-          .aabb = aabb,
-      },
-  };
+  desc.primitives = {{
+      .lod_group = lod_group,
+      .material_id = 0u,
+      .aabb = aabb,
+  }};
 
   result.nodes = {std::move(desc)};
   result.root_node_indices = {0u};
@@ -648,240 +1299,71 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
   return renderer.register_gltf(std::move(result));
 }
 
-struct GeometryRequirements {
-  size_t total_vertices = 0;
-  size_t total_indices = 0;
-};
-static auto calculate_requirements(const auto &extracted_prims)
-    -> GeometryRequirements {
-  GeometryRequirements reqs;
-
-  for (const auto &res : extracted_prims) {
-    if (res) {
-      reqs.total_vertices += res->data.vertices.size();
-      reqs.total_indices += res->data.indices.size();
-    }
-  }
-
-  return reqs;
-}
-
 auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
     -> std::expected<MeshAssetHandle, std::string> {
-
   auto &pool = *renderer.geometry_pool;
   const auto fs_path = VFS::get().resolve(path);
+  const auto gltf_dir = fs_path.parent_path();
+
   if (!std::filesystem::exists(fs_path))
     return std::unexpected("File not found");
 
-  const auto gltf_dir = fs_path.parent_path();
-  fastgltf::Parser parser;
-  auto data = fastgltf::GltfDataBuffer::FromPath(fs_path);
-  auto asset_result = parser.loadGltf(data.get(), gltf_dir,
-                                      fastgltf::Options::GenerateMeshIndices);
+  auto asset_result = parse_gltf_file(fs_path, gltf_dir);
   if (!asset_result)
-    return std::unexpected("Parse error");
+    return std::unexpected(asset_result.error());
+  auto &asset = *asset_result;
 
-  auto &asset = asset_result.get();
-  MeshAsset output_result{
-      .mesh_aabb = AABB::create(),
-  };
-  auto result = std::make_shared<MeshAsset>(output_result);
-  result->texture_handles.resize(asset.images.size());
+  auto result =
+      std::make_unique<MeshAsset>(MeshAsset{.mesh_aabb = AABB::create()});
+  result->texture_handles.resize(asset.images.size(),
+                                 renderer.dummy_texture_handle);
   result->material_slots.resize(asset.materials.size(), 0u);
 
   const auto color_spaces = classify_images(asset);
+  auto image_sources =
+      collect_image_sources(asset, gltf_dir, fs_path, color_spaces);
+  auto pending = launch_texture_futures(image_sources, renderer, *result);
 
-  static tf::Executor executor;
-  tf::Taskflow taskflow;
-
-  std::vector<std::expected<DecodedImage, std::string>> decoded_images(
-      asset.images.size());
-  {
-    PROFILE_SCOPE("Decode images");
-    [[maybe_unused]] auto image_group = taskflow.for_each_index(
-        static_cast<usize>(0), asset.images.size(), usize(1), [&](usize i) {
-          decoded_images[i] = load_image(asset, asset.images[i], gltf_dir);
-        });
-  }
-  struct PrimWork {
-    usize mesh_idx;
-    usize prim_idx;
-    const fastgltf::Primitive *ptr;
-  };
   std::vector<PrimWork> prim_work_list;
-  for (auto &&[mi, m] : std::views::enumerate(asset.meshes)) {
-    for (auto &&[pi, p] : std::views::enumerate(m.primitives)) {
+  for (auto &&[mi, m] : std::views::enumerate(asset.meshes))
+    for (auto &&[pi, p] : std::views::enumerate(m.primitives))
       prim_work_list.push_back({
           .mesh_idx = static_cast<usize>(mi),
           .prim_idx = static_cast<usize>(pi),
           .ptr = &p,
       });
-    }
-  }
 
-  std::vector<std::expected<PrimitiveResult, std::string>> extracted_prims(
-      prim_work_list.size(), std::unexpected<std::string>("Could not extract"));
-  {
-    PROFILE_SCOPE("Extract primitives");
-    [[maybe_unused]] auto mesh_group = taskflow.for_each_index(
-        static_cast<usize>(0), prim_work_list.size(), static_cast<usize>(1),
-        [&](usize i) {
-          extracted_prims[i] = extract_primitive(asset, *prim_work_list[i].ptr);
-        });
-  }
+  auto extracted_prims =
+      extract_primitives_parallel(asset, prim_work_list, renderer.thread_pool);
+  auto [prim_lods, total_lod_indices] = generate_lods_parallel(
+      prim_work_list, extracted_prims, renderer.thread_pool);
 
-  {
-    PROFILE_SCOPE("Wait for threads");
-    executor.run(taskflow).wait();
-  }
+  allocate_materials(asset, pool, *result);
 
-  {
-    PROFILE_SCOPE("Decode and upload textures");
-    for (usize i = 0; i < asset.images.size(); ++i) {
-      if (!decoded_images[i]) {
-        result->texture_handles[i] = renderer.dummy_texture_handle;
-        continue;
-      }
+  for (auto &pu : pending)
+    pu.patches =
+        build_patch_list(asset, pu.image_idx, result->material_base_slot);
 
-      auto &img = *decoded_images[i];
-      const VkFormat fmt = (color_spaces[i] == ImageColorSpace::srgb)
-                               ? VK_FORMAT_R8G8B8A8_SRGB
-                               : VK_FORMAT_R8G8B8A8_UNORM;
-      const std::string fmt_suffix =
-          (fmt == VK_FORMAT_R8G8B8A8_SRGB) ? ":srgb" : ":linear";
+  upload_geometry(asset, prim_work_list, extracted_prims, prim_lods,
+                  total_lod_indices, pool, *result);
 
-      std::string cache_key;
-      if (const auto *uri_src =
-              std::get_if<fastgltf::sources::URI>(&asset.images[i].data)) {
-        cache_key = (gltf_dir / uri_src->uri.fspath()).string() + fmt_suffix;
-      } else {
-        const u64 h =
-            hash_bytes(img.pixels.data(), img.pixels.size() * sizeof(u32));
-        cache_key = std::format("hash:{:016x}{}", h, fmt_suffix);
-      }
-
-      if (auto cached = renderer.texture_cache.get(cache_key)) {
-        result->texture_handles[i] = *cached;
-        continue;
-      }
-
-      const std::string debug_name =
-          asset.images[i].name.empty()
-              ? std::format("{}#img{}", fs_path.filename().string(), i)
-              : std::string(asset.images[i].name);
-
-      auto handle = renderer.upload_texture(img.pixels, debug_name, img.width,
-                                            img.height, fmt, true, false);
-
-      renderer.texture_cache.insert(cache_key, handle);
-      result->texture_handles[i] = handle;
-    }
-  }
-
-  if (!asset.materials.empty()) {
-    PROFILE_SCOPE("Allocate materials");
-    std::vector<GPUMaterial> gpu_mats;
-    gpu_mats.reserve(asset.materials.size());
-    for (const auto &mat : asset.materials)
-      gpu_mats.push_back(
-          build_gpu_material(mat, asset, result->texture_handles));
-
-    auto mat_offset = pool.allocate_materials(gpu_mats);
-    result->material_base_slot = mat_offset.start_index;
-    result->material_count = static_cast<u32>(gpu_mats.size());
-    for (usize i = 0; i < gpu_mats.size(); ++i)
-      result->material_slots[i] = result->material_base_slot + (u32)i;
-  }
-
-  {
-    PROFILE_SCOPE("Allocate geometry");
-
-    // Generate LODs up front so the reserve call is accurate
-    struct PrimLods {
-      std::vector<std::vector<u32>> extra; // LOD1, LOD2, LOD3
-    };
-    std::vector<PrimLods> prim_lods(prim_work_list.size());
-    usize total_lod_indices = 0;
-
-    {
-      PROFILE_SCOPE("Generate LODs");
-      for (usize i = 0; i < prim_work_list.size(); ++i) {
-        if (!extracted_prims[i])
-          continue;
-        auto &[data, aabb] = *extracted_prims[i];
-        if (should_generate_lods(data)) {
-          prim_lods[i].extra = generate_lods(data);
-          for (const auto &lod_indices : prim_lods[i].extra)
-            total_lod_indices += lod_indices.size();
-        }
-      }
-    }
-
-    auto [total_v, total_i] = calculate_requirements(extracted_prims);
-    pool.reserve(total_v, total_i + total_lod_indices);
-
-    auto batch = pool.begin_transaction();
-
-    result->meshes.resize(asset.meshes.size());
-    result->submesh_aabbs.resize(asset.meshes.size());
-    result->vertex_base_offset = pool.vertex_offset;
-    result->submesh_aabbs.clear();
-
-    for (usize i = 0; i < prim_work_list.size(); ++i) {
-      auto &res = extracted_prims[i];
-      const usize mesh_idx = prim_work_list[i].mesh_idx;
-
-      if (!res) {
-        result->submesh_aabbs[mesh_idx].push_back(AABB::create());
-        continue;
-      }
-
-      auto &[data, aabb] = *res;
-
-      // LOD0 — full vertices + indices
-      auto offsets = batch.allocate(data.vertices, data.indices);
-
-      MeshLodGroup lod_group;
-      lod_group.vertex_offset =
-          static_cast<i32>(offsets.vertex_offset / sizeof(Vertex));
-      lod_group.lods[0].first_index =
-          static_cast<u32>(offsets.index_offset / sizeof(u32));
-      lod_group.lods[0].index_count = static_cast<u32>(data.indices.size());
-      lod_group.lod_count = 1;
-
-      // LOD1–N — indices only, same vertex_offset
-      for (const auto &lod_indices : prim_lods[i].extra) {
-        auto lod_off = batch.allocate({}, lod_indices);
-        auto &lod = lod_group.lods[lod_group.lod_count++];
-        lod.first_index = static_cast<u32>(lod_off.index_offset / sizeof(u32));
-        lod.index_count = static_cast<u32>(lod_indices.size());
-      }
-
-      result->submesh_aabbs[mesh_idx].push_back(aabb);
-      result->mesh_aabb.merge(aabb);
-      result->meshes[mesh_idx].push_back(lod_group);
-    }
-
-    batch.commit();
-  }
-
-  const auto scene_roots =
-      asset.defaultScene.has_value()
-          ? asset.scenes[*asset.defaultScene].nodeIndices
-          : std::vector<unsigned long,
-                        std::pmr::polymorphic_allocator<unsigned long>>{};
+  using Def = decltype(asset.scenes[0].nodeIndices);
+  const auto scene_roots = asset.defaultScene.has_value()
+                               ? asset.scenes[*asset.defaultScene].nodeIndices
+                               : Def{};
   if (!scene_roots.empty()) {
     PROFILE_SCOPE("Iterate nodes");
     flatten_nodes(asset, scene_roots, *result);
   }
 
-  info("load_gltf: '{}' — {} image(s), {} material(s), {} mesh(es), {} node(s)",
+  info("load_gltf: '{}' - {} image(s), {} material(s), {} mesh(es), {} node(s)",
        fs_path.filename().string(), asset.images.size(), asset.materials.size(),
        asset.meshes.size(), result->nodes.size());
-  return renderer.register_gltf(std::move(*result));
+
+  auto handle = renderer.register_gltf(std::move(*result));
+  submit_texture_uploads(pending, renderer, handle);
+  return handle;
 }
 
 } // namespace mesh
-
 } // namespace dy

@@ -70,6 +70,18 @@ public:
     }
   }
 
+  template <typename T>
+  auto for_each_with_flush(usize start_element, auto &&func) {
+    if (!mapped_data)
+      return;
+    auto *typed_ptr = static_cast<T *>(mapped_data) + start_element;
+    const auto count = (allocation_info.size / sizeof(T)) - start_element;
+    for (usize i = 0; i < count; ++i)
+      func(typed_ptr[i]);
+    vmaFlushAllocation(allocator, allocation, start_element * sizeof(T),
+                       count * sizeof(T));
+  }
+
   auto upload_with_offset(std::ranges::contiguous_range auto &&range,
                           usize byte_offset, bool flush = false) {
     const auto bytes = std::ranges::size(range) *
@@ -100,6 +112,8 @@ public:
   [[nodiscard]] auto get_usage_flags() const -> const auto & {
     return usage_flags;
   }
+
+  auto set_name(std::string_view name) const -> void;
 
   static auto create(VmaAllocator allocator, VkDeviceSize size,
                      VkBufferUsageFlags usage) -> std::unique_ptr<Buffer>;

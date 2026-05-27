@@ -141,9 +141,9 @@ struct ComponentRenderer<dy::Components::Mesh>
         for (dy::u32 idx = 0u; idx < slots.size(); ++idx) {
           if (registry.is_live(idx)) {
             auto live_handle = registry.handle_at(idx);
-            std::string label = "Mesh Asset #" + std::to_string(idx);
+            std::string mesh_label = "Mesh Asset #" + std::to_string(idx);
 
-            if (ImGui::Selectable(label.c_str(),
+            if (ImGui::Selectable(mesh_label.c_str(),
                                   current_handle == live_handle)) {
               m.handle = live_handle;
               modified = true;
@@ -248,15 +248,15 @@ struct ComponentRenderer<dy::Components::Camera>
                    dy::Entity &) -> bool {
     bool changed = false;
     float &fov = cam.fov_degrees;
-    float &near = cam.near_plane;
-    float &far = cam.far_plane;
+    float &near_plane = cam.near_plane;
+    float &far_plane = cam.far_plane;
     if (ImGui::SliderFloat("FOV", &fov, 1.F, 170.F)) {
       changed = true;
     }
-    if (ImGui::SliderFloat("Near", &near, 0.001F, 10.F)) {
+    if (ImGui::SliderFloat("Near", &near_plane, 0.001F, 10.F)) {
       changed = true;
     }
-    if (ImGui::SliderFloat("Far", &far, 1.F, 10'000.F)) {
+    if (ImGui::SliderFloat("Far", &far_plane, 1.F, 10'000.F)) {
       changed = true;
     }
     return changed;
@@ -282,9 +282,9 @@ struct ComponentRenderer<dy::Components::DebugFrustum>
     changed |=
         ImGui::SliderFloat("Aspect", &f.projection_config.aspect, 0.1F, 10.F);
     changed |=
-        ImGui::SliderFloat("Near", &f.projection_config.near, 0.01F, 100.F);
+        ImGui::SliderFloat("Near", &f.projection_config.near_plane, 0.01F, 100.F);
     changed |=
-        ImGui::SliderFloat("Far", &f.projection_config.far, 0.1F, 1000.F);
+        ImGui::SliderFloat("Far", &f.projection_config.far_plane, 0.1F, 1000.F);
     changed |= ImGui::ColorEdit4("Color", glm::value_ptr(f.color));
     return changed;
   }
@@ -312,10 +312,38 @@ struct ComponentRenderer<dy::Components::ParentOf>
   }
 };
 
+template <>
+struct ComponentRenderer<dy::Components::PointLight>
+    : public BaseComponentRenderer<
+          ComponentRenderer<dy::Components::PointLight>> {
+  static constexpr std::string_view label = "Point Light";
+  static constexpr bool removable = true;
+  static constexpr bool addable = true;
+
+  static auto draw(dy::Components::PointLight &light, dy::SceneRenderer &,
+                   dy::Entity &) -> bool {
+    bool changed = false;
+    changed |= ImGui::ColorEdit3("Color", glm::value_ptr(light.color));
+    changed |= ImGui::SliderFloat("Intensity", &light.intensity, 0.F, 100.F);
+    changed |= ImGui::SliderFloat("Radius", &light.radius, 0.1F, 100.F);
+    return changed;
+  }
+
+  static auto on_add(dy::SceneRenderer &, dy::Entity e) -> void {
+    auto &light = e.emplace<dy::Components::PointLight>();
+    light.color = {1.F, 1.F, 1.F};
+    light.intensity = 1.F;
+    light.radius = 10.F;
+    // renderer.mark_point_lights_dirty();
+  }
+};
+
 inline auto ComponentInspector::draw(dy::SceneRenderer &renderer,
-                                     dy::Entity &entity) -> void {
+                                     dy::Entity &entity) -> bool {
   std::optional<std::function<void()>> pending_remove;
   std::optional<std::function<void()>> pending_add;
+
+  bool any_change = false;
 
   dy::for_each_type<dy::MasterComponentList>([&]<typename T>() {
     if constexpr (dy::ComponentConfig<T>::ui_inspectable) {
@@ -323,7 +351,7 @@ inline auto ComponentInspector::draw(dy::SceneRenderer &renderer,
                     "Component is marked ui_inspectable but lacks a valid "
                     "ComponentRenderer specialization!");
 
-      draw_one<T>(renderer, entity, pending_remove);
+      any_change |= draw_one<T>(renderer, entity, pending_remove);
     }
   });
 
@@ -333,20 +361,22 @@ inline auto ComponentInspector::draw(dy::SceneRenderer &renderer,
     (*pending_remove)();
   if (pending_add)
     (*pending_add)();
+
+  return any_change;
 }
 
 template <typename T>
 inline auto ComponentInspector::draw_one(
     dy::SceneRenderer &renderer, dy::Entity &entity,
-    std::optional<std::function<void()>> &pending_remove) -> void {
+    std::optional<std::function<void()>> &pending_remove) -> bool {
   if constexpr (!dy::ComponentConfig<T>::ui_inspectable) {
-    return;
+    return false;
   }
 
   using R = ComponentRenderer<T>;
   auto *comp = entity.try_get<T>();
   if (comp == nullptr)
-    return;
+    return false;
 
   ImGui::PushID(R::label.data());
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2{6.F, 5.F});
@@ -383,20 +413,19 @@ inline auto ComponentInspector::draw_one(
 
   ImGui::PopStyleVar();
 
+  bool changed = false;
   if (open) {
     ImGui::PushItemWidth(-1.F);
     ImGui::Spacing();
-    const bool changed = R::draw(*comp, renderer, entity);
-    if (changed) {
-      // if constexpr (std::is_same_v<T, dy::Components::Transform>)
-      // app.state.hierarchy_dirty = true;
-    }
+    changed = R::draw(*comp, renderer, entity);
     ImGui::Spacing();
     ImGui::PopItemWidth();
     ImGui::TreePop();
   }
 
   ImGui::PopID();
+
+  return changed;
 }
 
 inline auto ComponentInspector::draw_add_button(

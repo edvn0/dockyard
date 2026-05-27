@@ -37,6 +37,9 @@ enum class MaterialFlags : u32 {
   has_transmission = 1 << 2, // Shader: check before sampling transmission
   has_anisotropy = 1 << 3,   // Shader: check before using anisotropy
   two_sided = 1 << 4,        // Backface rendering enabled
+  combined_orm = 1 << 5, // Shader: occlusion packed in ORM (XYZ=ORM, W=unused)
+  no_occlusion =
+      1 << 6, // Shader: skip occlusion sampling, use occlusion_strength only
 };
 MAKE_BITFIELD(MaterialFlags)
 
@@ -48,8 +51,8 @@ enum class CullMode : u32 {
 };
 
 struct GPUMaterial {
-  alignas(16) float albedo_factor[4];
-  alignas(16) float emissive_factor[4];
+  alignas(16) float albedo_factor[4]{1.0f, 1.0f, 1.0f, 1.0f};
+  alignas(16) float emissive_factor[4]{0.0f, 0.0f, 0.0f, 0.0f};
 
   // PBR factors + scales
   float metallic_factor;
@@ -121,7 +124,7 @@ struct MaterialAsset {
   TextureHandle normal_texture;
   TextureHandle metallic_roughness_texture;
   TextureHandle emissive_texture;
-  TextureHandle occlusion_texture;
+  TextureHandle ambient_occlusion_texture;
 
   // glTF 2.0 extensions
   float transmission_factor = 0.0f; // KHR_materials_transmission
@@ -137,51 +140,6 @@ struct MaterialAsset {
   float uv_scale_y = 1.0f;
   float uv_offset_x = 0.0f;
   float uv_offset_y = 0.0f;
-
-  [[nodiscard]] auto resolve_to_gpu() const -> GPUMaterial {
-    GPUMaterial gpu{};
-
-    std::copy_n(albedo_factor, 4, gpu.albedo_factor);
-    std::copy_n(emissive_factor, 4, gpu.emissive_factor);
-
-    gpu.metallic_factor = metallic_factor;
-    gpu.roughness_factor = roughness_factor;
-    gpu.normal_scale = normal_scale;
-    gpu.occlusion_strength = occlusion_strength;
-
-    gpu.alpha_mode = static_cast<u32>(alpha_mode);
-    gpu.alpha_cutoff = alpha_cutoff;
-
-    gpu.albedo_index = albedo_texture.index();
-    gpu.normal_index = normal_texture.index();
-    gpu.metallic_roughness_index = metallic_roughness_texture.index();
-    gpu.emissive_index = emissive_texture.index();
-    gpu.occlusion_index = occlusion_texture.index();
-
-    gpu.flags = MaterialFlags::depth_prepass;
-    if (alpha_mode == AlphaMode::Mask)
-      set_flag(gpu.flags, MaterialFlags::alpha_mask);
-    if (double_sided)
-      set_flag(gpu.flags, MaterialFlags::two_sided);
-    if (transmission_factor > 0.0F)
-      set_flag(gpu.flags, MaterialFlags::has_transmission);
-    if (anisotropy_factor > 0.0F)
-      set_flag(gpu.flags, MaterialFlags::has_anisotropy);
-
-    gpu.transmission_factor = transmission_factor;
-    gpu.anisotropy_factor = anisotropy_factor;
-    gpu.anisotropy_rotation = anisotropy_rotation;
-
-    gpu.cull_mode = double_sided ? static_cast<u32>(CullMode::None)
-                                 : static_cast<u32>(cull_mode);
-
-    gpu.uv_scale_x = uv_scale_x;
-    gpu.uv_scale_y = uv_scale_y;
-    gpu.uv_offset_x = uv_offset_x;
-    gpu.uv_offset_y = uv_offset_y;
-
-    return gpu;
-  }
 };
 
 struct AllocatedOffset {
@@ -258,6 +216,8 @@ struct GeometryPool {
   void reserve(usize additional_vertices, usize additional_indices);
   void reserve_materials(usize additional_mats);
 
+  [[nodiscard]] auto get_material(u32 slot) -> GPUMaterial &;
+  auto update_material(u32 slot, const GPUMaterial &mat) -> void;
   [[nodiscard]] auto get_materials(u32 base_slot, u32 count) const
       -> std::span<const GPUMaterial>;
   [[nodiscard]] auto get_materials_mut(u32 base_slot, u32 count)

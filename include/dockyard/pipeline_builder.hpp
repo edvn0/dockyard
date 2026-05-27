@@ -12,6 +12,8 @@
 #include <variant>
 #include <vector>
 
+#include "context.hpp"
+
 namespace dy {
 
 // ── Blend state
@@ -120,7 +122,11 @@ struct PipelineTag {};
 using PipelineHandle = dy::Handle<PipelineTag>;
 
 struct PipelineRegistry {
-  VkDevice device = VK_NULL_HANDLE;
+  VulkanContext& context;
+
+  [[nodiscard]] auto device() const& {
+    return context.device;
+  }
 
   struct Entry {
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -131,7 +137,7 @@ struct PipelineRegistry {
 
   dy::Pool<PipelineTag, Entry> pool{};
 
-  explicit PipelineRegistry(VkDevice d) : device(d) {}
+  explicit PipelineRegistry(VulkanContext& ctx) : context(ctx) {}
   PipelineRegistry(const PipelineRegistry &) = delete;
   PipelineRegistry &operator=(const PipelineRegistry &) = delete;
 
@@ -168,6 +174,9 @@ struct PipelineRegistry {
   auto destroy(PipelineHandle) -> void;
   auto destroy(auto &&...h) { (destroy(h), ...); }
   auto cleanup() -> void;
+
+private:
+  std::chrono::steady_clock::time_point last_dirty_check{};
 };
 
 } // namespace dy

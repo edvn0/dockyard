@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/types.hpp>
 #include <glm/glm.hpp>
@@ -93,6 +94,7 @@ struct MeshPrimitiveReference {
   MeshLodGroup lod_group;
   u32 material_id;
   AABB aabb;
+  u32 flat_index;
 };
 
 struct MeshNodeDescription {
