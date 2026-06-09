@@ -32,9 +32,11 @@ Buffer::Buffer(VmaAllocator alloc, VkDeviceSize size, VkBufferUsageFlags u)
   usage_flags = u;
 }
 
-auto Buffer::create(VmaAllocator allocator, VkDeviceSize size,
+auto Buffer::create(VmaAllocator allocator, std::string_view name, VkDeviceSize size,
                     VkBufferUsageFlags usage) -> std::unique_ptr<Buffer> {
-  return  std::unique_ptr<Buffer>{new Buffer {allocator, size, usage}};
+  auto buffer = std::unique_ptr<Buffer>{new Buffer {allocator, size, usage}};
+  buffer->set_name(name);
+  return buffer;
 }
 
 Buffer::~Buffer() {

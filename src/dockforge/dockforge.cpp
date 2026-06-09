@@ -20,6 +20,8 @@
 #include <glm/gtc/random.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
+#include <dockforge/component_inspector.hpp>
+#include <dockforge/component_renderers.hpp>
 
 #include <imgui.h>
 
@@ -27,9 +29,7 @@
 
 #include <implot.h>
 
-#include <dockforge/component_inspector.hpp>
-
-#include <dockforge/component_renderers.hpp>
+#include <nfd.hpp>
 
 #include "./cube_vertices.inl"
 
@@ -732,6 +732,68 @@ auto draw_performance_overlay() -> void {
   ImGui::End();
 }
 
+auto Dockforge::draw_hdr_selector() -> void {
+  static NullableVFSPath selected_hdr;
+
+  auto &renderer = *this->renderer;
+
+  if (!ImGui::Begin("Environment")) {
+    ImGui::End();
+    return;
+  }
+
+  ImGui::Text("HDR map");
+
+  if (!selected_hdr.valid()) {
+    ImGui::TextDisabled("No external HDR selected");
+  } else {
+    ImGui::TextWrapped("%.*s",
+                       static_cast<int>(selected_hdr.view().size()),
+                       selected_hdr.view().data());
+  }
+
+  if (ImGui::Button("Browse HDR...")) {
+    NFD::Guard nfd_guard;
+
+    const nfdfilteritem_t filters[] = {
+        {"HDR images", "hdr,exr"},
+        {"All files", "*"},
+    };
+
+    NFD::UniquePath out_path;
+    const nfdresult_t result =
+        NFD::OpenDialog(out_path, filters, std::size(filters));
+
+    if (result == NFD_OKAY) {
+      const auto virtual_hdr_path =
+          VFS::get().mount_file("external_hdr",
+                                std::filesystem::path{out_path.get()});
+
+      selected_hdr = NullableVFSPath{virtual_hdr_path};
+      renderer.set_hdr_map(virtual_hdr_path);
+    } else if (result == NFD_ERROR) {
+      warn("Native file dialog failed: {}", NFD::GetError());
+    }
+  }
+
+  ImGui::SameLine();
+
+  if (ImGui::Button("Use packaged sunset")) {
+    const auto sunset = VFSPath::create("textures://env/sunset_f16.ktx2");
+    selected_hdr = NullableVFSPath{sunset};
+    renderer.set_hdr_map(sunset);
+  }
+
+  if (renderer.ibl_probe.valid()) {
+    ImGui::SeparatorText("GPU handles");
+    ImGui::Text("Env map:     %u", renderer.ibl_probe.env_map.index());
+    ImGui::Text("Irradiance:  %u", renderer.ibl_probe.irradiance.index());
+    ImGui::Text("Prefiltered: %u", renderer.ibl_probe.prefiltered.index());
+    ImGui::Text("BRDF LUT:    %u", renderer.ibl_probe.brdf_lut.index());
+  }
+
+  ImGui::End();
+}
 auto Dockforge::build_ui() -> void {
   const ImGuiViewport *vp = ImGui::GetMainViewport();
   ImGui::SetNextWindowPos(vp->WorkPos);
@@ -858,13 +920,20 @@ auto Dockforge::build_ui() -> void {
                           1.0F)) {
       state.hierarchy_dirty = true;
     }
+
+        ImGui::Separator();
+    ImGui::SeparatorText("Shadow Settings");
+    ImGui::DragFloat("Shadow Distance", &shadow_map_state.far_plane,
+                     1.0F, 10.0F, 1000.0F, "%.0f m");
+    if (ImGui::IsItemDeactivatedAfterEdit())
+        shadow_map_state.invalid = true;
   }
   ImGui::End();
 
   draw_scene_outliner();
   draw_inspector();
-
   draw_performance_overlay();
+  draw_hdr_selector();
 
   auto draw_csm = [](CsmResources &resources) {
     if (ImGui::Begin("Cascaded Shadow Map Debug")) {
@@ -1004,45 +1073,46 @@ auto resolve_material_slot(Entity e) -> u32 {
 } // namespace
 
 void compute_world_matrices(entt::registry &registry) {
-  registry.sort<Components::ParentOf>(
-      [&registry](const entt::entity lhs, const entt::entity rhs) {
-        auto *lhs_parent = registry.try_get<Components::ParentOf>(lhs);
-        auto *rhs_parent = registry.try_get<Components::ParentOf>(rhs);
-
-        if (rhs_parent && rhs_parent->parent == lhs)
-          return true;
-        if (lhs_parent && lhs_parent->parent == rhs)
-          return false;
-
-        return lhs < rhs;
-      });
-
-  auto base_view =
-      registry.view<Components::Transform, Components::LocalToWorld>();
-  for (auto &&[entity, xt, ltw] : base_view.each()) {
-    ltw.matrix = xt.matrix(); 
-  }
-
-  auto hierarchy_view =
-      registry.view<Components::ParentOf, Components::LocalToWorld>();
-
-  hierarchy_view.use<Components::ParentOf>();
-
-  for (auto &&[entity, relation, ltw] : hierarchy_view.each()) {
-    if (registry.valid(relation.parent)) {
-      if (auto *parent_ltw =
-              registry.try_get<Components::LocalToWorld>(relation.parent);
-          parent_ltw) {
-        ltw.matrix = parent_ltw->matrix * ltw.matrix;
-      }
+    // 1. Set base matrices for all entities with a transform
+    auto base_view = registry.view<Components::Transform, Components::LocalToWorld>();
+    for (auto &&[entity, xt, ltw] : base_view.each()) {
+        ltw.matrix = xt.matrix();
     }
-  }
+
+    // 2. Walk hierarchy depth-first without sorting storage
+    // Build parent->children map once
+    std::unordered_map<entt::entity, std::vector<entt::entity>> children;
+    auto relation_view = registry.view<Components::ParentOf>();
+    for (auto entity : relation_view) {
+        auto &rel = relation_view.get<Components::ParentOf>(entity);
+        if (registry.valid(rel.parent))
+            children[rel.parent].push_back(entity);
+    }
+
+    // 3. Propagate from roots only
+    std::function<void(entt::entity)> propagate = [&](entt::entity e) {
+        auto *parent_ltw = registry.try_get<Components::LocalToWorld>(e);
+        if (!parent_ltw) return;
+        auto it = children.find(e);
+        if (it == children.end()) return;
+        for (auto child : it->second) {
+            auto *child_ltw = registry.try_get<Components::LocalToWorld>(child);
+            if (child_ltw)
+                child_ltw->matrix = parent_ltw->matrix * child_ltw->matrix;
+            propagate(child);
+        }
+    };
+
+    for (auto entity : base_view) {
+        if (!registry.any_of<Components::ParentOf>(entity))
+            propagate(entity);
+    }
 }
 
 auto Dockforge::render(RenderContext &ctx) -> u64 {
   TracyVkCollectHost(renderer->tracy_vk_ctx);
-
   if (state.hierarchy_dirty) [[unlikely]] {
+        info("hierarchy_dirty: recomputing world matrices (frame {})", ctx.frame_index);
     compute_world_matrices(active_scene->registry());
     shadow_map_state.invalid = true;
     state.hierarchy_dirty = false;
@@ -1078,7 +1148,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
   if (shadow_map_state.invalid) {
     renderer->update_csm(view, projection, editor_camera->near_plane(),
-                         editor_camera->far_plane());
+                         shadow_map_state.far_plane);
   }
 
   std::array<GPUPointLight, FrameUBO::max_point_lights> gpu_lights;
@@ -1097,8 +1167,14 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     };
   }
 
-  auto prepare_result =
-      renderer->prepare(ctx.frame_index, view, projection, gpu_lights);
+auto prepare_result = renderer->prepare({
+    .frame_index  = ctx.frame_index,
+    .view         = view,
+    .projection   = projection,
+    .camera_near_far = glm::vec2(editor_camera->near_plane(), editor_camera->far_plane()),
+    .shadow_near_far = glm::vec2(shadow_map_state.near_plane, shadow_map_state.far_plane),
+    .point_lights = std::span(gpu_lights.data(), light_count),
+});
   if (prepare_result.failed()) {
     return ctx.next_frame_wait_value();
   }

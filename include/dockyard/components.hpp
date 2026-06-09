@@ -25,8 +25,8 @@ struct Mesh {
 
 struct Camera {
   f32 fov_degrees = 70.0F;
-  f32 near_plane = 0.01F;
-  f32 far_plane = 10000.0F;
+  f32 near_plane = 0.5F;
+  f32 far_plane = 500.0F;
   f32 aspect = 16.0F / 9.0F;
 
   glm::vec3 position{0.0F};

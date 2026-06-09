@@ -176,7 +176,7 @@ auto ImGuiRenderer::render_draw_data(VkCommandBuffer cmd, ImDrawData *dd,
         static_cast<usize>(dd->TotalIdxCount * 4) * sizeof(ImDrawIdx);
     const auto actual_size = static_cast<std::size_t>(next_power_of_two(size));
     info("(ImGui) Reallocating index buffer to {} bytes", actual_size);
-    drawable.index = Buffer::create(renderer.ctx.allocator, actual_size,
+    drawable.index = Buffer::create(renderer.ctx.allocator, "imgui_index_buffer",   actual_size,
                                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
     drawable.index_count = static_cast<u32>(actual_size / sizeof(ImDrawIdx));
   }
@@ -185,7 +185,7 @@ auto ImGuiRenderer::render_draw_data(VkCommandBuffer cmd, ImDrawData *dd,
         static_cast<usize>(dd->TotalVtxCount * 4) * sizeof(ImDrawVert);
     const auto actual_size = static_cast<std::size_t>(next_power_of_two(size));
     info("(ImGui) Reallocating vertex buffer to {} bytes", actual_size);
-    drawable.vertex = Buffer::create(renderer.ctx.allocator, actual_size,
+    drawable.vertex = Buffer::create(renderer.ctx.allocator, "imgui_vertex_buffer", actual_size,
                                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     drawable.vertex_count = static_cast<u32>(actual_size / sizeof(ImDrawVert));
   }
@@ -240,7 +240,8 @@ auto ImGuiRenderer::render_draw_data(VkCommandBuffer cmd, ImDrawData *dd,
         continue;
       }
 
-      auto tex_id = renderer.textures.handle_at(imgui_cmd.GetTexID());
+      const auto as_u32 = static_cast<u32>(imgui_cmd.GetTexID());
+      auto tex_id = renderer.textures.handle_at(as_u32);
       PC pc{
           .lrtb = {L, R, T, B},
           .vb = drawable.vertex->get_device_address(),

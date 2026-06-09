@@ -8,12 +8,198 @@
 #include <dockyard/app.hpp>
 #include <dockyard/context.hpp>
 #include <dockyard/vfs.hpp>
-
 #include <dockyard/texture_upload_pool.hpp>
 
-#include <stb_image.h>
+#include <ktx.h>
+#include <ktxvulkan.h>
 
+#include <stb_image.h>
+#include <stb_image_write.h>
+#include <glm/gtc/packing.hpp>
 namespace dy {
+
+namespace {
+
+struct KtxHdrMip {
+  std::vector<std::byte> data;
+  u32 width{};
+  u32 height{};
+};
+
+struct KtxHdrDecodeResult {
+  std::vector<KtxHdrMip> mips;
+  VkFormat vk_format{VK_FORMAT_UNDEFINED};
+  u32 width{};
+  u32 height{};
+};
+
+struct KtxTexture2Guard {
+  ktxTexture2 *texture{};
+
+  ~KtxTexture2Guard() {
+    if (texture != nullptr) {
+      ktxTexture2_Destroy(texture);
+    }
+  }
+
+  explicit KtxTexture2Guard(ktxTexture2* tex) : texture(tex) {}
+  KtxTexture2Guard() = default;
+
+  KtxTexture2Guard(KtxTexture2Guard &&other) noexcept : texture(other.release()) {}
+
+  KtxTexture2Guard &operator=(KtxTexture2Guard &&other) noexcept {
+    if (this != &other) {
+      if (texture != nullptr) {
+        ktxTexture2_Destroy(texture);
+      }
+      texture = other.release();
+    }
+    return *this;
+  }
+
+  KtxTexture2Guard &operator=(const KtxTexture2Guard &) = delete;
+
+  KtxTexture2Guard(const KtxTexture2Guard &) = delete;
+
+  [[nodiscard]] ktxTexture2* release() noexcept {
+    ktxTexture2* result = texture;
+    texture = nullptr;
+    return result;
+  }
+};
+
+[[nodiscard]] auto ktx_error_string(KTX_error_code error) -> std::string {
+  return std::format("{}", std::to_underlying(error));
+}
+
+[[nodiscard]] auto is_sampled_format_supported(const VulkanContext &ctx,
+                                               VkFormat format) -> bool {
+  VkFormatProperties props{};
+  vkGetPhysicalDeviceFormatProperties(ctx.physical_device, format, &props);
+  return (props.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+}
+
+[[nodiscard]] auto transcode_ktx2_hdr_if_needed(const VulkanContext &ctx,
+                                                ktxTexture2 *ktx)
+    -> std::expected<VkFormat, std::string> {
+  if (ktxTexture2_NeedsTranscoding(ktx)) {
+    return std::unexpected(
+        "HDR KTX2 textures must be pre-encoded as BC6H_UFLOAT_BLOCK; "
+        "BasisU/UASTC HDR transcoding is not supported"
+    );
+  }
+
+  const auto format = static_cast<VkFormat>(ktx->vkFormat);
+
+  if (format == VK_FORMAT_UNDEFINED) {
+    return std::unexpected(
+        "KTX2 has VK_FORMAT_UNDEFINED and does not require transcoding"
+    );
+  }
+
+  if (!is_sampled_format_supported(ctx, format)) {
+    return std::unexpected(std::format(
+        "KTX2 VkFormat {} is not supported as sampled optimal-tiled image",
+        std::to_underlying(format)
+    ));
+  }
+
+  return format;
+}
+
+[[nodiscard]] auto decode_ktx2_hdr_texture(const VulkanContext &ctx,
+                                           const std::filesystem::path &path)
+    -> std::expected<KtxHdrDecodeResult, std::string> {
+  ktxTexture2 *raw_ktx{};
+
+  const auto create_error = ktxTexture2_CreateFromNamedFile(
+      path.string().c_str(),
+      KTX_TEXTURE_CREATE_LOAD_IMAGE_DATA_BIT,
+      &raw_ktx
+  );
+
+  if (create_error != KTX_SUCCESS) {
+    return std::unexpected(std::format(
+        "ktxTexture2_CreateFromNamedFile failed: {}",
+        ktx_error_string(create_error)
+    ));
+  }
+
+  KtxTexture2Guard guard{raw_ktx};
+  auto *ktx = guard.texture;
+
+  if (ktx->numDimensions != 2) {
+    return std::unexpected(std::format(
+        "Expected 2D KTX2 HDR equirect texture, got {} dimensions",
+        ktx->numDimensions
+    ));
+  }
+
+  if (ktx->numFaces != 1) {
+    return std::unexpected(std::format(
+        "Expected equirect KTX2 texture with 1 face, got {} faces",
+        ktx->numFaces
+    ));
+  }
+
+  if (ktx->numLayers > 1) {
+    return std::unexpected(std::format(
+        "Expected non-array KTX2 texture, got {} layers",
+        ktx->numLayers
+    ));
+  }
+
+  auto format = transcode_ktx2_hdr_if_needed(ctx, ktx);
+  if (!format) {
+    return std::unexpected(format.error());
+  }
+
+  KtxHdrDecodeResult out;
+  out.width = ktx->baseWidth;
+  out.height = ktx->baseHeight;
+  out.vk_format = *format;
+
+  const auto mip_count = std::max(1u, ktx->numLevels);
+  out.mips.reserve(mip_count);
+
+  for (u32 level = 0; level < mip_count; ++level) {
+    ktx_size_t offset{};
+
+    const auto offset_error =
+        ktxTexture_GetImageOffset(ktxTexture(ktx), level, 0, 0, &offset);
+
+    if (offset_error != KTX_SUCCESS) {
+      return std::unexpected(std::format(
+          "ktxTexture_GetImageOffset failed for mip {}: {}",
+          level,
+          ktx_error_string(offset_error)
+      ));
+    }
+
+    const auto size = ktxTexture_GetImageSize(ktxTexture(ktx), level);
+    const auto *src = reinterpret_cast<const std::byte *>(ktx->pData + offset);
+
+    KtxHdrMip mip;
+    mip.width = std::max(1u, ktx->baseWidth >> level);
+    mip.height = std::max(1u, ktx->baseHeight >> level);
+    mip.data.assign(src, src + size);
+
+    out.mips.push_back(std::move(mip));
+  }
+
+  return out;
+}
+
+[[nodiscard]] auto lower_extension(std::filesystem::path path) -> std::string {
+  auto ext = path.extension().string();
+  std::ranges::transform(ext, ext.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return ext;
+}
+
+} // namespace
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -23,6 +209,10 @@ auto mip_count(u32 w, u32 h) -> u32 {
   return static_cast<u32>(std::bit_width(std::max(w, h)));
 }
 
+// For block-compressed formats this returns bytes per 4x4 block, not per
+// texel. Callers using this for staging-buffer sizing must use
+// ktxTexture_GetImageSize (or equivalent) for BC formats rather than
+// width * height * bytes_per_texel.
 auto bytes_per_texel(VkFormat fmt) -> u32 {
   switch (fmt) {
   case VK_FORMAT_R8G8B8A8_SRGB:
@@ -44,9 +234,12 @@ auto bytes_per_texel(VkFormat fmt) -> u32 {
     return 16;
   case VK_FORMAT_BC7_SRGB_BLOCK:
   case VK_FORMAT_BC7_UNORM_BLOCK:
-    return 16; // 16 bytes per 4x4 block = 1 byte per pixel
   case VK_FORMAT_BC5_UNORM_BLOCK:
-    return 16; // 16 bytes per 4x4 block = 1 byte per pixel (2 channels)
+  case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+  case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+    // 16 bytes per 4x4 block; sizing via this value is only valid when
+    // the caller supplies pre-sized byte spans (e.g. from libktx).
+    return 16;
   default:
     info("Warning: bytes_per_texel: unknown format {}, defaulting to 4",
          std::to_underlying(fmt));
@@ -114,11 +307,7 @@ auto blit_mip(VkCommandBuffer cmd, VkImage image, VkExtent2D src_extent,
           },
       .srcOffsets =
           {
-              VkOffset3D{
-                  .x = 0,
-                  .y = 0,
-                  .z = 0,
-              },
+              VkOffset3D{.x = 0, .y = 0, .z = 0},
               VkOffset3D{
                   .x = static_cast<i32>(src_extent.width),
                   .y = static_cast<i32>(src_extent.height),
@@ -134,11 +323,7 @@ auto blit_mip(VkCommandBuffer cmd, VkImage image, VkExtent2D src_extent,
           },
       .dstOffsets =
           {
-              VkOffset3D{
-                  .x = 0,
-                  .y = 0,
-                  .z = 0,
-              },
+              VkOffset3D{.x = 0, .y = 0, .z = 0},
               VkOffset3D{
                   .x = static_cast<i32>(dst_extent.width),
                   .y = static_cast<i32>(dst_extent.height),
@@ -173,6 +358,52 @@ auto set_view_debug_name(VkDevice device, VkImageView view,
 
 } // namespace
 
+// ---------------------------------------------------------------------------
+// Texture::load_ktx2_hdr_texture
+// ---------------------------------------------------------------------------
+
+auto Texture::load_ktx2_hdr_texture(const VulkanContext &ctx,
+                                     const VFSPath &path) -> Texture {
+  const auto real_path = VFS::get().resolve(path);
+
+  auto result = decode_ktx2_hdr_texture(ctx, real_path);
+  if (!result) {
+    error("Failed to decode KTX2 HDR texture '{}': {}",
+          real_path.string(), result.error());
+    std::abort();
+  }
+
+  auto &decoded = *result;
+  assert(!decoded.mips.empty());
+
+  // Base level is mips[0]; the remainder feed CreateInfo::mips.
+  const std::span<const std::byte> base_bytes = decoded.mips[0].data;
+
+  std::vector<pool::MipData> extra_mips;
+  extra_mips.reserve(decoded.mips.size() - 1);
+  for (size_t i = 1; i < decoded.mips.size(); ++i) {
+    extra_mips.push_back({
+        .pixels = decoded.mips[i].data,
+        .width  = decoded.mips[i].width,
+        .height = decoded.mips[i].height,
+    });
+  }
+
+  return Texture::from_bytes(ctx, real_path.filename().string(), {
+      .bytes         = base_bytes,
+      .mips          = extra_mips,
+      .width         = decoded.width,
+      .height        = decoded.height,
+      .format        = decoded.vk_format,
+      .generate_mips = false,
+      .storage_view  = false,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Texture::destroy
+// ---------------------------------------------------------------------------
+
 auto Texture::destroy(const VulkanContext &ctx, SubImagePool *sub_images)
     -> void {
   if (sub_images != nullptr) {
@@ -204,25 +435,24 @@ auto Texture::destroy(const VulkanContext &ctx, SubImagePool *sub_images)
   *this = {};
 }
 
-auto Texture::destroy(const VulkanContext& ctx,
-    TexturePool* mip_layer_image_pool) -> void {
-    // Destroy pool slots (for bindless index reclamation)
-    if (mip_layer_image_pool != nullptr) {
-        for (auto h : mip_layer_handles)
-            mip_layer_image_pool->destroy(h);
-    }
-    mip_layer_handles.clear();
+auto Texture::destroy(const VulkanContext &ctx,
+                      TexturePool *mip_layer_image_pool) -> void {
+  if (mip_layer_image_pool != nullptr) {
+    for (auto h : mip_layer_handles)
+      mip_layer_image_pool->destroy(h);
+  }
+  mip_layer_handles.clear();
 
-    if (!mip_layer_views.empty()) {
-        DeletionQueue::the().push(
-            [dev = ctx.device, views = std::move(mip_layer_views)]() {
-                for (auto v : views)
-                    if (v != VK_NULL_HANDLE)
-                        vkDestroyImageView(dev, v, nullptr);
-            });
-    }
+  if (!mip_layer_views.empty()) {
+    DeletionQueue::the().push(
+        [dev = ctx.device, views = std::move(mip_layer_views)]() {
+          for (auto v : views)
+            if (v != VK_NULL_HANDLE)
+              vkDestroyImageView(dev, v, nullptr);
+        });
+  }
 
-    destroy(ctx);
+  destroy(ctx);
 }
 
 void Texture::destroy(const VulkanContext &ctx) {
@@ -249,10 +479,14 @@ void Texture::destroy(const VulkanContext &ctx) {
   *this = {};
 }
 
+// ---------------------------------------------------------------------------
+// Texture::create
+// ---------------------------------------------------------------------------
+
 auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
                      u32 height, VkFormat format, VkImageUsageFlags usage,
                      VkImageAspectFlags aspect, VkSampleCountFlagBits samples,
-                     u32 mips) -> Texture {
+                     u32 mips, bool dedicated_memory) -> Texture {
   Texture rt{};
   rt.format = format;
   rt.extent = {.width = width, .height = height};
@@ -270,17 +504,19 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
   image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
   image_info.usage = usage;
 
-  if (samples > VK_SAMPLE_COUNT_1_BIT) {
+  const bool transient = samples > VK_SAMPLE_COUNT_1_BIT && ctx.caps.transient_attachments;
+  if (transient) {
     image_info.usage |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
   }
 
   image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
   VmaAllocationCreateInfo vma_info{};
-  vma_info.usage = VMA_MEMORY_USAGE_AUTO;
+  vma_info.usage = transient ? VMA_MEMORY_USAGE_GPU_LAZILY_ALLOCATED
+                             : VMA_MEMORY_USAGE_AUTO;
 
-  if ((image_info.usage & VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT) != 0U) {
-    vma_info.preferredFlags = VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT;
+  if (dedicated_memory) {
+    vma_info.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
   }
 
   if (const auto result =
@@ -291,6 +527,7 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
     std::abort();
   }
   vmaSetAllocationName(ctx.allocator, rt.allocation, name.data());
+
   VkDebugUtilsObjectNameInfoEXT name_info{};
   name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
   name_info.pObjectName = name.data();
@@ -334,39 +571,9 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
   return rt;
 }
 
-auto Texture::load_hdr_texture(const VulkanContext &ctx, const VFSPath &path)
-    -> Texture {
-  int width{};
-  int height{};
-  int channels{};
-
-  auto real_path = VFS::get().resolve(path);
-
-  float *data =
-      stbi_loadf(real_path.string().c_str(), &width, &height, &channels, 4);
-
-  if (data == nullptr) {
-    error("Failed to load HDR: {}", stbi_failure_reason());
-    std::abort();
-  }
-
-  const auto byte_size = static_cast<usize>(width) * height * 4 * sizeof(float);
-  const std::span<const std::byte> bytes{
-      reinterpret_cast<const std::byte *>(data), byte_size};
-
-  auto tex = Texture::from_bytes(ctx, real_path.filename().string(),
-                                 {
-                                     .bytes = bytes,
-                                     .width = static_cast<u32>(width),
-                                     .height = static_cast<u32>(height),
-                                     .format = VK_FORMAT_R32G32B32A32_SFLOAT,
-                                     .generate_mips = false,
-                                     .storage_view = false,
-                                 });
-
-  stbi_image_free(data);
-  return tex;
-}
+// ---------------------------------------------------------------------------
+// Texture::from_bytes
+// ---------------------------------------------------------------------------
 
 auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
                          const CreateInfo &ci) -> Texture {
@@ -391,14 +598,13 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
     copy_regions.reserve(mips);
 
     total_byte_size =
-        static_cast<VkDeviceSize>(ci.width) * ci.height * bytes_per_pixel;
+        static_cast<VkDeviceSize>(ci.bytes.size_bytes());
     copy_regions.push_back({0, ci.width, ci.height});
 
     VkDeviceSize current_offset = total_byte_size;
     for (const auto &mip : ci.mips) {
       copy_regions.push_back({current_offset, mip.width, mip.height});
-      current_offset +=
-          static_cast<VkDeviceSize>(mip.width) * mip.height * bytes_per_pixel;
+      current_offset += static_cast<VkDeviceSize>(mip.pixels.size());
     }
     total_byte_size = current_offset;
   } else {
@@ -423,15 +629,22 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
   VmaAllocationInfo staging_info{};
   vmaCreateBuffer(ctx.allocator, &staging_buf_ci, &staging_alloc_ci,
                   &staging_buf, &staging_alloc, &staging_info);
+  {auto staging_name = std::format("{}_staging_buffer", name);
+  VkDebugUtilsObjectNameInfoEXT name_info{
+      .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
+      .objectType = VK_OBJECT_TYPE_BUFFER,
+      .objectHandle = std::bit_cast<u64>(staging_buf),
+      .pObjectName = staging_name.c_str(),
+  };
+  vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info);}
 
-  u8 *dst_ptr = static_cast<u8 *>(staging_info.pMappedData);
+  auto *dst_ptr = static_cast<u8 *>(staging_info.pMappedData);
   if (has_custom_mips) {
-    std::memcpy(dst_ptr + copy_regions[0].buffer_offset, ci.bytes.data(),
-                ci.bytes.size_bytes());
+    std::memcpy(dst_ptr + copy_regions[0].buffer_offset,
+                ci.bytes.data(), ci.bytes.size_bytes());
     for (size_t i = 0; i < ci.mips.size(); ++i) {
       std::memcpy(dst_ptr + copy_regions[i + 1].buffer_offset,
-                  ci.mips[i].pixels.data(),
-                  ci.mips[i].pixels.size() * sizeof(std::byte));
+                  ci.mips[i].pixels.data(), ci.mips[i].pixels.size());
     }
   } else {
     std::memcpy(dst_ptr, ci.bytes.data(), total_byte_size);
@@ -459,6 +672,7 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
   };
   const VmaAllocationCreateInfo image_alloc_ci{
+      .flags = ci.dedicated_memory ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0u,
       .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
   };
 
@@ -472,13 +686,13 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
                            &tex.image, &tex.allocation, &tex.allocation_info));
   vmaSetAllocationName(ctx.allocator, tex.allocation, tex.name.c_str());
 
-  VkDebugUtilsObjectNameInfoEXT name_info{
+{  const VkDebugUtilsObjectNameInfoEXT name_info{
       .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT,
       .objectType = VK_OBJECT_TYPE_IMAGE,
       .objectHandle = std::bit_cast<u64>(tex.image),
       .pObjectName = tex.name.c_str(),
   };
-  vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info);
+  vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info);}
 
   ctx.one_time_submit([&t = tex, &staging_buf, &copy_regions, mips,
                        has_custom_mips, &ci](const auto &cmd) {
@@ -541,7 +755,6 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
                         VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                     VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_ASPECT_COLOR_BIT, 0,
                     mips - 1);
-
       image_barrier(cmd, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     VK_IMAGE_LAYOUT_GENERAL, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
                     VK_ACCESS_2_TRANSFER_WRITE_BIT,
@@ -590,6 +803,10 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
   return tex;
 }
 
+// ---------------------------------------------------------------------------
+// Texture::create_cubemap
+// ---------------------------------------------------------------------------
+
 auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
                              const CubemapInfo &ci) -> Texture {
   Texture tex{};
@@ -604,12 +821,7 @@ auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
       .flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
       .imageType = VK_IMAGE_TYPE_2D,
       .format = ci.format,
-      .extent =
-          {
-              .width = ci.size,
-              .height = ci.size,
-              .depth = 1,
-          },
+      .extent = {.width = ci.size, .height = ci.size, .depth = 1},
       .mipLevels = ci.mip_levels,
       .arrayLayers = 6,
       .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -620,11 +832,14 @@ auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
       .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
   };
   const VmaAllocationCreateInfo alloc_ci{
-      .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+      .flags = ci.dedicated_memory ? VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT : 0u,
+      .usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE,
+  };
 
   vk::check(vmaCreateImage(ctx.allocator, &image_ci, &alloc_ci, &tex.image,
                            &tex.allocation, &tex.allocation_info));
   vmaSetAllocationName(ctx.allocator, tex.allocation, tex.name.c_str());
+
   VkDebugUtilsObjectNameInfoEXT name_info{};
   name_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT;
   name_info.pObjectName = name.data();
@@ -688,6 +903,10 @@ auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
 
   return tex;
 }
+
+// ---------------------------------------------------------------------------
+// Texture::register_sub_views
+// ---------------------------------------------------------------------------
 
 auto Texture::register_sub_views(const VulkanContext &ctx,
                                  SubImagePool &sub_images,
@@ -808,6 +1027,147 @@ auto Texture::register_sub_views(const VulkanContext &ctx,
     }
   }
   bindless.mark_dirty();
+}
+
+auto convert_hdr_to_ktx2(const std::filesystem::path &input,
+                          const std::filesystem::path &output)
+    -> std::expected<void, std::string> {
+  int width{}, height{}, channels{};
+  float *data = stbi_loadf(input.string().c_str(), &width, &height, &channels, 4);
+  if (data == nullptr) {
+    return std::unexpected(
+        std::format("stbi_loadf failed: {}", stbi_failure_reason()));
+  }
+
+  // stbi lifetime guard
+  struct StbiGuard {
+    float *ptr;
+    explicit StbiGuard(float *p) : ptr(p) {}
+    ~StbiGuard() { stbi_image_free(ptr); }
+    StbiGuard(const StbiGuard &) = delete;
+    StbiGuard &operator=(const StbiGuard &) = delete;
+    StbiGuard(StbiGuard &&other) noexcept : ptr(std::exchange(other.ptr, nullptr)) {}
+    StbiGuard &operator=(StbiGuard &&other) noexcept {
+      if (this != &other) {
+        stbi_image_free(ptr);
+        ptr = std::exchange(other.ptr, nullptr);
+      }
+      return *this;
+    }
+  } stbi_guard(data);
+
+  // --- Create ktxTexture2 ---
+  ktxTextureCreateInfo create_info{
+      .vkFormat         = VK_FORMAT_R16G16B16A16_SFLOAT,
+      .baseWidth        = static_cast<u32>(width),
+      .baseHeight       = static_cast<u32>(height),
+      .baseDepth        = 1,
+      .numDimensions    = 2,
+      .numLevels        = static_cast<u32>(
+          std::bit_width(static_cast<u32>(std::max(width, height)))),
+      .numLayers        = 1,
+      .numFaces         = 1,
+      .isArray          = KTX_FALSE,
+      .generateMipmaps  = KTX_FALSE,
+  };
+
+  ktxTexture2 *ktx{};
+  if (const auto err = ktxTexture2_Create(
+          &create_info, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &ktx);
+      err != KTX_SUCCESS) {
+    return std::unexpected(
+        std::format("ktxTexture2_Create failed: {}", std::to_underlying(err)));
+  }
+
+  KtxTexture2Guard guard{ktx};
+
+  // --- Convert base level: f32 -> f16 and upload ---
+  {
+    const auto pixel_count = static_cast<usize>(width) * height;
+    std::vector<u16> f16_data(pixel_count * 4);
+
+    for (usize i = 0; i < pixel_count * 4; ++i) {
+      // glm's packHalf1x16 does a correct IEEE 754 f32->f16 conversion
+      f16_data[i] = glm::packHalf1x16(data[i]);
+    }
+
+    const auto byte_size = f16_data.size() * sizeof(u16);
+    if (const auto err = ktxTexture_SetImageFromMemory(
+            ktxTexture(ktx), 0, 0, 0,
+            reinterpret_cast<const u8 *>(f16_data.data()),
+            byte_size);
+        err != KTX_SUCCESS) {
+      return std::unexpected(std::format(
+          "ktxTexture_SetImageFromMemory (base) failed: {}",
+          std::to_underlying(err)));
+    }
+  }
+
+  // --- Generate mips via box filter downsampling ---
+  {
+    u32 src_w = static_cast<u32>(width);
+    u32 src_h = static_cast<u32>(height);
+
+    // Keep previous mip as f32 for quality; avoids accumulating f16 rounding
+    std::vector<float> prev_f32(data, data + src_w * src_h * 4);
+
+    for (u32 level = 1; level < create_info.numLevels; ++level) {
+      const u32 dst_w = std::max(1u, src_w / 2);
+      const u32 dst_h = std::max(1u, src_h / 2);
+
+      std::vector<float> dst_f32(dst_w * dst_h * 4, 0.0f);
+
+      for (u32 y = 0; y < dst_h; ++y) {
+        for (u32 x = 0; x < dst_w; ++x) {
+          const u32 sx = x * 2;
+          const u32 sy = y * 2;
+
+          for (u32 c = 0; c < 4; ++c) {
+            // 2x2 box filter, clamped for odd-sized mips
+            const u32 sx1 = std::min(sx + 1, src_w - 1);
+            const u32 sy1 = std::min(sy + 1, src_h - 1);
+
+            dst_f32[(y * dst_w + x) * 4 + c] =
+                (prev_f32[(sy  * src_w + sx ) * 4 + c] +
+                 prev_f32[(sy  * src_w + sx1) * 4 + c] +
+                 prev_f32[(sy1 * src_w + sx ) * 4 + c] +
+                 prev_f32[(sy1 * src_w + sx1) * 4 + c]) * 0.25f;
+          }
+        }
+      }
+
+      // Convert mip to f16
+      std::vector<u16> f16_mip(dst_w * dst_h * 4);
+      for (usize i = 0; i < f16_mip.size(); ++i) {
+        f16_mip[i] = glm::packHalf1x16(dst_f32[i]);
+      }
+
+      if (const auto err = ktxTexture_SetImageFromMemory(
+              ktxTexture(ktx), level, 0, 0,
+              reinterpret_cast<const u8 *>(f16_mip.data()),
+              f16_mip.size() * sizeof(u16));
+          err != KTX_SUCCESS) {
+        return std::unexpected(std::format(
+            "ktxTexture_SetImageFromMemory (mip {}) failed: {}",
+            level, std::to_underlying(err)));
+      }
+
+      prev_f32 = std::move(dst_f32);
+      src_w = dst_w;
+      src_h = dst_h;
+    }
+  }
+
+  // --- Write KTX2 file ---
+  if (const auto err = ktxTexture_WriteToNamedFile(
+          ktxTexture(ktx), output.string().c_str());
+      err != KTX_SUCCESS) {
+    return std::unexpected(std::format(
+        "ktxTexture_WriteToNamedFile failed: {}",
+        std::to_underlying(err)));
+  }
+
+  return {};
 }
 
 } // namespace dy

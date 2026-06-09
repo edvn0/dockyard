@@ -1,7 +1,28 @@
 #include "dockyard/vfs_path.hpp"
 #include <dockyard/vfs.hpp>
 
+
+#include <algorithm>
+#include <cctype>
+
 namespace dy {
+
+  namespace {
+
+auto valid_vfs_scheme(std::string_view scheme) -> bool {
+  if (scheme.empty())
+    return false;
+
+  return std::ranges::all_of(scheme, [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+  });
+}
+
+auto generic_vfs_filename(const std::filesystem::path &path) -> std::string {
+  return path.filename().generic_string();
+}
+
+} // namespace
 
 void VFS::initialize(const std::filesystem::path& assets_root) {
   std::scoped_lock lock(mutex);
@@ -144,6 +165,47 @@ auto VFS::read_binary_async(std::string_view virtual_path)
   auto fut = task.get_future();
   std::thread(std::move(task)).detach();
   return fut;
+}
+
+auto VFS::mount(std::string_view scheme,
+                const std::filesystem::path &physical_root) -> void {
+  ensure_initialised();
+
+  if (!valid_vfs_scheme(scheme)) {
+    error("VFS: invalid mount scheme: {}", scheme);
+    std::abort();
+  }
+
+  if (!std::filesystem::exists(physical_root) ||
+      !std::filesystem::is_directory(physical_root)) {
+    error("VFS: mount root is not a directory: {}", physical_root.string());
+    std::abort();
+  }
+
+  const auto canonical_root = std::filesystem::canonical(physical_root);
+
+  std::scoped_lock lock(mutex);
+  mounts[std::string{scheme}] = canonical_root;
+
+  info("[VFS] Mount {} -> {}", scheme, canonical_root.string());
+}
+
+auto VFS::mount_file(std::string_view scheme,
+                     const std::filesystem::path &file) -> VFSPath {
+  ensure_initialised();
+
+  if (!std::filesystem::exists(file) || !std::filesystem::is_regular_file(file)) {
+    error("VFS: mount_file target is not a file: {}", file.string());
+    std::abort();
+  }
+
+  const auto canonical_file = std::filesystem::canonical(file);
+  const auto parent = canonical_file.parent_path();
+  const auto filename = generic_vfs_filename(canonical_file);
+
+  mount(scheme, parent);
+
+  return VFSPath::create("{}://{}", scheme, filename);
 }
 
 auto VFS::initialised() const -> bool { return is_initialised; }

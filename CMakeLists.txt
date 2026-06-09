@@ -6,6 +6,8 @@ project(
   LANGUAGES CXX C
 )
 
+option(DOCKYARD_BUILD_TOOLS "Build Dockyard command line tools" ON)
+
 if(UNIX AND NOT APPLE)
   find_program(MOLD_EXECUTABLE mold)
   if(MOLD_EXECUTABLE)
@@ -20,6 +22,16 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
+
+function(set_solution_folder folder_name)
+  foreach(target_name IN LISTS ARGN)
+    if(TARGET ${target_name})
+      set_target_properties(${target_name} PROPERTIES
+        FOLDER "${folder_name}"
+      )
+    endif()
+  endforeach()
+endfunction()
 
 function(target_enable_native_arch target)
   if(MSVC)
@@ -105,6 +117,12 @@ CPMAddPackage(
 )
 
 CPMAddPackage(
+  NAME nfd
+  GITHUB_REPOSITORY btzy/nativefiledialog-extended
+  GIT_TAG v1.2.1
+)
+
+CPMAddPackage(
   NAME ImGui
   GITHUB_REPOSITORY ocornut/imgui
   GIT_TAG v1.92.5-docking
@@ -150,7 +168,7 @@ CPMAddPackage(
 
 CPMAddPackage(
   NAME ThreadPool
-  GITHUB_REPOSITORY "bshoshany/thread-pool"
+  GITHUB_REPOSITORY bshoshany/thread-pool
   GIT_TAG v5.1.0
   GIT_SHALLOW YES
   DOWNLOAD_ONLY YES
@@ -158,13 +176,13 @@ CPMAddPackage(
 
 CPMAddPackage(
   NAME Tracy
-  GITHUB_REPOSITORY "wolfpld/tracy"
+  GITHUB_REPOSITORY wolfpld/tracy
   GIT_TAG 2c6adfb416004f38c57094a4e796206edf89f8ff
   OPTIONS
-        "TRACY_ENABLE ON"
-        "TRACY_ON_DEMAND ON"   # only profiles when Tracy UI is connected
-        "TRACY_NO_CALLSTACK OFF"
-        "TRACY_VK_USE_SYMBOL_TABLE ON"
+    "TRACY_ENABLE ON"
+    "TRACY_ON_DEMAND ON"
+    "TRACY_NO_CALLSTACK OFF"
+    "TRACY_VK_USE_SYMBOL_TABLE ON"
 )
 
 CPMAddPackage(
@@ -180,7 +198,6 @@ CPMAddPackage(
     "FT_DISABLE_BROTLI ON"
 )
 
-# --- Added KTX-Software Package ---
 CPMAddPackage(
   NAME ktx
   GITHUB_REPOSITORY KhronosGroup/KTX-Software
@@ -190,6 +207,30 @@ CPMAddPackage(
     "KTX_FEATURE_TOOLS OFF"
     "KTX_FEATURE_DOCS OFF"
     "KTX_FEATURE_TESTS OFF"
+)
+
+CPMAddPackage(
+  NAME stb
+  GITHUB_REPOSITORY nothings/stb
+  GIT_TAG master
+  GIT_SHALLOW YES
+  DOWNLOAD_ONLY YES
+)
+
+CPMAddPackage(
+  NAME mikktspace
+  GITHUB_REPOSITORY mmikk/MikkTSpace
+  GIT_TAG master
+  GIT_SHALLOW YES
+  DOWNLOAD_ONLY YES
+)
+
+CPMAddPackage(
+  NAME PerlinNoise
+  GITHUB_REPOSITORY Reputeless/PerlinNoise
+  GIT_TAG master
+  GIT_SHALLOW YES
+  DOWNLOAD_ONLY YES
 )
 
 set(GLM_ENABLE_SIMD_SSE2 ON CACHE BOOL "Enable SSE2 optimizations" FORCE)
@@ -216,6 +257,16 @@ CPMAddPackage(
     "GLM_ENABLE_SIMD_NEON=ON"
     "GLM_FORCE_PURE=ON"
 )
+
+if(DOCKYARD_BUILD_TOOLS)
+  CPMAddPackage(
+    NAME cgltf
+    GITHUB_REPOSITORY jkuhlmann/cgltf
+    GIT_TAG master
+    GIT_SHALLOW YES
+    DOWNLOAD_ONLY YES
+  )
+endif()
 
 function(target_set_warnings target)
   if(MSVC)
@@ -303,6 +354,74 @@ if(ImGui_SOURCE_DIR AND ImPlot_SOURCE_DIR AND ImGuizmo_SOURCE_DIR)
   )
 endif()
 
+set(THIRD_PARTY_GENERATED_DIR
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/third_party"
+)
+
+file(MAKE_DIRECTORY "${THIRD_PARTY_GENERATED_DIR}")
+
+file(WRITE "${THIRD_PARTY_GENERATED_DIR}/stb_impl.cpp"
+"#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_RESIZE_IMPLEMENTATION
+#include <stb_image.h>
+#include <stb_image_resize2.h>
+"
+)
+
+add_library(ThirdPartySTB STATIC
+  "${THIRD_PARTY_GENERATED_DIR}/stb_impl.cpp"
+  "${mikktspace_SOURCE_DIR}/mikktspace.c"
+)
+
+target_include_directories(ThirdPartySTB
+  PUBLIC
+    "${stb_SOURCE_DIR}"
+    "${mikktspace_SOURCE_DIR}"
+    "${PerlinNoise_SOURCE_DIR}"
+)
+
+target_compile_options(ThirdPartySTB
+  PRIVATE
+    $<$<CXX_COMPILER_ID:GNU>:${DOCKYARD_SUPPRESSED_WARNINGS}>
+    $<$<CXX_COMPILER_ID:Clang>:${DOCKYARD_SUPPRESSED_WARNINGS}>
+    $<$<C_COMPILER_ID:GNU>:${DOCKYARD_SUPPRESSED_WARNINGS}>
+    $<$<C_COMPILER_ID:Clang>:${DOCKYARD_SUPPRESSED_WARNINGS}>
+)
+
+set_solution_folder("third_party/windowing"
+  glfw
+  nfd
+)
+
+set_solution_folder("third_party/vulkan"
+  volk
+  volk_headers
+  vk-bootstrap
+  VulkanMemoryAllocator
+  ktx
+  ktx_read
+  ktx_version
+  ktx_basisu
+  astcenc-avx2-static
+  astcenc-sse4.1-static
+  astcenc-static
+)
+
+set_solution_folder("third_party/ui"
+  imgui
+)
+
+set_solution_folder("third_party/utility"
+  EnTT
+  spdlog
+  efsw-static
+  meshoptimizer
+  TracyClient
+  freetype
+  ThirdPartySTB
+  glm
+)
+
 add_library(dockyard-allocator STATIC
   src/dockyard/allocator.cpp
 )
@@ -339,20 +458,6 @@ target_include_directories(dockyard-compiler PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-add_library(ThirdPartySTB STATIC
-  3PP/stb.c
-  3PP/mikktspace.c
-)
-
-target_compile_definitions(ThirdPartySTB PRIVATE
-  STB_IMAGE_IMPLEMENTATION
-  STB_IMAGE_RESIZE_IMPLEMENTATION
-)
-
-target_include_directories(ThirdPartySTB PUBLIC
-  3PP
-)
-
 add_library(dockyard STATIC
   src/dockyard/context.cpp
   src/dockyard/app.cpp
@@ -375,6 +480,7 @@ add_library(dockyard STATIC
   src/dockyard/bindless_handle.cpp
   src/dockyard/texture_upload_pool.cpp
 )
+
 dockyard_configure_renderdoc(dockyard
   REAL_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/dockyard/renderdoc.cpp"
@@ -383,9 +489,19 @@ dockyard_configure_renderdoc(dockyard
   INCLUDE_CACHE_VARIABLE
     RENDERDOC_INCLUDE_PATH
 )
+
+target_compile_options(dockyard PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/MP>
+)
+
 target_enable_native_arch(dockyard)
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
-target_include_directories(dockyard PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${ThreadPool_SOURCE_DIR}/include)
+
+target_include_directories(dockyard PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${ThreadPool_SOURCE_DIR}/include
+)
+
 target_compile_definitions(dockyard
   PUBLIC
     ${DOCKYARD_PUBLIC_DEFINES}
@@ -425,6 +541,14 @@ set_target_properties(dockyard PROPERTIES
   FOLDER dockyard
 )
 
+set_target_properties(dockyard-allocator PROPERTIES
+  FOLDER dockyard
+)
+
+set_target_properties(dockyard-compiler PROPERTIES
+  FOLDER dockyard
+)
+
 add_executable(dockforge
   src/dockforge/main.cpp
   src/dockforge/dockforge.cpp
@@ -434,11 +558,17 @@ add_executable(dockforge
   src/dockforge/editor_utils.cpp
   src/dockforge/matrix_cache.cpp
 )
+
 target_enable_native_arch(dockforge)
 
 target_link_libraries(dockforge PRIVATE
   dockyard
   imgui
+  nfd
+)
+
+target_compile_options(dockforge PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/MP>
 )
 
 target_set_warnings(dockforge)
@@ -446,3 +576,21 @@ target_set_warnings(dockforge)
 set_target_properties(dockforge PROPERTIES
   FOLDER apps
 )
+
+if(DOCKYARD_BUILD_TOOLS)
+  add_executable(gltf-imagemap
+    tools/gltf-imagemap.cpp
+  )
+
+  target_compile_features(gltf-imagemap PRIVATE cxx_std_23)
+
+  target_include_directories(gltf-imagemap PRIVATE
+    ${cgltf_SOURCE_DIR}
+  )
+
+  target_set_warnings(gltf-imagemap)
+
+  set_target_properties(gltf-imagemap PROPERTIES
+    FOLDER tools
+  )
+endif()

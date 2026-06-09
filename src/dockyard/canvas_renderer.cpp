@@ -217,7 +217,7 @@ auto CanvasRenderer::LineCanvas3D::render(
     const usize actual_size = next_power_of_two(required_size);
     info("(Canvas) Reallocating line buffer to {} bytes", actual_size);
     line_buffers[frame_cursor] =
-        Buffer::create(renderer.ctx.allocator, actual_size,
+        Buffer::create(renderer.ctx.allocator, "canvas_line_renderer_buffer", actual_size,
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     buffer_sizes[frame_cursor] = actual_size;
   }
@@ -238,7 +238,7 @@ auto CanvasRenderer::LineCanvas3D::render(
       .address = line_buffers[frame_cursor]->get_device_address(),
   };
 
-  auto pipe = renderer.pipeline_registry->get(pipeline);
+  auto *pipe = renderer.pipeline_registry->get(pipeline);
 
   vkCmdSetViewport(cmd, 0, 1, &vp);
   vkCmdSetScissor(cmd, 0, 1, &scissor);

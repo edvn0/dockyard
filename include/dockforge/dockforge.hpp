@@ -25,7 +25,7 @@ struct EditorCamera;
 struct ShadowMapState {
   glm::mat4 last_view_matrix{1.0F};
   bool invalid = true;
-  float near_plane = 0.01F;
+  float near_plane = 0.5F;
   float far_plane = 100.0F;
 };
 
@@ -84,6 +84,7 @@ struct Dockforge : App {
   auto draw_debug_shapes() -> void;
   auto duplicate_entity(Entity) -> Entity;
   void flush_material_overrides();
+  auto draw_hdr_selector() -> void;
 
   auto destroy() -> void override;
   auto update(float ts) -> void override;

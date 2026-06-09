@@ -33,8 +33,9 @@ struct VulkanContext {
     bool maintenance6           = false;
     bool smooth_lines           = false;
     bool stippled_smooth_lines  = false;
-    bool executable_properties = false;
+    bool executable_properties  = false;
     bool push_descriptor        = false;  // promoted in 1.4, but guard anyway
+    bool transient_attachments  = false;  // lazily-allocated memory exists (mobile/tiled GPUs)
   } caps;
 
   auto graphics_queue() const -> VkQueue;
@@ -128,6 +129,8 @@ struct IblProbe {
   TextureHandle brdf_lut;    // 2D RG16F (512×512)
 
   u32 prefiltered_mip_count{};
+
+  auto valid() const { return env_map.valid() && irradiance.valid() && prefiltered.valid() && brdf_lut.valid(); }
 
   static auto create(const VulkanContext &, SceneRenderer &, TextureHandle)
       -> IblProbe;
