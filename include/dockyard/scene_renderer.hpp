@@ -70,7 +70,10 @@ struct OcclusionCullingPushConstants {
   u32 hiz_sampler_idx;
   f32 hiz_width;
   f32 hiz_height;
-  u32 hiz_mip_indices[16];
+  // uint4[4], not u32[16]: matches the shader's 16-byte-per-element stride
+  // under any block layout. Flat index i lives at [i / 4][i % 4]; flat [15] is
+  // the mip count. See the shader struct for the rationale.
+  glm::uvec4 hiz_mip_indices[4]{};
 };
 
 struct HizPushConstants {
@@ -198,6 +201,10 @@ struct FrameUBO {
   std::array<glm::vec4, 6> frustum_planes{};
   glm::vec4 camera_position;
   glm::vec4 sun_direction;
+  f32 camera_near;
+  f32 camera_far;
+  f32 shadow_near;
+  f32 shadow_far;
   u32 shadow_array_index;
   u32 shadow_sampler_index;
   u32 ibl_irradiance_index;  // binding 4 (sampled_cubemaps)
@@ -215,6 +222,11 @@ struct FrameUBO {
   u32 pad2{};
 };
 static_assert(sizeof(FrameUBO) % 16 == 0);
+
+static_assert(sizeof(CascadeData)   == 80);
+static_assert(sizeof(GPUPointLight) == 32);
+static_assert(sizeof(FrameUBO)      % 16 == 0);
+static_assert(offsetof(FrameUBO, point_lights) == 1040);
 
 struct CsmResources {
   VkImage image = VK_NULL_HANDLE;
@@ -289,6 +301,7 @@ struct SceneRenderer {
   u32 shadow_sampler_bindless_idx = 0u;
 
   IblProbe ibl_probe;
+  std::optional<VFSPath> pending_hdr_map;
 
   std::array<CascadeData, shadow_map_cascade_count> cascade_cpu_data{};
   glm::vec4 sun_direction =
@@ -334,8 +347,15 @@ struct SceneRenderer {
       return status == Status::DeviceWaitRequired;
     }
   };
-  auto prepare(u64 frame_index, const glm::mat4 &view,
-               const glm::mat4 &projection, std::span<const GPUPointLight>)
+  struct FrameRenderInfo {
+    u64 frame_index;
+    glm::mat4 view;
+    glm::mat4 projection;
+    glm::vec2 camera_near_far;
+    glm::vec2 shadow_near_far;
+    std::span<const GPUPointLight> point_lights;
+};
+  auto prepare(const FrameRenderInfo&)
       -> PrepareResult;
 
   void submit(MeshAssetHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
@@ -371,6 +391,11 @@ struct SceneRenderer {
   [[nodiscard]] auto get_material_view_mut(const MeshAsset &) const
       -> MutableMaterialView;
   auto remove_override(Entity) -> void;
+
+  auto set_hdr_map(VFSPath) -> void;
+auto process_pending_hdr_map() -> void;
+auto create_ibl_probe_from_hdr(SceneRenderer &renderer, const VFSPath &path)
+    -> IblProbe;
 
   template <typename Handle>
   auto resolve(Handle handle) const -> decltype(auto) {

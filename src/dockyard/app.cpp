@@ -244,7 +244,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     DeletionQueue::the().begin_frame(frame_index);
 
     auto maybe_index = acquire_swapchain_image(sc, frame);
-    if (!maybe_index) {
+    if (!maybe_index.has_value()) {
       App::recreate_swapchain_manually(window, render_listener);
       continue;
     }

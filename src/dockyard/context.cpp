@@ -126,13 +126,13 @@ auto ViewportResources::resize(const VulkanContext &ctx,
   depth_msaa =
       Texture::create(ctx, "depth_msaa", w, h, VK_FORMAT_D32_SFLOAT,
                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                      VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_4_BIT);
+                      VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_4_BIT, 1U, true);
 
   forward_target_msaa.destroy(ctx);
   forward_target_msaa =
       Texture::create(ctx, "forward_msaa", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                      VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_4_BIT);
+                      VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_4_BIT, 1U, true);
 
   // ── 2. Depth Resolved Target
   // ────────────────────────────────────────────────────────────
@@ -143,14 +143,14 @@ auto ViewportResources::resize(const VulkanContext &ctx,
         ctx, "depth_resolved_target", w, h, VK_FORMAT_D32_SFLOAT,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT);
+        VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
     renderer.bindless.mark_dirty();
   } else {
     auto tex = Texture::create(
         ctx, "depth_resolved_target", w, h, VK_FORMAT_D32_SFLOAT,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT);
+        VK_IMAGE_ASPECT_DEPTH_BIT,VK_SAMPLE_COUNT_1_BIT, 1U, true);
     depth_resolved_target = renderer.textures.create(TextureEntry{
         .texture = std::move(tex),
         .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
@@ -164,14 +164,14 @@ auto ViewportResources::resize(const VulkanContext &ctx,
         ctx, "depth_pre_hiz", w, h, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT);
+        VK_IMAGE_ASPECT_COLOR_BIT,VK_SAMPLE_COUNT_1_BIT, 1U, true);
     renderer.bindless.mark_dirty();
   } else {
     auto tex = Texture::create(ctx, "depth_pre_hiz", w, h, VK_FORMAT_R32_SFLOAT,
                                VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                                    VK_IMAGE_USAGE_SAMPLED_BIT |
                                    VK_IMAGE_USAGE_STORAGE_BIT,
-                               VK_IMAGE_ASPECT_COLOR_BIT);
+                               VK_IMAGE_ASPECT_COLOR_BIT,VK_SAMPLE_COUNT_1_BIT, 1U, true);
     depth_pre_hiz = renderer.textures.create(TextureEntry{
         .texture = std::move(tex),
         .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
@@ -191,7 +191,7 @@ auto ViewportResources::resize(const VulkanContext &ctx,
     entry->texture = Texture::create(
         ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips);
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips, true);
 
     entry->texture.register_sub_views(ctx, renderer.textures,
                                       renderer.bindless);
@@ -199,7 +199,7 @@ auto ViewportResources::resize(const VulkanContext &ctx,
     auto tex = Texture::create(
         ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips);
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips, true);
 
     tex.register_sub_views(ctx, renderer.textures, renderer.bindless);
     hierarchical_depth_pyramid_target = renderer.textures.create(TextureEntry{
@@ -217,14 +217,14 @@ auto ViewportResources::resize(const VulkanContext &ctx,
         ctx, "forward_target", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT);
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
     renderer.bindless.mark_dirty();
   } else {
     auto tex = Texture::create(
         ctx, "forward_target", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT);
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
     forward_target = renderer.textures.create(TextureEntry{
         .texture = std::move(tex),
         .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
@@ -239,13 +239,13 @@ auto ViewportResources::resize(const VulkanContext &ctx,
     entry->texture = Texture::create(
         ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT);
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
     renderer.bindless.mark_dirty();
   } else {
     auto tex = Texture::create(
         ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT);
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
     display_target = renderer.textures.create(TextureEntry{
         .texture = std::move(tex), // Move it cleanly
         .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
@@ -335,10 +335,22 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   ctx.caps.executable_properties =
       avail_pipeline_exec.pipelineExecutableInfo == VK_TRUE;
 
-  info("Caps: maintenance5={} maintenance6={} smooth_lines={} stippled_smooth_lines={} push_descriptor={} present_wait={} unified_image_layouts={}",
+  {
+    VkPhysicalDeviceMemoryProperties mem_props{};
+    vkGetPhysicalDeviceMemoryProperties(phys_handle, &mem_props);
+    for (u32 i = 0; i < mem_props.memoryTypeCount; ++i) {
+      if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) {
+        ctx.caps.transient_attachments = true;
+        break;
+      }
+    }
+  }
+
+  info("Caps: maintenance5={} maintenance6={} smooth_lines={} stippled_smooth_lines={} push_descriptor={} present_wait={} unified_image_layouts={} transient_attachments={}",
        ctx.caps.maintenance5, ctx.caps.maintenance6, ctx.caps.smooth_lines,
        ctx.caps.stippled_smooth_lines, ctx.caps.push_descriptor,
-       ctx.caps.present_wait, ctx.caps.unified_image_layouts);
+       ctx.caps.present_wait, ctx.caps.unified_image_layouts,
+       ctx.caps.transient_attachments);
 
   VkPhysicalDeviceFeatures features{};
   features.multiDrawIndirect    = VK_TRUE;
@@ -1064,17 +1076,25 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
 
 auto IblProbe::destroy(const VulkanContext &ctx, SceneRenderer &renderer)
     -> void {
-  if (auto *e = renderer.textures.get(prefiltered))
-    e->texture.destroy(ctx, &renderer.subimages);
+  auto destroy_texture = [&](TextureHandle &handle) {
+    if (!handle.valid())
+      return;
 
-  for (auto h : {env_map, irradiance, brdf_lut}) {
-    if (auto *e = renderer.textures.get(h))
-      e->texture.destroy(ctx);
-    renderer.textures.destroy(h);
-  }
-  renderer.textures.destroy(prefiltered);
+    if (auto *entry = renderer.textures.get(handle)) {
+      entry->texture.destroy(ctx, &renderer.textures);
+      entry->texture.destroy(ctx, &renderer.subimages);
+    }
 
-  *this = {};
+    renderer.textures.destroy(handle);
+    handle = {};
+  };
+
+  destroy_texture(env_map);
+  destroy_texture(irradiance);
+  destroy_texture(prefiltered);
+  destroy_texture(brdf_lut);
+
+  prefiltered_mip_count = 0u;
 }
 
 } // namespace dy

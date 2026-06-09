@@ -81,6 +81,10 @@ struct FrameUBO
     Array<float4, 6> frustum_planes;                       // 16 * 4 = 96 bytes
     float4 camera_pos;                                     // 16 bytes
     float4 sun_direction;                                  // 16 bytes
+    float camera_near;
+    float camera_far;
+    float shadow_near;
+    float shadow_far;
     uint shadow_array_index;                               // 4 bytes
     uint shadow_sampler_index;                             // 4 bytes
     uint ibl_irradiance_index;                             // binding 4 (sampled_cubemaps)

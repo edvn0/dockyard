@@ -376,14 +376,12 @@ auto SceneRenderer::initialise_bindless() -> void {
     dummy_sampler_handle =
         samplers.create(SamplerEntry{.sampler = dummy_sampler_vk});
 
-    const VkSamplerReductionModeCreateInfo reduction_ci{
-        .sType = VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO,
-        .reductionMode = VK_SAMPLER_REDUCTION_MODE_MIN,
-    };
-
+    // No reductionMode: GatherRed returns the four raw texels and the
+    // occlusion shader takes their min() itself, so a MIN-reduction sampler is
+    // redundant here. Reduction + gather is also not well-defined across
+    // drivers (faults on Intel Arc), so it must not be set on a gather sampler.
     const VkSamplerCreateInfo hiz_sampler_ci{
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .pNext = &reduction_ci,
         .magFilter = VK_FILTER_LINEAR,
         .minFilter = VK_FILTER_LINEAR,
         .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
@@ -592,17 +590,8 @@ auto SceneRenderer::initialise_bindless() -> void {
 
   {
     ZoneScopedNC("IBL Probe Init", 0xFFD700);
-    auto equirect_tex = Texture::load_hdr_texture(
-        ctx, VFSPath::create("textures://env/sunset.hdr"));
-
-    auto equirect = textures.create(TextureEntry{
-        .texture = std::move(equirect_tex),
-        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
-    });
-
-    ibl_probe = IblProbe::create(ctx, *this, equirect);
-    textures.get(equirect)->texture.destroy(ctx);
-    textures.destroy(equirect);
+    ibl_probe = create_ibl_probe_from_hdr(
+        *this, VFSPath::create("textures://env/sunset_f16.ktx2"));
   }
 }
 
@@ -631,8 +620,9 @@ auto SceneRenderer::upload_texture(std::span<const std::byte> data,
 auto SceneRenderer::resize() -> void {
   ZoneScopedNC("SceneRenderer::resize", 0xFFA500);
   for (u32 i = 0U; i < frames_in_flight; ++i) {
-    frame_ubo_buffers[i] = Buffer::create(ctx.allocator, sizeof(FrameUBO),
-                                          VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    frame_ubo_buffers[i] =
+        Buffer::create(ctx.allocator, "frame_ubo_buffer", sizeof(FrameUBO),
+                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
   }
 }
 
@@ -641,18 +631,20 @@ auto SceneRenderer::destroy() -> void {
   TracyVkDestroy(tracy_vk_ctx);
 
   csm.destroy(ctx.device, ctx.allocator);
+  ibl_probe.destroy(ctx, *this);
 
   bindless.destroy();
 
-  std::ranges::for_each(textures.mutable_data(), [&c = ctx, this](TexturePool::Slot& v) {
-      if ((v.gen & 1u) == 0u)
-          return;
-      auto& tex = v.object.texture;
-      if (!tex.valid())
-          return;
-      tex.destroy(c, &textures);
-      tex.destroy(c, &subimages);
-      });
+  std::ranges::for_each(textures.mutable_data(),
+                        [&c = ctx, this](TexturePool::Slot &v) {
+                          if ((v.gen & 1u) == 0u)
+                            return;
+                          auto &tex = v.object.texture;
+                          if (!tex.valid())
+                            return;
+                          tex.destroy(c, &textures);
+                          tex.destroy(c, &subimages);
+                        });
   std::ranges::for_each(samplers.mutable_data(), [&c = ctx](auto &v) {
     auto &&[sampler] = v.object;
     DeletionQueue::the().push(
@@ -737,23 +729,27 @@ void SceneRenderer::ensure_global_capacity(usize instance_count) {
   auto &current = global_instance_buffer[current_frame_index];
   if (const auto size = instance_count * sizeof(CompressedInstanceData);
       !current || current->size() < size) {
-    current =
-        Buffer::create(ctx.allocator, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    current = Buffer::create(ctx.allocator, "global_instance_buffer", size,
+                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   }
 }
 
-auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
-                            const glm::mat4 &projection,
-                            std::span<const GPUPointLight> point_lights)
+auto SceneRenderer::prepare(const FrameRenderInfo &info)
     -> PrepareResult {
   ZoneScopedNC("SceneRenderer::prepare", 0xFF00FF);
-  assert(point_lights.size() <= FrameUBO::max_point_lights &&
+  assert(info.point_lights.size() <= FrameUBO::max_point_lights &&
          "too many point lights");
 
   {
     ZoneScopedNC("Poll Registries", 0x00FF7F);
     texture_upload_pool->poll_one(*this);
     pipeline_registry->poll_and_update_dirty_pipelines();
+  }
+
+  {
+    ZoneScopedNC("Process Pending HDR Map", 0x00FF7F);
+    if (pending_hdr_map) [[unlikely]]
+      process_pending_hdr_map();
   }
 
   if (override_pool.needs_grow) [[unlikely]] {
@@ -765,7 +761,7 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
     };
   }
 
-  current_frame_index = frame_index;
+  current_frame_index = info.frame_index;
 
   auto &fs = frame_submission;
   if (fs.entries.empty()) {
@@ -803,12 +799,12 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
 
   {
     ZoneScopedNC("Compute & Upload UBO", 0xFFFF00);
-    const glm::mat4 inv_view = glm::inverse(view);
-    const glm::mat4 inv_proj = glm::inverse(projection);
-    const glm::mat4 view_proj = projection * view;
+    const glm::mat4 inv_view = glm::inverse(info.view);
+    const glm::mat4 inv_proj = glm::inverse(info.projection);
+    const glm::mat4 view_proj = info.projection * info.view;
     FrameUBO ubo{
-        .view = view,
-        .projection = projection,
+        .view = info.view,
+        .projection = info.projection,
         .view_projection = view_proj,
         .inverse_projection = inv_proj,
         .inverse_view = inv_view,
@@ -817,6 +813,10 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
         .frustum_planes = extract_frustum_planes(view_proj),
         .camera_position = inv_view[3],
         .sun_direction = sun_direction,
+        .camera_near = info.camera_near_far.x, // you'll need to pass these in
+        .camera_far = info.camera_near_far.y,
+        .shadow_near = info.shadow_near_far.x,
+        .shadow_far = info.shadow_near_far.y,
         .shadow_array_index = csm_frame_data.shadow_array_index,
         .shadow_sampler_index = csm_frame_data.shadow_sampler_index,
         .ibl_irradiance_index = ibl_probe.irradiance.index(),
@@ -825,10 +825,10 @@ auto SceneRenderer::prepare(u64 frame_index, const glm::mat4 &view,
         .ibl_sampler_index = dummy_sampler_handle.index(),
         .ibl_prefiltered_mips = ibl_probe.prefiltered_mip_count,
     };
-    ubo.point_light_count = static_cast<u32>(point_lights.size());
-    std::copy_n(point_lights.data(), point_lights.size(),
+    ubo.point_light_count = static_cast<u32>(info.point_lights.size());
+    std::copy_n(info.point_lights.data(), info.point_lights.size(),
                 ubo.point_lights.data());
-    frame_ubo_buffers.at(frame_index)->upload(std::span(&ubo, 1));
+    frame_ubo_buffers.at(info.frame_index)->upload(std::span(&ubo, 1));
   }
 
   const usize submission_hint = fs.entries.size();
@@ -859,9 +859,8 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
   auto &ws = pass.frame_workspaces.at(current_frame_index);
   vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_layout,
                           0U, 1U, &bindless.set, 0U, nullptr);
-  vkCmdBindIndexBuffer(cmd,
-      geometry_pool->index_buffer->get_buffer(),
-      0U, VK_INDEX_TYPE_UINT32);
+  vkCmdBindIndexBuffer(cmd, geometry_pool->index_buffer->get_buffer(), 0U,
+                       VK_INDEX_TYPE_UINT32);
 
   const GpuPushConstants push_constants{
       .vertex_buffer_ptr =
@@ -916,17 +915,18 @@ void SceneRenderer::depth_frustum_culling_pass(VkCommandBuffer cmd) {
     return;
   auto &depth_ws = depth_prepass.frame_workspaces.at(current_frame_index);
 
-  {
-    ZoneScopedNC("Clear Indirect Buffer", 0x708090);
-    depth_ws.indirect_buffer->for_each_with_flush<PaddedDrawCommand>(
-        [](PaddedDrawCommand &v) { v.instance_count = 0; });
-  }
+  /* {
+     ZoneScopedNC("Clear Indirect Buffer", 0x708090);
+     depth_ws.indirect_buffer->for_each_with_flush<PaddedDrawCommand>(
+         [](PaddedDrawCommand &v) { v.instance_count = 0; });
+   } */
 
   VkBufferMemoryBarrier2 clear_barriers[1] = {
-      {
+      VkBufferMemoryBarrier2{
           .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-          .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT,
+          .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is
+                                                        // a mapped write
+          .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
           .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
           .dstAccessMask =
               VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
@@ -1145,8 +1145,8 @@ void SceneRenderer::build_hierarchical_depth_pyramid_pass(
     ZoneScopedNC("HiZ Mip Downsample", 0xDDA0DD);
 
     VkExtent2D current_dst_extent = {
-        .width = std::max(1U, current_src_extent.width / 2),
-        .height = std::max(1U, current_src_extent.height / 2),
+        .width = std::max(1U, (current_src_extent.width + 1) / 2),
+        .height = std::max(1U, (current_src_extent.height + 1) / 2),
     };
 
     HizPushConstants pc{
@@ -1195,15 +1195,16 @@ void SceneRenderer::forward_occlusion_culling_pass(
   auto geometry_count = global_instance_data.size();
   auto &forward_ws = forward_pass.frame_workspaces.at(current_frame_index);
 
-  {
-    ZoneScopedNC("Clear Forward Indirect Buffer", 0x708090);
-    forward_ws.indirect_buffer->for_each_with_flush<PaddedDrawCommand>(
-        [](PaddedDrawCommand &v) { v.instance_count = 0; });
-  }
+  /*  {
+     ZoneScopedNC("Clear Forward Indirect Buffer", 0x708090);
+     forward_ws.indirect_buffer->for_each_with_flush<PaddedDrawCommand>(
+         [](PaddedDrawCommand &v) { v.instance_count = 0; });
+   } */
 
-  VkBufferMemoryBarrier2 clear_barrier = {
+  VkBufferMemoryBarrier2 clear_barrier{
       .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
+      .srcStageMask =
+          VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is a mapped write
       .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
       .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .dstAccessMask =
@@ -1238,13 +1239,15 @@ void SceneRenderer::forward_occlusion_culling_pass(
       .hiz_height = static_cast<f32>(resolved_pyramid->texture.extent.height),
   };
 
+  // Flat index m maps to [m / 4][m % 4]; slot 15 carries the mip count.
+  // The packing must mirror the shader's uint4[4] layout exactly.
   for (u32 m = 0; m < 15; ++m) {
-    push.hiz_mip_indices[m] =
+    push.hiz_mip_indices[m / 4][m % 4] =
         (m < mip_levels)
-            ? resolved_pyramid->texture.mip_layer_handle(m, 0).index()
+            ? resolved_pyramid->texture.mip_layer_handle(m).index()
             : 0U;
   }
-  push.hiz_mip_indices[15] = mip_levels;
+  push.hiz_mip_indices[15 / 4][15 % 4] = mip_levels;
 
   const auto &entry = pipeline_registry->get_entry(forward_occlusion_pipeline);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
@@ -1362,8 +1365,7 @@ auto RenderPass::ensure_capacity(usize command_count, usize instance_count,
       if (buffer) {
         vkDeviceWaitIdle(dev);
       }
-      buffer = Buffer::create(alloc, needed_size, flags);
-      buffer->set_name(name);
+      buffer = Buffer::create(alloc, name, needed_size, flags);
     }
   };
 
@@ -1453,6 +1455,19 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
       }
     }
   }
+
+  {
+    u32 total_commands = static_cast<u32>(commands.size());
+    for (u32 idx = 0; idx < total_global_instances; ++idx) {
+        const u32 cmd = instance_to_commands[idx];
+        if (cmd == 0xFFFF'FFFFu) continue;
+        assert(cmd < total_commands && "instance_to_command out of range");
+        const auto &fp = renderer.flat_prim_table[
+            entries[sorted_order[idx]].mesh_prim_flat_index];
+        assert(cmd + fp.lod_group->lod_count - 1 < total_commands 
+               && "lod offset exceeds command range");
+    }
+}
 
   {
     ZoneScopedNC("Ensure Allocation Capacity", 0x708090);
@@ -1629,6 +1644,47 @@ CompressedInstanceData::CompressedInstanceData(const glm::mat4 &t,
   this->bounding_radius = bounding_radius;
   padding0 = 0.0f;
   padding1 = 0.0f;
+}
+
+auto SceneRenderer::create_ibl_probe_from_hdr(SceneRenderer &renderer,
+                                              const VFSPath &path) -> IblProbe {
+  ZoneScopedNC("create_ibl_probe_from_hdr", 0xFFD700);
+
+  auto equirect_tex = Texture::load_ktx2_hdr_texture(renderer.ctx, path);
+
+  const auto equirect = renderer.textures.create(TextureEntry{
+      .texture = std::move(equirect_tex),
+      .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+  });
+
+  auto probe = IblProbe::create(renderer.ctx, renderer, equirect);
+
+  if (auto *entry = renderer.textures.get(equirect)) {
+    entry->texture.destroy(renderer.ctx, &renderer.textures);
+    entry->texture.destroy(renderer.ctx, &renderer.subimages);
+  }
+  renderer.textures.destroy(equirect);
+
+  return probe;
+}
+
+auto SceneRenderer::set_hdr_map(VFSPath path) -> void {
+  pending_hdr_map = std::move(path);
+}
+
+auto SceneRenderer::process_pending_hdr_map() -> void {
+  ZoneScopedNC("SceneRenderer::process_pending_hdr_map", 0xFFD700);
+
+  auto new_probe = create_ibl_probe_from_hdr(*this, *pending_hdr_map);
+
+  auto old_probe = std::exchange(ibl_probe, std::move(new_probe));
+
+  vkDeviceWaitIdle(ctx.device);
+
+  old_probe.destroy(ctx, *this);
+
+  bindless.mark_dirty();
+  pending_hdr_map.reset();
 }
 
 } // namespace dy

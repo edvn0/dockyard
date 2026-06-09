@@ -1,14 +1,15 @@
 #pragma once
 
-#include "dockyard/vfs_path.hpp"
-#include <cstddef>
+#include <dockyard/vfs_path.hpp>
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/types.hpp>
 
+#include <cstddef>
 #include <span>
 #include <volk.h>
 
 #include <vk_mem_alloc.h>
+#include <expected>
 
 namespace dy {
 template <typename Tag, typename Impl> class Pool;
@@ -58,6 +59,7 @@ struct Texture {
     VkFormat format{VK_FORMAT_R8G8B8A8_SRGB};
     bool generate_mips{false};
     bool storage_view{false};
+    bool dedicated_memory{false};
   };
 
   static auto from_bytes(const VulkanContext &ctx, std::string_view name,
@@ -66,8 +68,9 @@ struct Texture {
                      u32 height, VkFormat format, VkImageUsageFlags usage,
                      VkImageAspectFlags aspect,
                      VkSampleCountFlagBits = VK_SAMPLE_COUNT_1_BIT,
-                     u32 mip_levels = 1U) -> Texture;
-  static auto load_hdr_texture(const VulkanContext &, const VFSPath &)
+                     u32 mip_levels = 1U,
+                     bool dedicated_memory = false) -> Texture;
+  static auto load_ktx2_hdr_texture(const VulkanContext &, const VFSPath &)
       -> Texture;
 
   struct CubemapInfo {
@@ -75,6 +78,7 @@ struct Texture {
     VkFormat format;
     u32 mip_levels;
     bool storage_view;
+    bool dedicated_memory{false};
   };
   static auto create_cubemap(const VulkanContext &, std::string_view,
                              const CubemapInfo &) -> Texture;
@@ -122,5 +126,7 @@ struct Texture {
   auto destroy(const VulkanContext &, TexturePool *) -> void;
   auto destroy(const VulkanContext &) -> void;
 };
+
+auto convert_hdr_to_ktx2(const VFSPath &input, const VFSPath &output) -> std::expected<void, std::string>;
 
 } // namespace dy

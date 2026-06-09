@@ -65,6 +65,21 @@ public:
   auto read_binary_async(std::string_view virtual_path)
       -> std::future<std::expected<std::vector<u32>, std::string>>;
 
+/**
+ * @brief Adds or replaces a mount point.
+ * Example: mount("external_hdr", "C:/assets/hdr") allows
+ * "external_hdr://studio.hdr".
+ */
+auto mount(std::string_view scheme, const std::filesystem::path &physical_root)
+    -> void;
+
+/**
+ * @brief Mounts the parent directory of a file and returns a VFS path to the file.
+ * Example: C:/foo/studio.hdr -> external_hdr://studio.hdr
+ */
+auto mount_file(std::string_view scheme, const std::filesystem::path &file)
+    -> VFSPath;
+
   struct Filter {
     std::unordered_set<std::string_view> ignored_dirs;
     std::unordered_set<std::string_view> included_extensions;
