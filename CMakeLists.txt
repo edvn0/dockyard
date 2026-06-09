@@ -116,6 +116,10 @@ CPMAddPackage(
     "GLFW_INSTALL OFF"
 )
 
+if(UNIX AND NOT APPLE)
+  set(NFD_PORTAL ON CACHE BOOL "" FORCE)
+endif()
+
 CPMAddPackage(
   NAME nfd
   GITHUB_REPOSITORY btzy/nativefiledialog-extended
