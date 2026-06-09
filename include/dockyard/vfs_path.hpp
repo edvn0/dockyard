@@ -58,6 +58,33 @@ public:
 
   [[nodiscard]] auto view() const -> std::string_view { return path; }
 
+  [[nodiscard]] auto extension() const -> std::string_view {
+    const auto rel = relative_path();
+    const auto dot = rel.rfind('.');
+    if (dot == std::string_view::npos)
+      return {};
+    return rel.substr(dot);
+  }
+
+  [[nodiscard]] auto stem() const -> std::string_view {
+    const auto rel = relative_path();
+    const auto slash = rel.rfind('/');
+    const auto filename =
+        (slash == std::string_view::npos) ? rel : rel.substr(slash + 1);
+    const auto dot = filename.rfind('.');
+    if (dot == std::string_view::npos)
+      return filename;
+    return filename.substr(0, dot);
+  }
+
+  [[nodiscard]] auto with_extension(std::string_view new_ext) const -> VFSPath {
+    const auto rel = relative_path();
+    const auto dot = rel.rfind('.');
+    const auto base =
+        (dot == std::string_view::npos) ? rel : rel.substr(0, dot);
+    return VFSPath::create("{}://{}{}", scheme(), base, new_ext);
+  }
+
 private:
   explicit VFSPath(std::string_view d, u8 s) : path(d), sep(s) {}
 

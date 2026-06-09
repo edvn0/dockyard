@@ -200,19 +200,12 @@ struct KtxTexture2Guard {
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 namespace {
 
 auto mip_count(u32 w, u32 h) -> u32 {
   return static_cast<u32>(std::bit_width(std::max(w, h)));
 }
 
-// For block-compressed formats this returns bytes per 4x4 block, not per
-// texel. Callers using this for staging-buffer sizing must use
-// ktxTexture_GetImageSize (or equivalent) for BC formats rather than
-// width * height * bytes_per_texel.
 auto bytes_per_texel(VkFormat fmt) -> u32 {
   switch (fmt) {
   case VK_FORMAT_R8G8B8A8_SRGB:
@@ -1029,10 +1022,13 @@ auto Texture::register_sub_views(const VulkanContext &ctx,
   bindless.mark_dirty();
 }
 
+namespace {
 auto convert_hdr_to_ktx2(const std::filesystem::path &input,
-                          const std::filesystem::path &output)
+                         const std::filesystem::path &output)
     -> std::expected<void, std::string> {
-  int width{}, height{}, channels{};
+  int width{};
+  int height{};
+  int channels{};
   float *data = stbi_loadf(input.string().c_str(), &width, &height, &channels, 4);
   if (data == nullptr) {
     return std::unexpected(
@@ -1056,7 +1052,6 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
     }
   } stbi_guard(data);
 
-  // --- Create ktxTexture2 ---
   ktxTextureCreateInfo create_info{
       .vkFormat         = VK_FORMAT_R16G16B16A16_SFLOAT,
       .baseWidth        = static_cast<u32>(width),
@@ -1081,13 +1076,11 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
 
   KtxTexture2Guard guard{ktx};
 
-  // --- Convert base level: f32 -> f16 and upload ---
   {
     const auto pixel_count = static_cast<usize>(width) * height;
     std::vector<u16> f16_data(pixel_count * 4);
 
     for (usize i = 0; i < pixel_count * 4; ++i) {
-      // glm's packHalf1x16 does a correct IEEE 754 f32->f16 conversion
       f16_data[i] = glm::packHalf1x16(data[i]);
     }
 
@@ -1103,7 +1096,6 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
     }
   }
 
-  // --- Generate mips via box filter downsampling ---
   {
     u32 src_w = static_cast<u32>(width);
     u32 src_h = static_cast<u32>(height);
@@ -1123,7 +1115,6 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
           const u32 sy = y * 2;
 
           for (u32 c = 0; c < 4; ++c) {
-            // 2x2 box filter, clamped for odd-sized mips
             const u32 sx1 = std::min(sx + 1, src_w - 1);
             const u32 sy1 = std::min(sy + 1, src_h - 1);
 
@@ -1136,7 +1127,6 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
         }
       }
 
-      // Convert mip to f16
       std::vector<u16> f16_mip(dst_w * dst_h * 4);
       for (usize i = 0; i < f16_mip.size(); ++i) {
         f16_mip[i] = glm::packHalf1x16(dst_f32[i]);
@@ -1168,6 +1158,13 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
   }
 
   return {};
+}
+} // namespace
+
+auto convert_hdr_to_ktx2(const VFSPath &input, const VFSPath &output)
+    -> std::expected<void, std::string> {
+  return convert_hdr_to_ktx2(VFS::get().resolve(input),
+                             VFS::get().resolve(output));
 }
 
 } // namespace dy

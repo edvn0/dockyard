@@ -7,6 +7,8 @@ compile_commands.json
 log
 *.log
 
+vma_stats.json
+
 .cache
 .vs
 assets/meshes/**/*.glb

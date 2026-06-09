@@ -1,3 +1,4 @@
+#include "dockyard/texture.hpp"
 #include <algorithm>
 #include <dockyard/scene_renderer.hpp>
 
@@ -590,8 +591,7 @@ auto SceneRenderer::initialise_bindless() -> void {
 
   {
     ZoneScopedNC("IBL Probe Init", 0xFFD700);
-    ibl_probe = create_ibl_probe_from_hdr(
-        *this, VFSPath::create("textures://env/sunset_f16.ktx2"));
+    pending_hdr_map = VFSPath::create("textures://env/studio.hdr");
   }
 }
 
@@ -1674,17 +1674,43 @@ auto SceneRenderer::set_hdr_map(VFSPath path) -> void {
 
 auto SceneRenderer::process_pending_hdr_map() -> void {
   ZoneScopedNC("SceneRenderer::process_pending_hdr_map", 0xFFD700);
+  auto hdr_map = std::move(pending_hdr_map.value());
+  pending_hdr_map.reset();
 
-  auto new_probe = create_ibl_probe_from_hdr(*this, *pending_hdr_map);
+  const auto ext = hdr_map.extension();
+  const bool needs_conversion = (ext == ".hdr" || ext == ".exr");
+  const bool already_ktx2 = (ext == ".ktx2");
 
+  if (!needs_conversion && !already_ktx2) {
+    error("Unsupported HDR map format '{}': expected .hdr, .exr, or .ktx2",
+          ext);
+    return;
+  }
+
+  VFSPath source_path = hdr_map;
+
+  if (needs_conversion) {
+    const auto physical = VFS::get().resolve(hdr_map);
+    source_path = VFS::get().mount_file("pending_hdr", physical);
+  }
+
+  const auto ktx2_path = source_path.with_extension(".ktx2");
+
+  if (needs_conversion) {
+    auto result = convert_hdr_to_ktx2(source_path, ktx2_path);
+    if (!result) {
+      error("Failed to convert HDR map: {}", result.error());
+      return;
+    }
+  }
+
+  auto new_probe = create_ibl_probe_from_hdr(*this, ktx2_path);
   auto old_probe = std::exchange(ibl_probe, std::move(new_probe));
 
   vkDeviceWaitIdle(ctx.device);
-
   old_probe.destroy(ctx, *this);
 
   bindless.mark_dirty();
-  pending_hdr_map.reset();
 }
 
 } // namespace dy
