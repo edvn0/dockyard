@@ -4,9 +4,12 @@
 #include <dockyard/app.hpp>
 #include <dockyard/canvas_renderer.hpp>
 #include <dockyard/freelist_pool.hpp>
+#include <dockyard/game_dll.hpp>
+#include <dockyard/game_memory.hpp>
 #include <dockyard/scene.hpp>
 
 #include <memory>
+#include <string>
 
 // Should be able to remove these includes if I wrap the gizmo operation
 #include <imgui.h>
@@ -64,6 +67,11 @@ struct Dockforge : App {
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
 
+  std::unique_ptr<dy::GameDll> game_dll;
+  dy::GameMemory               game_memory;
+  bool                         is_playing   = false;
+  std::string                  game_dll_path = "sandbox.dll";
+
   ~Dockforge() override;
 
   auto on_changed_tag(entt::registry &, entt::entity) -> void {}
@@ -89,6 +97,11 @@ struct Dockforge : App {
   auto destroy() -> void override;
   auto update(float ts) -> void override;
   auto render(RenderContext &ctx) -> u64 override;
+
+private:
+  auto play() -> void;
+  auto stop() -> void;
+  auto draw_toolbar() -> void;
 };
 
 auto make_app() -> std::unique_ptr<Dockforge>;

@@ -6,6 +6,8 @@
 #include <dockforge/matrix_cache.hpp>
 
 #include <dockyard/binary_stream.hpp>
+#include <dockyard/game_dll.hpp>
+#include <dockyard/game_memory.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/context.hpp>
@@ -62,6 +64,16 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   renderer =
       std::make_unique<SceneRenderer>(ctx.context, ctx.swapchain_resources);
   context = &ctx.context;
+
+  game_memory = GameMemory::create();
+
+
+  if (auto result = GameDll::load("build/user-ninja-debug/sandbox.dll")) {
+    game_dll = std::move(*result);
+    game_dll->start_watching();
+  } else {
+    warn("GameDll: {}", result.error());
+  }
 
   editor_scene = std::make_shared<Scene>();
   active_scene = editor_scene.get();
@@ -787,6 +799,46 @@ auto Dockforge::draw_hdr_selector() -> void {
 
   ImGui::End();
 }
+auto Dockforge::draw_toolbar() -> void {
+  if (!ImGui::Begin("Toolbar")) {
+    ImGui::End();
+    return;
+  }
+
+  if (is_playing) {
+    if (ImGui::Button("Stop"))
+      stop();
+  } else {
+    const bool has_dll = game_dll && game_dll->game();
+    ImGui::BeginDisabled(!has_dll);
+    if (ImGui::Button("Play"))
+      play();
+    ImGui::EndDisabled();
+  }
+
+  if (!is_playing) {
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(300.0f);
+    char buf[256]{};
+    std::snprintf(buf, sizeof(buf), "%s", game_dll_path.c_str());
+    if (ImGui::InputText("Game DLL", buf, sizeof(buf)))
+      game_dll_path = buf;
+
+    ImGui::SameLine();
+    if (ImGui::Button("Reload DLL")) {
+      game_dll.reset();
+      if (auto result = GameDll::load(game_dll_path)) {
+        game_dll = std::move(*result);
+        game_dll->start_watching();
+      } else {
+        warn("GameDll: {}", result.error());
+      }
+    }
+  }
+
+  ImGui::End();
+}
+
 auto Dockforge::build_ui() -> void {
   const ImGuiViewport *vp = ImGui::GetMainViewport();
   ImGui::SetNextWindowPos(vp->WorkPos);
@@ -922,6 +974,7 @@ auto Dockforge::build_ui() -> void {
   }
   ImGui::End();
 
+  draw_toolbar();
   draw_scene_outliner();
   draw_inspector();
   draw_performance_overlay();
@@ -966,6 +1019,14 @@ auto Dockforge::build_ui() -> void {
 }
 
 auto Dockforge::destroy() -> void {
+  if (is_playing) stop();
+
+  if (game_dll) {
+    game_dll->stop_watching();
+    game_dll.reset();
+  }
+  game_memory.destroy();
+
   imgui_renderer.reset();
   canvas_renderer.reset();
 
@@ -1000,7 +1061,46 @@ auto update_local_to_world_matrices(entt::registry &registry) -> void {
   }
 }
 
+auto Dockforge::play() -> void {
+  if (is_playing || !game_dll || !game_dll->game()) return;
+
+  runtime_scene = std::make_shared<Scene>();
+  runtime_scene->group<Components::Transform, Components::LocalToWorld,
+                       Components::Mesh>();
+
+  std::vector<uint8_t> snapshot_buf;
+  MemoryWriter writer{snapshot_buf};
+  SceneSerializer::serialize(*editor_scene, writer);
+  MemoryReader reader{snapshot_buf};
+  SceneSerializer::deserialize(*runtime_scene, reader);
+
+  active_scene = runtime_scene.get();
+  game_memory.reset();
+  game_dll->game()->init(&game_memory, active_scene);
+  is_playing = true;
+  state.cache_dirty = true;
+}
+
+auto Dockforge::stop() -> void {
+  if (!is_playing) return;
+
+  if (game_dll && game_dll->game())
+    game_dll->game()->destroy(&game_memory, active_scene);
+
+  game_memory.reset();
+  active_scene = editor_scene.get();
+  runtime_scene.reset();
+  is_playing = false;
+  state.cache_dirty = true;
+}
+
 auto Dockforge::update(float ts) -> void {
+  if (is_playing && game_dll && game_dll->game()) {
+    if (game_dll->poll_reload())
+      info("Game DLL hot reloaded");
+    game_dll->game()->update(&game_memory, active_scene, ts);
+  }
+
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
 
@@ -1122,7 +1222,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   auto render_group =
       active_scene->group<Components::Transform, Components::LocalToWorld,
                           Components::Mesh>();
-  
+
   flush_material_overrides();
 
   for (auto &&[e, xt, ltw, m] : render_group.each()) {
@@ -1326,7 +1426,7 @@ auto prepare_result = renderer->prepare({
     vkCmdSetCullMode(ctx.main_cb, VK_CULL_MODE_BACK_BIT);
     vkCmdSetFrontFace(ctx.main_cb, VK_FRONT_FACE_CLOCKWISE);
     vkCmdSetDepthCompareOp(ctx.main_cb, VK_COMPARE_OP_GREATER_OR_EQUAL);
-    
+
     renderer->render_pass(ctx.main_cb, renderer->depth_prepass,
                           renderer->pipeline_registry->get(depth_pipeline));
     vkCmdEndRendering(ctx.main_cb);
