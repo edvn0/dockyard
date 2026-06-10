@@ -16,9 +16,6 @@
 
 namespace dy {
 
-// ── Blend state
-// ───────────────────────────────────────────────────────────────
-
 struct BlendMode {
   bool enabled = false;
   VkBlendFactor src_color = VK_BLEND_FACTOR_SRC_ALPHA;
@@ -76,17 +73,11 @@ struct DepthState {
   VkCompareOp compare_op = VK_COMPARE_OP_LESS;
 };
 
-// ── Render target layout
-// ──────────────────────────────────────────────────────
-
 struct RenderTargetLayout {
   std::vector<VkFormat> color_formats{};
   VkFormat depth_format = VK_FORMAT_UNDEFINED;
   VkFormat stencil_format = VK_FORMAT_UNDEFINED;
 };
-
-// ── Pipeline descriptions
-// ─────────────────────────────────────────────────────
 
 struct GraphicsPipelineDescription {
   VFSPath shader_path; // e.g. "shaders://forward.slang"

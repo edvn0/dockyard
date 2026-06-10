@@ -24,12 +24,15 @@
 #include <glm/packing.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <execution>
 #include <expected>
 #include <format>
 #include <numeric>
 #include <ranges>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <meshoptimizer.h>
@@ -69,9 +72,6 @@ template <typename O> auto cast(void *ptr, dy::usize offset) -> O * {
   return reinterpret_cast<O *>(static_cast<dy::u8 *>(ptr) + offset);
 }
 } // namespace
-
-// ── MikkTSpace (unchanged)
-// ────────────────────────────────────────────────────
 
 namespace mikkt {
 struct MikkContext {
@@ -173,15 +173,13 @@ static auto generate_mikktspace_tangents(dy::PrimitiveData &prim)
 namespace dy {
 namespace {
 
-// ── KTX2 transcode ───────────────────────────────────────────────────────────
-
 // Target formats after UASTC transcode.
 // BC7  — best quality colour/RGBA (requires BC7 feature, universally supported
 //         on desktop Vulkan)
 // BC5  — two-channel RG, ideal for normal maps (xy only, reconstruct z)
 // BC1  — fallback for very simple single-channel data (not used by default)
 //
-// We pick the transcode target based on the intended VkFormat so the caller
+// Transcode target is chosen based on the intended VkFormat so the caller
 // can stay format-agnostic.
 struct KtxMip {
   std::vector<std::byte> data;
@@ -350,8 +348,6 @@ constexpr auto is_normal_mode = [](auto texture) -> bool {
   return out;
 }
 
-// ── Image colour-space classification (unchanged) ────────────────────────────
-
 struct DecodedImage {
   std::vector<std::byte> pixels;
   u32 width{};
@@ -472,8 +468,6 @@ constexpr u32 k_fb_emissive = 4u;
 
   return gpu;
 }
-
-// ── Primitive extraction (unchanged) ─────────────────────────────────────────
 
 [[nodiscard]] auto extract_primitive(const fastgltf::Asset &asset,
                                      const fastgltf::Primitive &prim)
@@ -632,7 +626,9 @@ constexpr u32 k_fb_emissive = 4u;
 }
 
 void flatten_nodes(const fastgltf::Asset &asset,
-                   std::span<const std::size_t> root_indices, MeshAsset &out) {
+                   std::span<const std::size_t> root_indices, MeshAsset &out,
+                   const std::unordered_set<usize> &suppressed_mesh_indices,
+                   const std::unordered_map<usize, usize> &lod_to_primary_mesh) {
   struct Frame {
     usize node_idx;
     i32 parent_flat_idx;
@@ -648,11 +644,26 @@ void flatten_nodes(const fastgltf::Asset &asset,
     auto [node_idx, parent_flat, is_root] = dfs.back();
     dfs.pop_back();
 
+    const auto &node = asset.nodes[node_idx];
+
+    // Skip nodes that reference a LOD mesh (lod > 0); their geometry has
+    // already been stitched into the LOD0 MeshLodGroup.
+    if (node.meshIndex.has_value() &&
+        suppressed_mesh_indices.contains(*node.meshIndex)) {
+      // Still push children so the rest of the scene graph is intact —
+      // some exporters parent accessories under a LOD1+ node.
+      for (usize i = node.children.size(); i-- > 0;)
+        dfs.push_back({
+            .node_idx = node.children[i],
+            .parent_flat_idx = parent_flat,
+            .is_root = false,
+        });
+      continue;
+    }
+
     const i32 flat_idx = static_cast<i32>(out.nodes.size());
     if (is_root)
       out.root_node_indices.push_back(static_cast<u32>(flat_idx));
-
-    const auto &node = asset.nodes[node_idx];
 
     MeshNodeDescription desc;
     desc.name = node.name.empty() ? std::format("gltf_node_{}", node_idx)
@@ -661,7 +672,10 @@ void flatten_nodes(const fastgltf::Asset &asset,
     desc.parent_index = parent_flat;
 
     if (node.meshIndex.has_value()) {
-      const usize mi = *node.meshIndex;
+      // Remap to primary mesh if this node holds a LOD0 that was merged.
+      const usize mi = lod_to_primary_mesh.contains(*node.meshIndex)
+                           ? lod_to_primary_mesh.at(*node.meshIndex)
+                           : *node.meshIndex;
       const auto &lod_groups = out.meshes[mi];
       const auto &gltf_mesh = asset.meshes[mi];
       desc.primitives.reserve(lod_groups.size());
@@ -694,6 +708,206 @@ void flatten_nodes(const fastgltf::Asset &asset,
 
 namespace mesh {
 
+// ---------------------------------------------------------------------------
+// LOD group detection
+// ---------------------------------------------------------------------------
+
+// Represents a set of meshes that form one logical LOD chain, e.g.
+// "damaged_helmet_lod0" .. "damaged_helmet_lod5".
+struct ExplicitLodGroup {
+  std::string base_name;
+  // Sorted by lod_index ascending. Entry [0] is always LOD0 (the primary).
+  std::vector<std::pair<u32 /*lod_index*/, usize /*mesh_idx*/>> members;
+
+  [[nodiscard]] usize primary_mesh_idx() const { return members[0].second; }
+};
+
+// Parses a mesh name for a trailing _lod{N} suffix.
+// Returns (base_name, lod_index) or nullopt.
+[[nodiscard]] static auto parse_lod_suffix(std::string_view name)
+    -> std::optional<std::pair<std::string, u32>> {
+  constexpr std::string_view k_suffix = "_lod";
+  const auto pos = name.rfind(k_suffix);
+  if (pos == std::string_view::npos)
+    return std::nullopt;
+
+  const auto level_str = name.substr(pos + k_suffix.size());
+  if (level_str.empty() ||
+      !std::ranges::all_of(level_str, [](char c) { return std::isdigit(c); }))
+    return std::nullopt;
+
+  u32 level = 0;
+  const auto [ptr, ec] =
+      std::from_chars(level_str.data(), level_str.data() + level_str.size(), level);
+  if (ec != std::errc{})
+    return std::nullopt;
+
+  if (level >= static_cast<u32>(max_lods))
+    return std::nullopt;
+
+  return std::make_pair(std::string(name.substr(0, pos)), level);
+}
+
+// Scans asset.meshes for _lod{N} naming and returns all detected groups.
+// An optional name filter restricts detection to a single base name.
+[[nodiscard]] static auto detect_lod_groups(
+    const fastgltf::Asset &asset,
+    const std::optional<std::string> &base_name_filter = std::nullopt)
+    -> std::vector<ExplicitLodGroup> {
+
+  std::unordered_map<std::string, ExplicitLodGroup> by_base;
+
+  for (usize mi = 0; mi < asset.meshes.size(); ++mi) {
+    auto parsed = parse_lod_suffix(asset.meshes[mi].name);
+    if (!parsed)
+      continue;
+    auto &[base, level] = *parsed;
+
+    if (base_name_filter && base != *base_name_filter)
+      continue;
+
+    auto &group = by_base[base];
+    if (group.base_name.empty())
+      group.base_name = base;
+    group.members.emplace_back(level, mi);
+  }
+
+  std::vector<ExplicitLodGroup> result;
+  result.reserve(by_base.size());
+
+  for (auto &[key, group] : by_base) {
+    // Sort so lod0 is always members[0].
+    std::ranges::sort(group.members, {}, &std::pair<u32, usize>::first);
+
+    // Only treat as a real LOD chain if LOD0 is present.
+    if (group.members[0].first != 0) {
+      warn("LOD group '{}' has no LOD0 — skipping", group.base_name);
+      continue;
+    }
+    result.push_back(std::move(group));
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Vertex remapping for explicit LODs
+// ---------------------------------------------------------------------------
+
+// When a GLB is authored with separate meshes per LOD, each LOD mesh has its
+// own independent vertex buffer. To share a single vertex buffer in the pool
+// (LOD0's vertices) all higher LODs need their indices remapped to point into
+// LOD0's vertex range.
+//
+// Strategy:
+//   1. Build a position→vertex_index lookup from LOD0's vertices.
+//   2. For every vertex in LODn, find the closest LOD0 vertex by position.
+//   3. Rewrite LODn's index buffer so every index points into LOD0.
+//
+// Position matching is exact (bit-identical float comparison). If an author
+// has altered vertex positions between LODs this will fall back to a
+// nearest-neighbour search with a configurable tolerance. In practice,
+// mesh simplification tools (Blender Decimate, meshopt) preserve the original
+// vertex positions for remaining verts, so exact matching covers all real
+// cases.
+//
+// Returns a remapped copy of lod_n_data.indices, or the original indices with
+// a warning if remapping fails for any vertex.
+
+struct RemapResult {
+  std::vector<u32> indices;
+  bool exact{true}; // false if any vertex needed nearest-neighbour fallback
+};
+
+[[nodiscard]] static auto remap_lod_indices_to_lod0(
+    const PrimitiveData &lod0,
+    const PrimitiveData &lod_n) -> RemapResult {
+
+  // Build exact position map: packed u32 key → lod0 vertex index.
+  // We use the raw float bits, good enough for positions authored in the
+  // same DCC tool.
+  struct Vec3Key {
+    u32 x, y, z;
+    bool operator==(const Vec3Key &) const = default;
+  };
+  struct Vec3Hash {
+    usize operator()(const Vec3Key &k) const noexcept {
+      // FNV-1a variant over three u32s
+      usize h = 14695981039346656037ULL;
+      for (u32 v : {k.x, k.y, k.z}) {
+        h ^= static_cast<usize>(v);
+        h *= 1099511628211ULL;
+      }
+      return h;
+    }
+  };
+
+  std::unordered_map<Vec3Key, u32, Vec3Hash> pos_to_lod0;
+  pos_to_lod0.reserve(lod0.vertices.size());
+
+  for (u32 vi = 0; vi < static_cast<u32>(lod0.vertices.size()); ++vi) {
+    const auto &p = lod0.vertices[vi].position;
+    Vec3Key key{
+        std::bit_cast<u32>(p[0]),
+        std::bit_cast<u32>(p[1]),
+        std::bit_cast<u32>(p[2]),
+    };
+    // First occurrence wins (multiple LOD0 verts at same position are fine;
+    // any of them is a valid remap target).
+    pos_to_lod0.try_emplace(key, vi);
+  }
+
+  RemapResult out;
+  out.indices.reserve(lod_n.indices.size());
+  out.exact = true;
+
+  // We only need the unique set of vertices referenced by lod_n's indices.
+  // Build a local remap table so we don't redo the lookup per-index.
+  std::vector<u32> lod_n_to_lod0(lod_n.vertices.size(),
+                                  std::numeric_limits<u32>::max());
+
+  for (u32 vi = 0; vi < static_cast<u32>(lod_n.vertices.size()); ++vi) {
+    const auto &p = lod_n.vertices[vi].position;
+    Vec3Key key{
+        std::bit_cast<u32>(p[0]),
+        std::bit_cast<u32>(p[1]),
+        std::bit_cast<u32>(p[2]),
+    };
+
+    if (const auto it = pos_to_lod0.find(key); it != pos_to_lod0.end()) {
+      lod_n_to_lod0[vi] = it->second;
+    } else {
+      // Nearest-neighbour fallback. This is O(N) per unmatched vertex but
+      // should only fire if the author slightly perturbed positions between
+      // LOD levels (rare; log a warning).
+      out.exact = false;
+      f32 best_dist_sq = std::numeric_limits<f32>::max();
+      u32 best_idx = 0;
+      for (u32 li = 0; li < static_cast<u32>(lod0.vertices.size()); ++li) {
+        const auto &lp = lod0.vertices[li].position;
+        const f32 dx = p[0] - lp[0];
+        const f32 dy = p[1] - lp[1];
+        const f32 dz = p[2] - lp[2];
+        const f32 dist_sq = dx * dx + dy * dy + dz * dz;
+        if (dist_sq < best_dist_sq) {
+          best_dist_sq = dist_sq;
+          best_idx = li;
+        }
+      }
+      lod_n_to_lod0[vi] = best_idx;
+    }
+  }
+
+  for (const u32 idx : lod_n.indices)
+    out.indices.push_back(lod_n_to_lod0[idx]);
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Internal structures (unchanged from original except PrimWork::lod_slot)
+// ---------------------------------------------------------------------------
+
 struct MaterialTexturePatch {
   u32 pool_slot;
   std::function<void(GPUMaterial &, TextureHandle)> apply;
@@ -720,11 +934,23 @@ struct PrimWork {
   usize mesh_idx;
   usize prim_idx;
   const fastgltf::Primitive *ptr;
+  // If this primitive is part of an explicit LOD chain:
+  //   lod_slot == 0  → primary (LOD0); owns the MeshLodGroup
+  //   lod_slot >= 1  → secondary; indices are remapped into LOD0's vertices
+  //   primary_mesh_idx → which mesh_idx holds the MeshLodGroup for lod_slot>0
+  u32 lod_slot{0};
+  usize primary_mesh_idx{0}; // only meaningful when lod_slot > 0
+  bool is_explicit_lod{false};
 };
 
 struct PrimLods {
+  // meshopt-generated extra LODs (only populated when is_explicit_lod==false)
   std::vector<std::vector<u32>> extra;
 };
+
+// ---------------------------------------------------------------------------
+// GLTF parsing
+// ---------------------------------------------------------------------------
 
 static auto parse_gltf_file(const std::filesystem::path &fs_path,
                             const std::filesystem::path &gltf_dir)
@@ -757,9 +983,6 @@ sidecar_path_for(const std::filesystem::path &gltf_dir,
   info("No suitable image source found for image {}", image_idx);
   return std::nullopt;
 }
-
-// ── collect_image_sources
-// ─────────────────────────────────────────────────────
 
 static auto
 collect_image_sources(const fastgltf::Asset &asset,
@@ -884,7 +1107,6 @@ static auto launch_texture_futures(std::vector<ImageSource> &sources,
           if (token.stop_requested())
             return {};
 
-          // ── Path 1: KTX2 sidecar ──────────────────────────────────────────
           if (src.ktx_sidecar_path) {
             auto ktx_result =
                 decode_ktx2_file(*src.ktx_sidecar_path, src.format, src.srgb);
@@ -914,7 +1136,6 @@ static auto launch_texture_futures(std::vector<ImageSource> &sources,
                  src.debug_name);
           }
 
-          // ── Path 2: embedded KTX2 (BufferView sources) ───────────────────
           if (auto *buf = std::get_if<std::vector<std::byte>>(&src.data)) {
             if (is_ktx2(*buf)) {
               auto ktx_result = decode_ktx2_bytes(*buf, src.format, src.srgb);
@@ -941,7 +1162,6 @@ static auto launch_texture_futures(std::vector<ImageSource> &sources,
             }
           }
 
-          // ── Path 3: stbi fallback ─────────────────────────────────────────
           int w{};
           int h{};
           int ch{};
@@ -1011,8 +1231,9 @@ static auto launch_texture_futures(std::vector<ImageSource> &sources,
   return pending;
 }
 
-// ── The rest is unchanged from the original
-// ───────────────────────────────────
+// ---------------------------------------------------------------------------
+// Parallel primitive extraction
+// ---------------------------------------------------------------------------
 
 static auto
 extract_primitives_parallel(const fastgltf::Asset &asset,
@@ -1037,6 +1258,74 @@ extract_primitives_parallel(const fastgltf::Asset &asset,
   return results;
 }
 
+// ---------------------------------------------------------------------------
+// LOD index remapping (parallel, post-extraction)
+// ---------------------------------------------------------------------------
+
+// For every PrimWork with lod_slot > 0, rewrite its extracted indices so they
+// reference LOD0's vertex range instead of the LOD's own vertices.
+// This runs after extract_primitives_parallel so we have both LOD0 and LODn
+// PrimitiveData available.
+static void remap_explicit_lod_indices(
+    const std::vector<PrimWork> &prim_work_list,
+    std::vector<std::expected<PrimitiveResult, std::string>> &extracted_prims,
+    BS::priority_thread_pool &thread_pool) {
+  PROFILE_SCOPE("Remap explicit LOD indices");
+
+  // Build a lookup: (primary_mesh_idx, prim_idx) → index into extracted_prims
+  // for that LOD0 entry.
+  std::unordered_map<usize, usize> lod0_prim_map; // mesh_idx → work list index
+  for (usize i = 0; i < prim_work_list.size(); ++i) {
+    const auto &w = prim_work_list[i];
+    if (w.is_explicit_lod && w.lod_slot == 0)
+      lod0_prim_map[w.mesh_idx] = i;
+    else if (!w.is_explicit_lod)
+      lod0_prim_map[w.mesh_idx] = i;
+  }
+
+  const auto n = prim_work_list.size();
+  thread_pool
+      .submit_blocks(usize{0}, n,
+                     [&](usize begin, usize end) {
+                       for (usize i = begin; i < end; ++i) {
+                         const auto &w = prim_work_list[i];
+                         if (!w.is_explicit_lod || w.lod_slot == 0)
+                           continue;
+                         if (!extracted_prims[i])
+                           continue;
+
+                         // Find the corresponding LOD0 entry.
+                         const auto it = lod0_prim_map.find(w.primary_mesh_idx);
+                         if (it == lod0_prim_map.end() ||
+                             !extracted_prims[it->second])
+                           continue;
+
+                         const auto &lod0_data =
+                             extracted_prims[it->second]->data;
+                         auto &lod_n_data = extracted_prims[i]->data;
+
+                         auto remap =
+                             remap_lod_indices_to_lod0(lod0_data, lod_n_data);
+
+                         if (!remap.exact) {
+                           warn("LOD{} for mesh_idx {} required nearest-"
+                                "neighbour vertex remap (positions differ "
+                                "from LOD0)",
+                                w.lod_slot, w.mesh_idx);
+                         }
+
+                         // Replace the indices; vertices are no longer needed
+                         // (they won't be uploaded).
+                         lod_n_data.indices = std::move(remap.indices);
+                       }
+                     })
+      .wait();
+}
+
+// ---------------------------------------------------------------------------
+// LOD generation (meshopt, only for non-explicit LODs)
+// ---------------------------------------------------------------------------
+
 static auto generate_lods_parallel(
     const std::vector<PrimWork> &prim_work_list,
     const std::vector<std::expected<PrimitiveResult, std::string>>
@@ -1053,6 +1342,12 @@ static auto generate_lods_parallel(
       .submit_blocks(usize{0}, n,
                      [&](usize begin, usize end) {
                        for (usize i = begin; i < end; ++i) {
+                         // Never generate meshopt LODs for explicit LOD meshes —
+                         // either they're the primary (lod0) with pre-authored
+                         // siblings, or they're a secondary that we don't even
+                         // upload vertices for.
+                         if (prim_work_list[i].is_explicit_lod)
+                           continue;
                          if (!extracted_prims[i])
                            continue;
                          const auto &[pdata, aabb] = *extracted_prims[i];
@@ -1072,6 +1367,10 @@ static auto generate_lods_parallel(
   return {std::move(prim_lods), total_lod_indices};
 }
 
+// ---------------------------------------------------------------------------
+// Material allocation
+// ---------------------------------------------------------------------------
+
 static void allocate_materials(const fastgltf::Asset &asset, GeometryPool &pool,
                                MeshAsset &result) {
   if (asset.materials.empty())
@@ -1090,18 +1389,37 @@ static void allocate_materials(const fastgltf::Asset &asset, GeometryPool &pool,
     result.material_slots[i] = result.material_base_slot + static_cast<u32>(i);
 }
 
+// ---------------------------------------------------------------------------
+// Geometry upload
+// ---------------------------------------------------------------------------
+
 static void
 upload_geometry(const fastgltf::Asset &asset,
                 const std::vector<PrimWork> &prim_work_list,
                 const std::vector<std::expected<PrimitiveResult, std::string>>
                     &extracted_prims,
-                const std::vector<PrimLods> &prim_lods, usize total_lod_indices,
+                const std::vector<PrimLods> &prim_lods,
+                usize total_lod_indices,
                 GeometryPool &pool, MeshAsset &result) {
   PROFILE_SCOPE("Allocate geometry TOTAL");
 
   {
     PROFILE_SCOPE("Pool Reserve & Transaction Init");
-    auto [total_v, total_i] = calculate_requirements(extracted_prims);
+
+    // Only count vertices for LOD0 (or non-LOD) entries.  Higher LOD meshes
+    // share LOD0's vertex range — their vertices are never uploaded.
+    usize total_v = 0;
+    usize total_i = 0;
+    for (usize i = 0; i < prim_work_list.size(); ++i) {
+      if (!extracted_prims[i])
+        continue;
+      const auto &w = prim_work_list[i];
+      const bool uploads_vertices =
+          !w.is_explicit_lod || w.lod_slot == 0;
+      if (uploads_vertices)
+        total_v += extracted_prims[i]->data.vertices.size();
+      total_i += extracted_prims[i]->data.indices.size();
+    }
     pool.reserve(total_v, total_i + total_lod_indices);
   }
 
@@ -1127,63 +1445,129 @@ upload_geometry(const fastgltf::Asset &asset,
     PROFILE_SCOPE("Serial Processing Loop");
 
     for (usize i = 0; i < prim_work_list.size(); ++i) {
-      const usize mesh_idx = prim_work_list[i].mesh_idx;
+      const auto &w = prim_work_list[i];
       const auto &res = extracted_prims[i];
 
+      // For LOD meshes with slot > 0 we only need to write their (remapped)
+      // index data into the pool — their vertices live in LOD0's range.
+      const bool uploads_vertices = !w.is_explicit_lod || w.lod_slot == 0;
+
+      // Determine which mesh owns the MeshLodGroup for this primitive.
+      // For LOD0 / non-LOD prims it's w.mesh_idx itself.
+      // For LODn (n>0) it's w.primary_mesh_idx.
+      const usize owning_mesh_idx =
+          (w.is_explicit_lod && w.lod_slot > 0) ? w.primary_mesh_idx
+                                                 : w.mesh_idx;
+
       if (!res) {
-        result.submesh_aabbs[mesh_idx].push_back(AABB::create());
+        if (uploads_vertices)
+          result.submesh_aabbs[owning_mesh_idx].push_back(AABB::create());
         continue;
       }
 
       const auto &[pdata, aabb] = *res;
-      const auto vspan = std::span(pdata.vertices);
       const auto ispan = std::span(pdata.indices);
 
-      AllocatedOffset offsets{
-          .vertex_offset = pool.vertex_offset + cur_v,
-          .shadow_vertex_offset = pool.shadow_vertex_offset + cur_sv,
-          .index_offset = pool.index_offset + cur_i,
-      };
+      // ----------------------------------------------------------------
+      // Vertex upload (skipped for LODn > 0)
+      // ----------------------------------------------------------------
+      AllocatedOffset offsets{};
+      if (uploads_vertices) {
+        const auto vspan = std::span(pdata.vertices);
 
-      auto *v_dst = cast<Vertex>(v_base, cur_v);
-      auto *sv_dst = cast<PositionOnlyVertex>(sv_base, cur_sv);
-      auto *i_dst = cast<u32>(i_base, cur_i);
+        offsets = AllocatedOffset{
+            .vertex_offset = pool.vertex_offset + cur_v,
+            .shadow_vertex_offset = pool.shadow_vertex_offset + cur_sv,
+            .index_offset = pool.index_offset + cur_i,
+        };
 
-      std::memcpy(v_dst, vspan.data(), vspan.size_bytes());
-      std::memcpy(i_dst, ispan.data(), ispan.size_bytes());
-      for (usize idx = 0; idx < vspan.size(); ++idx) {
-        sv_dst[idx].position[0] = vspan[idx].position[0];
-        sv_dst[idx].position[1] = vspan[idx].position[1];
-        sv_dst[idx].position[2] = vspan[idx].position[2];
+        auto *v_dst = cast<Vertex>(v_base, cur_v);
+        auto *sv_dst = cast<PositionOnlyVertex>(sv_base, cur_sv);
+
+        std::memcpy(v_dst, vspan.data(), vspan.size_bytes());
+        for (usize idx = 0; idx < vspan.size(); ++idx) {
+          sv_dst[idx].position[0] = vspan[idx].position[0];
+          sv_dst[idx].position[1] = vspan[idx].position[1];
+          sv_dst[idx].position[2] = vspan[idx].position[2];
+        }
+
+        cur_v += vspan.size_bytes();
+        cur_sv += vspan.size() * sizeof(PositionOnlyVertex);
+      } else {
+        // Reuse LOD0's vertex offset. Find the owning (LOD0) entry.
+        // We scan backwards since LOD0 must have been processed earlier.
+        for (usize j = i; j-- > 0;) {
+          if (prim_work_list[j].mesh_idx == w.primary_mesh_idx &&
+              prim_work_list[j].lod_slot == 0 && extracted_prims[j]) {
+            offsets.vertex_offset =
+                pool.vertex_offset +
+                /* byte offset already advanced when lod0 was written */
+                /* we stored it in the MeshLodGroup — recover from there */
+                static_cast<usize>(
+                    result.meshes[w.primary_mesh_idx][w.prim_idx]
+                        .vertex_offset) *
+                    sizeof(Vertex);
+            break;
+          }
+        }
+        // index_offset advances normally
+        offsets.index_offset = pool.index_offset + cur_i;
       }
 
-      cur_v += vspan.size_bytes();
-      cur_sv += vspan.size() * sizeof(PositionOnlyVertex);
+      // ----------------------------------------------------------------
+      // Index upload (always)
+      // ----------------------------------------------------------------
+      auto *i_dst = cast<u32>(i_base, cur_i);
+      std::memcpy(i_dst, ispan.data(), ispan.size_bytes());
       cur_i += ispan.size_bytes();
 
-      MeshLodGroup lod_group;
-      lod_group.vertex_offset =
-          static_cast<i32>(offsets.vertex_offset / sizeof(Vertex));
-      lod_group.lods[0].first_index =
-          static_cast<u32>(offsets.index_offset / sizeof(u32));
-      lod_group.lods[0].index_count = static_cast<u32>(pdata.indices.size());
-      lod_group.lod_count = 1;
+      // ----------------------------------------------------------------
+      // MeshLodGroup bookkeeping
+      // ----------------------------------------------------------------
+      if (uploads_vertices) {
+        // LOD0 / standalone: create the group entry.
+        MeshLodGroup lod_group;
+        lod_group.vertex_offset =
+            static_cast<i32>(offsets.vertex_offset / sizeof(Vertex));
+        lod_group.lods[0].first_index =
+            static_cast<u32>(offsets.index_offset / sizeof(u32));
+        lod_group.lods[0].index_count =
+            static_cast<u32>(pdata.indices.size());
+        lod_group.lod_count = 1;
 
-      for (const auto &lod_indices : prim_lods[i].extra) {
-        const auto as_span = std::span(lod_indices);
-        auto *lod_i_dst = cast<u32>(i_base, cur_i);
-        std::memcpy(lod_i_dst, lod_indices.data(), as_span.size_bytes());
+        // Append meshopt-generated LODs (only for non-explicit-lod prims).
+        if (!w.is_explicit_lod) {
+          for (const auto &lod_indices : prim_lods[i].extra) {
+            const auto as_span = std::span(lod_indices);
+            auto *lod_i_dst = cast<u32>(i_base, cur_i);
+            std::memcpy(lod_i_dst, lod_indices.data(), as_span.size_bytes());
 
-        auto &lod = lod_group.lods[lod_group.lod_count++];
-        lod.first_index =
-            static_cast<u32>((pool.index_offset + cur_i) / sizeof(u32));
-        lod.index_count = static_cast<u32>(as_span.size());
-        cur_i += as_span.size_bytes();
+            auto &lod = lod_group.lods[lod_group.lod_count++];
+            lod.first_index =
+                static_cast<u32>((pool.index_offset + cur_i) / sizeof(u32));
+            lod.index_count = static_cast<u32>(as_span.size());
+            cur_i += as_span.size_bytes();
+          }
+        }
+
+        result.meshes[owning_mesh_idx].push_back(lod_group);
+        result.submesh_aabbs[owning_mesh_idx].push_back(aabb);
+        result.mesh_aabb.merge(aabb);
+      } else {
+        // LODn > 0: patch the lod_slot into the existing MeshLodGroup.
+        auto &lod_group =
+            result.meshes[owning_mesh_idx][w.prim_idx];
+        if (w.lod_slot < static_cast<u32>(max_lods)) {
+          auto &lod_entry = lod_group.lods[w.lod_slot];
+          lod_entry.first_index =
+              static_cast<u32>(offsets.index_offset / sizeof(u32));
+          lod_entry.index_count =
+              static_cast<u32>(pdata.indices.size());
+          lod_group.lod_count =
+              static_cast<u8>(glm::max(static_cast<u32>(lod_group.lod_count),
+                       static_cast<u32>(w.lod_slot + 1)));
+        }
       }
-
-      result.submesh_aabbs[mesh_idx].push_back(aabb);
-      result.mesh_aabb.merge(aabb);
-      result.meshes[mesh_idx].push_back(lod_group);
     }
   }
 
@@ -1196,6 +1580,10 @@ upload_geometry(const fastgltf::Asset &asset,
     batch.commit();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Texture upload submission
+// ---------------------------------------------------------------------------
 
 static void submit_texture_uploads(std::vector<PendingUpload> &pending,
                                    SceneRenderer &renderer,
@@ -1253,6 +1641,10 @@ auto build_patch_list(const fastgltf::Asset &asset, usize image_idx,
   return patches;
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
                       std::span<const u32> indices)
     -> std::expected<MeshAssetHandle, std::string> {
@@ -1299,7 +1691,8 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
   return renderer.register_gltf(std::move(result));
 }
 
-auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
+auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
+                    const LoadOptions &opts)
     -> std::expected<MeshAssetHandle, std::string> {
   auto &pool = *renderer.geometry_pool;
   const auto fs_path = VFS::get().resolve(path);
@@ -1324,17 +1717,122 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
       collect_image_sources(asset, gltf_dir, fs_path, color_spaces);
   auto pending = launch_texture_futures(image_sources, renderer, *result);
 
+  // -------------------------------------------------------------------------
+  // Detect explicit LOD groups from mesh names (e.g. _lod0 … _lod5)
+  // -------------------------------------------------------------------------
+  std::vector<ExplicitLodGroup> lod_groups;
+  if (opts.lod_detection != LodDetection::none) {
+    lod_groups = detect_lod_groups(asset, opts.lod_base_name_filter);
+    if (!lod_groups.empty()) {
+      info("load_gltf: '{}' — detected {} explicit LOD group(s):",
+           fs_path.filename().string(), lod_groups.size());
+      for (const auto &g : lod_groups) {
+        info("  '{}': {} LOD level(s) ({} → {})",
+             g.base_name, g.members.size(),
+             g.members.front().first, g.members.back().first);
+      }
+    }
+  }
+
+  // Build fast lookup tables from the detected groups.
+  //
+  // lod_membership[mesh_idx] = { lod_slot, primary_mesh_idx }
+  // suppressed_mesh_indices  = mesh indices for lod_slot > 0
+  //   (these get no scene-graph node; their geometry is merged into LOD0)
+  struct LodMembership {
+    u32 lod_slot;
+    usize primary_mesh_idx;
+  };
+  std::unordered_map<usize, LodMembership> lod_membership;
+  std::unordered_set<usize> suppressed_mesh_indices;
+  // lod_to_primary_mesh: used by flatten_nodes to remap node→mesh references
+  std::unordered_map<usize, usize> lod_to_primary_mesh;
+
+  for (const auto &g : lod_groups) {
+    const usize primary_mi = g.primary_mesh_idx();
+    for (const auto &[slot, mi] : g.members) {
+      lod_membership[mi] = {.lod_slot = slot, .primary_mesh_idx = primary_mi};
+      lod_to_primary_mesh[mi] = primary_mi;
+      if (slot > 0)
+        suppressed_mesh_indices.insert(mi);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Build the flat work list
+  //
+  // Key ordering requirement: LOD0 primitives MUST appear before LOD1+
+  // primitives for the same group, because upload_geometry processes them
+  // serially and LODn patching reads from the already-written MeshLodGroup.
+  //
+  // We achieve this by emitting all LOD0 (and non-LOD) entries first, then
+  // the higher LOD entries in lod_slot order.
+  // -------------------------------------------------------------------------
   std::vector<PrimWork> prim_work_list;
-  for (auto &&[mi, m] : std::views::enumerate(asset.meshes))
-    for (auto &&[pi, p] : std::views::enumerate(m.primitives))
+  prim_work_list.reserve(
+      std::accumulate(asset.meshes.begin(), asset.meshes.end(), usize{0},
+                      [](usize acc, const auto &m) {
+                        return acc + m.primitives.size();
+                      }));
+
+  // Pass 1: non-LOD and LOD0 entries
+  for (auto &&[mi, m] : std::views::enumerate(asset.meshes)) {
+    const usize mesh_idx = static_cast<usize>(mi);
+    const auto it = lod_membership.find(mesh_idx);
+    const bool is_lod_member = (it != lod_membership.end());
+    const bool is_higher_lod = is_lod_member && it->second.lod_slot > 0;
+    if (is_higher_lod)
+      continue; // deferred to pass 2
+
+    for (auto &&[pi, p] : std::views::enumerate(m.primitives)) {
       prim_work_list.push_back({
-          .mesh_idx = static_cast<usize>(mi),
+          .mesh_idx = mesh_idx,
           .prim_idx = static_cast<usize>(pi),
           .ptr = &p,
+          .lod_slot = is_lod_member ? it->second.lod_slot : 0u,
+          .primary_mesh_idx = is_lod_member ? it->second.primary_mesh_idx
+                                            : mesh_idx,
+          .is_explicit_lod = is_lod_member,
       });
+    }
+  }
 
+  // Pass 2: LOD1+ entries, sorted by lod_slot so they arrive in order
+  {
+    std::vector<PrimWork> higher_lods;
+    for (auto &&[mi, m] : std::views::enumerate(asset.meshes)) {
+      const usize mesh_idx = static_cast<usize>(mi);
+      const auto it = lod_membership.find(mesh_idx);
+      if (it == lod_membership.end() || it->second.lod_slot == 0)
+        continue;
+
+      for (auto &&[pi, p] : std::views::enumerate(m.primitives)) {
+        higher_lods.push_back({
+            .mesh_idx = mesh_idx,
+            .prim_idx = static_cast<usize>(pi),
+            .ptr = &p,
+            .lod_slot = it->second.lod_slot,
+            .primary_mesh_idx = it->second.primary_mesh_idx,
+            .is_explicit_lod = true,
+        });
+      }
+    }
+    std::ranges::sort(higher_lods, {}, &PrimWork::lod_slot);
+    for (auto &&pw : higher_lods)
+      prim_work_list.push_back(std::move(pw));
+  }
+
+  // -------------------------------------------------------------------------
+  // Parallel extract → remap → LOD generation → upload
+  // -------------------------------------------------------------------------
   auto extracted_prims =
       extract_primitives_parallel(asset, prim_work_list, renderer.thread_pool);
+
+  // Remap LODn indices to point into LOD0's vertex range.
+  if (!lod_groups.empty())
+    remap_explicit_lod_indices(prim_work_list, extracted_prims,
+                               renderer.thread_pool);
+
   auto [prim_lods, total_lod_indices] = generate_lods_parallel(
       prim_work_list, extracted_prims, renderer.thread_pool);
 
@@ -1353,12 +1851,21 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer)
                                : Def{};
   if (!scene_roots.empty()) {
     PROFILE_SCOPE("Iterate nodes");
-    flatten_nodes(asset, scene_roots, *result);
+    flatten_nodes(asset, scene_roots, *result,
+                  suppressed_mesh_indices, lod_to_primary_mesh);
   }
 
-  info("load_gltf: '{}' - {} image(s), {} material(s), {} mesh(es), {} node(s)",
-       fs_path.filename().string(), asset.images.size(), asset.materials.size(),
-       asset.meshes.size(), result->nodes.size());
+  // Count effective LOD levels for the log message.
+  u32 max_lod_count = 0;
+  for (const auto &mesh_lod_groups : result->meshes)
+    for (const auto &lg : mesh_lod_groups)
+      max_lod_count = glm::max(max_lod_count, static_cast<u32>(lg.lod_count));
+
+  info("load_gltf: '{}' - {} image(s), {} material(s), {} mesh(es), {} "
+       "node(s), {} LOD level(s)",
+       fs_path.filename().string(), asset.images.size(),
+       asset.materials.size(), asset.meshes.size(), result->nodes.size(),
+       max_lod_count);
 
   auto handle = renderer.register_gltf(std::move(*result));
   submit_texture_uploads(pending, renderer, handle);

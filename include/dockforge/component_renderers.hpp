@@ -45,8 +45,6 @@ struct ComponentRenderer<dy::Components::Transform>
   }
 };
 
-// ── Mesh ─────────────────────────────────────────────────────────────────────
-
 template <>
 struct ComponentRenderer<dy::Components::Mesh>
     : public BaseComponentRenderer<ComponentRenderer<dy::Components::Mesh>> {
@@ -54,26 +52,23 @@ struct ComponentRenderer<dy::Components::Mesh>
   static constexpr bool removable = true;
   static constexpr bool addable = true;
 
-  // Helper to recursively draw the glTF node hierarchy
   static auto draw_node(const dy::MeshAsset &asset, dy::i32 node_idx) -> void {
     if (node_idx < 0 || node_idx >= static_cast<dy::i32>(asset.nodes.size()))
       return;
 
     const auto &node = asset.nodes[node_idx];
 
-    // Create a unique string ID for ImGui's ID stack using the node index
     std::string node_label =
         node.name.empty() ? "Node #" + std::to_string(node_idx)
                           : node.name + " (#" + std::to_string(node_idx) + ")";
 
     ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow;
     if (node.primitives.empty()) {
-      flags |= ImGuiTreeNodeFlags_Leaf; // Leaf nodes with no geometry
+      flags |= ImGuiTreeNodeFlags_Leaf;
     }
 
     if (ImGui::TreeNodeEx((void *)(intptr_t)node_idx, flags, "%s",
                           node_label.c_str())) {
-      // 1. Render Primitives within this Node
       if (!node.primitives.empty()) {
         if (ImGui::TreeNode("Primitives")) {
           for (size_t p = 0; p < node.primitives.size(); ++p) {
@@ -86,7 +81,6 @@ struct ComponentRenderer<dy::Components::Mesh>
               ImGui::Text("LOD Count: %u", lod_group.lod_count);
               ImGui::Text("Vertex Offset: %d", lod_group.vertex_offset);
 
-              // Draw fixed-size array LODs up to max_lods or lod_count
               if (ImGui::TreeNode("LOD Levels")) {
                 auto active_lods = std::min(lod_group.lod_count,
                                             static_cast<dy::u8>(dy::max_lods));
@@ -105,9 +99,6 @@ struct ComponentRenderer<dy::Components::Mesh>
         }
       }
 
-      // 2. Recursively render child nodes
-      // Loop through all nodes to find ones whose parent_index matches current
-      // node_idx
       for (size_t i = 0; i < asset.nodes.size(); ++i) {
         if (asset.nodes[i].parent_index == node_idx) {
           draw_node(asset, static_cast<dy::i32>(i));
@@ -123,7 +114,6 @@ struct ComponentRenderer<dy::Components::Mesh>
     bool modified = false;
     auto &registry = scene_renderer.mesh_registry;
 
-    // Handle Asset Selection Combo Box
     if (ImGui::TreeNodeEx("Asset Selection", ImGuiTreeNodeFlags_DefaultOpen)) {
       auto current_handle = m.handle;
       std::string preview_name =
@@ -157,13 +147,11 @@ struct ComponentRenderer<dy::Components::Mesh>
 
     ImGui::Separator();
 
-    // Structural Hierarchy Diagnostics
     if (m.handle.valid()) {
       if (auto *asset = registry.get(m.handle)) {
         if (ImGui::TreeNodeEx("Mesh Hierarchy Details",
                               ImGuiTreeNodeFlags_DefaultOpen)) {
 
-          // Layout info
           ImGui::Text("Global Vertex Base Offset:  %zu",
                       asset->vertex_base_offset);
           ImGui::Text("Global Shadow Vert Offset: %zu",
@@ -175,7 +163,6 @@ struct ComponentRenderer<dy::Components::Mesh>
 
           ImGui::Spacing();
 
-          // Run recursive node presentation starting at root nodes
           if (ImGui::TreeNodeEx("Scene Graph Nodes",
                                 ImGuiTreeNodeFlags_DefaultOpen)) {
             if (asset->root_node_indices.empty()) {
@@ -201,8 +188,6 @@ struct ComponentRenderer<dy::Components::Mesh>
     return modified;
   }
 };
-
-// ── Material override ────────────────────────────────────────────────────────
 
 template <>
 struct ComponentRenderer<dy::Components::MaterialOverride>
@@ -235,8 +220,6 @@ struct ComponentRenderer<dy::Components::MaterialOverride>
   }
 };
 
-// ── Camera ───────────────────────────────────────────────────────────────────
-
 template <>
 struct ComponentRenderer<dy::Components::Camera>
     : public BaseComponentRenderer<ComponentRenderer<dy::Components::Camera>> {
@@ -262,9 +245,6 @@ struct ComponentRenderer<dy::Components::Camera>
     return changed;
   }
 };
-
-// ── Debug frustum
-// ─────────────────────────────────────────────────────────────
 
 template <>
 struct ComponentRenderer<dy::Components::DebugFrustum>

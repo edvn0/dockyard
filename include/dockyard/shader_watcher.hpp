@@ -13,7 +13,7 @@
 
 namespace dy::shader {
 
-class ShaderWatcher : private efsw::FileWatchListener {
+class ShaderWatcher : efsw::FileWatchListener {
 public:
   using ChangeCallback = std::function<void(dy::VFSPath)>;
 
@@ -24,13 +24,13 @@ public:
   ShaderWatcher(const ShaderWatcher &) = delete;
   ShaderWatcher &operator=(const ShaderWatcher &) = delete;
 
+  void handleFileAction(efsw::WatchID, const std::string &dir,
+                        const std::string &filename, efsw::Action action,
+                        const std::string &old_filename) override;
   auto start() -> void;
   auto stop() -> void;
 
 private:
-  void handleFileAction(efsw::WatchID, const std::string &dir,
-                        const std::string &filename, efsw::Action action,
-                        const std::string &old_filename) override;
 
   void debounce_loop();
 

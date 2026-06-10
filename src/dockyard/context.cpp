@@ -120,8 +120,6 @@ auto SwapchainResources::create(const VulkanContext &ctx, VkSurfaceKHR surface,
 
 auto ViewportResources::resize(const VulkanContext &ctx,
                                SceneRenderer &renderer, u32 w, u32 h) -> void {
-  // ── 1. Unmanaged MSAA Attachments (Destroy and recreate inline)
-  // ─────────────────────────
   depth_msaa.destroy(ctx);
   depth_msaa =
       Texture::create(ctx, "depth_msaa", w, h, VK_FORMAT_D32_SFLOAT,
@@ -134,52 +132,36 @@ auto ViewportResources::resize(const VulkanContext &ctx,
                       VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
                       VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_4_BIT, 1U, true);
 
-  // ── 2. Depth Resolved Target
-  // ────────────────────────────────────────────────────────────
-  if (depth_resolved_target.valid()) {
-    auto *entry = renderer.textures.get(depth_resolved_target);
-    entry->texture.destroy(ctx, &renderer.textures);
-    entry->texture = Texture::create(
+  auto resize_or_create = [&](auto &handle, auto make_tex) {
+    if (handle.valid()) {
+      auto *entry = renderer.textures.get(handle);
+      entry->texture.destroy(ctx, &renderer.textures);
+      entry->texture = make_tex();
+      renderer.bindless.mark_dirty();
+    } else {
+      handle = renderer.textures.create(TextureEntry{
+          .texture = make_tex(),
+          .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+      });
+    }
+  };
+
+  resize_or_create(depth_resolved_target, [&] {
+    return Texture::create(
         ctx, "depth_resolved_target", w, h, VK_FORMAT_D32_SFLOAT,
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
-    renderer.bindless.mark_dirty();
-  } else {
-    auto tex = Texture::create(
-        ctx, "depth_resolved_target", w, h, VK_FORMAT_D32_SFLOAT,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT,VK_SAMPLE_COUNT_1_BIT, 1U, true);
-    depth_resolved_target = renderer.textures.create(TextureEntry{
-        .texture = std::move(tex),
-        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
-    });
-  }
+  });
 
-  if (depth_pre_hiz.valid()) {
-    auto *entry = renderer.textures.get(depth_pre_hiz);
-    entry->texture.destroy(ctx, &renderer.textures);
-    entry->texture = Texture::create(
+  resize_or_create(depth_pre_hiz, [&] {
+    return Texture::create(
         ctx, "depth_pre_hiz", w, h, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT,VK_SAMPLE_COUNT_1_BIT, 1U, true);
-    renderer.bindless.mark_dirty();
-  } else {
-    auto tex = Texture::create(ctx, "depth_pre_hiz", w, h, VK_FORMAT_R32_SFLOAT,
-                               VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-                                   VK_IMAGE_USAGE_SAMPLED_BIT |
-                                   VK_IMAGE_USAGE_STORAGE_BIT,
-                               VK_IMAGE_ASPECT_COLOR_BIT,VK_SAMPLE_COUNT_1_BIT, 1U, true);
-    depth_pre_hiz = renderer.textures.create(TextureEntry{
-        .texture = std::move(tex),
-        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
-    });
-  }
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
+  });
 
-  // ── 3. Hierarchical Depth Pyramid Target (Hi-Z)
-  // ──────────────────────────────────────────
   u32 hiz_w = std::max(1U, w / 2);
   u32 hiz_h = std::max(1U, h / 2);
   u32 hiz_mips = static_cast<u32>(std::bit_width(std::max(hiz_w, hiz_h)));
@@ -187,20 +169,16 @@ auto ViewportResources::resize(const VulkanContext &ctx,
   if (hierarchical_depth_pyramid_target.valid()) {
     auto *entry = renderer.textures.get(hierarchical_depth_pyramid_target);
     entry->texture.destroy(ctx, &renderer.textures);
-
     entry->texture = Texture::create(
         ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips, true);
-
-    entry->texture.register_sub_views(ctx, renderer.textures,
-                                      renderer.bindless);
+    entry->texture.register_sub_views(ctx, renderer.textures, renderer.bindless);
   } else {
     auto tex = Texture::create(
         ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips, true);
-
     tex.register_sub_views(ctx, renderer.textures, renderer.bindless);
     hierarchical_depth_pyramid_target = renderer.textures.create(TextureEntry{
         .texture = std::move(tex),
@@ -208,49 +186,20 @@ auto ViewportResources::resize(const VulkanContext &ctx,
     });
   }
 
-  // ── 4. Forward HDR Target
-  // ───────────────────────────────────────────────────────────────
-  if (forward_target.valid()) {
-    auto *entry = renderer.textures.get(forward_target);
-    entry->texture.destroy(ctx, &renderer.textures);
-    entry->texture = Texture::create(
+  resize_or_create(forward_target, [&] {
+    return Texture::create(
         ctx, "forward_target", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
             VK_IMAGE_USAGE_STORAGE_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
-    renderer.bindless.mark_dirty();
-  } else {
-    auto tex = Texture::create(
-        ctx, "forward_target", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-            VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
-    forward_target = renderer.textures.create(TextureEntry{
-        .texture = std::move(tex),
-        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
-    });
-  }
+  });
 
-  // ── 5. LDR Display Target
-  // ───────────────────────────────────────────────────────────────
-  if (display_target.valid()) {
-    auto *entry = renderer.textures.get(display_target);
-    entry->texture.destroy(ctx, &renderer.textures);
-    entry->texture = Texture::create(
+  resize_or_create(display_target, [&] {
+    return Texture::create(
         ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
-    renderer.bindless.mark_dirty();
-  } else {
-    auto tex = Texture::create(
-        ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
-    display_target = renderer.textures.create(TextureEntry{
-        .texture = std::move(tex), // Move it cleanly
-        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
-    });
-  }
+  });
 }
 
 auto ViewportResources::destroy(const VulkanContext &ctx) -> void {
@@ -501,15 +450,14 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
 auto FrameSync::create(const VulkanContext &ctx) -> FrameSync {
   FrameSync fs{};
 
-  // 1. Create Timeline Semaphore
   VkSemaphoreTypeCreateInfo timeline_type_info{};
   timeline_type_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
   timeline_type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
-  timeline_type_info.initialValue = 0; // The GPU starts at 0
+  timeline_type_info.initialValue = 0;
 
   VkSemaphoreCreateInfo sem_info{};
   sem_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-  sem_info.pNext = &timeline_type_info; // Link the timeline config
+  sem_info.pNext = &timeline_type_info;
 
   vkCreateSemaphore(ctx.device, &sem_info, nullptr, &fs.timeline_semaphore);
 
@@ -911,8 +859,6 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
     vkCmdPipelineBarrier2(cmd, &dep);
   };
 
-  // ── Dispatch ─────────────────────────────────────────────────────────────
-
   PROFILE_SCOPE("Full compute");
   ctx.one_time_submit([&](VkCommandBuffer cmd) {
     PROFILE_SCOPE("Inner submission");
@@ -984,7 +930,7 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
 
       const PushConstants pc{
           .equirect_index = probe.env_map.index(),
-          .size = target_size, // 1. Pass the dynamic size here
+          .size = target_size,
           .sampler_index = renderer.dummy_sampler_handle.index(),
           .out_index = irr_entry->texture.sub_view_handle(0u, 0u).index(),
       };
@@ -998,7 +944,6 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       vkCmdDispatch(cmd, group_count_x, group_count_y, group_count_z);
     }
 
-    // ── specular prefilter — one dispatch per mip ─────────────────────────
     {
       const auto &entry = renderer.pipeline_registry->get_entry(pipe_prefilter);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
@@ -1024,7 +969,6 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       }
     }
 
-    // ── BRDF LUT ──────────────────────────────────────────────────────────
     {
       const auto &entry = renderer.pipeline_registry->get_entry(pipe_brdf_lut);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
@@ -1042,7 +986,6 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       vkCmdDispatch(cmd, 64u, 64u, 1u);
     }
 
-    // ── [3] Final barrier: compute writes → fragment shader reads ─────────
     {
       const VkImageMemoryBarrier2 final_barriers[] = {
           cube_barrier(irr_entry->texture.image, 1u,
