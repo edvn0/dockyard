@@ -40,16 +40,8 @@ public:
     snapshot.get<entt::entity>(archive);
 
     for_each_type<MasterComponentList>([&]<typename Component>() {
-      if constexpr (ComponentConfig<Component>::serializable) {
-
-        constexpr bool can_serialize = has_valid_serializer<Component> ||
-                                       std::is_trivially_copyable_v<Component>;
-
-        static_assert(
-            can_serialize,
-            "Component is marked serializable, is NOT trivially copyable, and "
-            "lacks a ComponentSerializer specialization!");
-
+      if constexpr (ComponentConfig<Component>::serializable &&
+                    has_valid_serializer<Component>) {
         constexpr u32 type_id = entt::type_hash<Component>::value();
         writer.write(&type_id, sizeof(type_id));
         snapshot.template get<Component>(archive);
@@ -58,23 +50,14 @@ public:
   }
 
   static void deserialize(Scene &scene, BinaryReader &reader) {
-    scene.registry().clear();
     entt::snapshot_loader loader{scene.registry()};
     CompileTimeInputArchive archive{reader};
 
     loader.get<entt::entity>(archive);
 
     for_each_type<MasterComponentList>([&]<typename Component>() {
-      if constexpr (ComponentConfig<Component>::serializable) {
-
-        constexpr bool can_serialize = has_valid_serializer<Component> ||
-                                       std::is_trivially_copyable_v<Component>;
-
-        static_assert(
-            can_serialize,
-            "Component is marked serializable, is NOT trivially copyable, and "
-            "lacks a ComponentSerializer specialization!");
-
+      if constexpr (ComponentConfig<Component>::serializable &&
+                    has_valid_serializer<Component>) {
         u32 expected_id = entt::type_hash<Component>::value();
         u32 read_id = 0;
         reader.read(&read_id, sizeof(read_id));

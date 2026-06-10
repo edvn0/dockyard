@@ -30,8 +30,6 @@ struct BinaryReader {
   }
 };
 
-// --- Implementations ---
-
 class MemoryWriter : public BinaryWriter {
 public:
   explicit MemoryWriter(std::vector<std::uint8_t> &buf) : buffer(buf) {}

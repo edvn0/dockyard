@@ -1,7 +1,9 @@
+#include "dockyard/bindless_handle.hpp"
 #include "dockyard/scene_serialiser.hpp"
 #include <assert.h>
 #include <cstdint>
 #include <dockyard/component_traits.hpp>
+#include <functional>
 #include <stdexcept>
 #include <string_view>
 
@@ -51,6 +53,18 @@ auto is_valid_utf8(std::string_view str) -> bool {
 }
 
 void write_safe_string(auto &archive, std::string_view view) {
+  auto size = static_cast<u32>(view.size());
+  archive.writer.write(&size, sizeof(size));
+  if (size > 0) {
+    archive.writer.write(view.data(), size);
+  }
+}
+
+template <typename... Args>
+  requires(sizeof...(Args) >= 1)
+void write_safe_string(auto &archive, std::format_string<Args...> fmt,
+                       Args &&...args) {
+  auto view = std::format(fmt, std::forward<Args>(args)...);
   auto size = static_cast<u32>(view.size());
   archive.writer.write(&size, sizeof(size));
   if (size > 0) {
@@ -109,6 +123,17 @@ void ComponentSerializer<Components::MeshRequest>::load(
   } else {
     value.path = NullableVFSPath::create("{}", path_str);
   }
+}
+
+void ComponentSerializer<Components::Mesh>::save(auto &archive,
+                                                 const Components::Mesh &mesh) {
+  write_safe_string(archive, "{}", mesh.handle.index());
+}
+
+void ComponentSerializer<Components::Mesh>::load(auto &archive,
+                                                 Components::Mesh &m) {
+  std::string path_str = read_safe_string(archive);
+  m.handle = MeshAssetHandle{static_cast<u32>(std::stoi(path_str)), 1};
 }
 
 void ComponentSerializer<Components::Camera>::save(
@@ -199,38 +224,18 @@ void ComponentSerializer<Components::PointLight>::load(
   archive.reader.read(&value.radius, sizeof(float));
 }
 
-template void
-ComponentSerializer<Components::Tag>::load(CompileTimeInputArchive &,
-                                           Components::Tag &);
-template void
-ComponentSerializer<Components::Tag>::save(CompileTimeOutputArchive &,
-                                           const Components::Tag &);
-template void
-ComponentSerializer<Components::MeshRequest>::load(CompileTimeInputArchive &,
-                                                   Components::MeshRequest &);
-template void ComponentSerializer<Components::MeshRequest>::save(
-    CompileTimeOutputArchive &, const Components::MeshRequest &);
-template void
-ComponentSerializer<Components::Camera>::load(CompileTimeInputArchive &,
-                                              Components::Camera &);
-template void
-ComponentSerializer<Components::Camera>::save(CompileTimeOutputArchive &,
-                                              const Components::Camera &);
-template void
-ComponentSerializer<Components::Transform>::load(CompileTimeInputArchive &,
-                                                 Components::Transform &);
-template void
-ComponentSerializer<Components::Transform>::save(CompileTimeOutputArchive &,
-                                                 const Components::Transform &);
-template void
-ComponentSerializer<Components::LocalToWorld>::load(CompileTimeInputArchive &,
-                                                    Components::LocalToWorld &);
-template void ComponentSerializer<Components::LocalToWorld>::save(
-    CompileTimeOutputArchive &, const Components::LocalToWorld &);
-template void
-ComponentSerializer<Components::PointLight>::load(CompileTimeInputArchive &,
-                                                  Components::PointLight &);
-template void ComponentSerializer<Components::PointLight>::save(
-    CompileTimeOutputArchive &, const Components::PointLight &);
+#define EXPLICITLY_DEFINE(T)                                                   \
+  template void ComponentSerializer<Components::T>::load(                      \
+      CompileTimeInputArchive &, Components::T &);                             \
+  template void ComponentSerializer<Components::T>::save(                      \
+      CompileTimeOutputArchive &, const Components::T &);
+
+EXPLICITLY_DEFINE(Tag);
+EXPLICITLY_DEFINE(MeshRequest);
+EXPLICITLY_DEFINE(Camera);
+EXPLICITLY_DEFINE(Transform);
+EXPLICITLY_DEFINE(LocalToWorld);
+EXPLICITLY_DEFINE(PointLight);
+EXPLICITLY_DEFINE(Mesh);
 
 } // namespace dy

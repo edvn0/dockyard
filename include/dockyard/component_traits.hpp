@@ -27,15 +27,15 @@ template <> struct ComponentConfig<dy::Components::MeshRequest> {
   static constexpr bool ui_inspectable = false;
 };
 template <> struct ComponentConfig<dy::Components::Mesh> {
-  static constexpr bool serializable = false;
+  static constexpr bool serializable = true;
   static constexpr bool ui_inspectable = true;
 };
 template <> struct ComponentConfig<dy::Components::MaterialOverride> {
-  static constexpr bool serializable = false;
+  static constexpr bool serializable = true;
   static constexpr bool ui_inspectable = true;
 };
 template <> struct ComponentConfig<dy::Components::DebugFrustum> {
-  static constexpr bool serializable = false;
+  static constexpr bool serializable = true;
   static constexpr bool ui_inspectable = true;
 };
 
@@ -73,6 +73,11 @@ template <> struct ComponentSerializer<Components::Tag> {
 template <> struct ComponentSerializer<Components::MeshRequest> {
   static void save(auto &archive, const Components::MeshRequest &);
   static void load(auto &archive, Components::MeshRequest &);
+};
+
+template <> struct ComponentSerializer<Components::Mesh> {
+  static void save(auto &archive, const Components::Mesh &);
+  static void load(auto &archive, Components::Mesh &);
 };
 
 template <> struct ComponentSerializer<Components::Camera> {

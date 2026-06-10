@@ -7,6 +7,7 @@ project(
 )
 
 option(DOCKYARD_BUILD_TOOLS "Build Dockyard command line tools" ON)
+option(DOCKYARD_BUILD_TESTING "Build Dockyard test suite" ON)
 
 if(UNIX AND NOT APPLE)
   find_program(MOLD_EXECUTABLE mold)
@@ -21,6 +22,7 @@ include(cmake/DockyardRenderDoc.cmake)
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
 function(set_solution_folder folder_name)
@@ -83,6 +85,8 @@ CPMAddPackage(
   NAME vk-bootstrap
   GITHUB_REPOSITORY charles-lunarg/vk-bootstrap
   GIT_TAG main
+  OPTIONS
+    "VK_BOOTSTRAP_POSITION_INDEPENDENT_CODE ON"
 )
 
 CPMAddPackage(
@@ -187,6 +191,7 @@ CPMAddPackage(
     "TRACY_ON_DEMAND ON"
     "TRACY_NO_CALLSTACK OFF"
     "TRACY_VK_USE_SYMBOL_TABLE ON"
+    "CMAKE_POSITION_INDEPENDENT_CODE ON"
 )
 
 CPMAddPackage(
@@ -270,6 +275,19 @@ if(DOCKYARD_BUILD_TOOLS)
     GIT_SHALLOW YES
     DOWNLOAD_ONLY YES
   )
+endif()
+
+if (DOCKYARD_BUILD_TESTING)
+CPMAddPackage(
+  NAME doctest
+  GITHUB_REPOSITORY doctest/doctest
+  GIT_TAG v2.5.2
+)
+enable_testing()
+if(doctest_ADDED)
+  # Append doctest's custom cmake folder to your module path
+  list(APPEND CMAKE_MODULE_PATH "${doctest_SOURCE_DIR}/scripts/cmake")
+endif()
 endif()
 
 function(target_set_warnings target)
@@ -615,4 +633,33 @@ if(DOCKYARD_BUILD_TOOLS)
   set_target_properties(gltf-imagemap PROPERTIES
     FOLDER tools
   )
+endif()
+
+# ==========================================
+# Automated Unit Tests
+# ==========================================
+
+if (DOCKYARD_BUILD_TESTING)
+# ==========================================
+# Automated Unit Tests
+# ==========================================
+
+add_executable(dockyard-testing
+  tests/test_main.cpp
+  tests/test_scene_serialisation.cpp
+)
+
+target_enable_native_arch(dockyard-testing)
+target_set_warnings(dockyard-testing)
+
+target_link_libraries(dockyard-testing PRIVATE
+  dockyard
+  doctest::doctest
+)
+
+include(doctest)
+
+doctest_discover_tests(dockyard-testing)
+
+set_solution_folder("tests" dockyard-testing)
 endif()

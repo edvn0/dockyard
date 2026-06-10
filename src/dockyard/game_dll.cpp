@@ -2,6 +2,7 @@
 #include <dockyard/log.hpp>
 
 #include <chrono>
+#include <filesystem>
 #include <thread>
 
 #ifdef _WIN32
@@ -44,13 +45,14 @@ auto platform_free(void* handle) -> void {
 auto GameDll::load(std::filesystem::path path)
     -> std::expected<std::unique_ptr<GameDll>, std::string> {
     auto dll = std::unique_ptr<GameDll>(new GameDll{});
-    dll->source_path = path;
-    dll->loaded_path = path.parent_path() /
-                       (path.stem().string() + "_hot_0" + path.extension().string());
+    auto copy = std::move(path);
+    dll->source_path = std::filesystem::absolute(copy);
+    dll->loaded_path = copy.parent_path() / (copy.stem().string() + "_hot_0" +
+                                             copy.extension().string());
 
     std::error_code error_code{};
     std::filesystem::copy_file(
-        path, dll->loaded_path,
+        copy, dll->loaded_path,
         std::filesystem::copy_options::overwrite_existing, error_code);
     if (error_code) return std::unexpected(error_code.message());
 
@@ -81,6 +83,7 @@ auto GameDll::start_watching() -> void {
             if (!ec && t != last_write_time) {
                 last_write_time = t;
                 reload_pending  = true;
+                info("Reload queued!");
             }
         }
     });
@@ -95,6 +98,7 @@ auto GameDll::poll_reload() -> bool {
     if (!reload_pending.exchange(false)) return false;
     // Brief wait for the linker to finish writing the file.
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
+
     return do_reload();
 }
 
@@ -119,16 +123,16 @@ auto GameDll::do_reload() -> bool {
     }
 
     handle = platform_load(loaded_path);
-    if (!handle) {
-        dy::error("GameDll: failed to load reloaded DLL");
-        return false;
+    if (handle == nullptr) {
+      dy::error("GameDll: failed to load reloaded DLL");
+      return false;
     }
 
     auto* factory = reinterpret_cast<GameFactory>(
         platform_symbol(handle, "create_game"));
-    if (!factory) {
-        dy::error("GameDll: create_game not found after reload");
-        return false;
+    if (factory == nullptr) {
+      dy::error("GameDll: create_game not found after reload");
+      return false;
     }
 
     game_instance = factory();
@@ -137,14 +141,14 @@ auto GameDll::do_reload() -> bool {
 }
 
 auto GameDll::unload_instance() -> void {
-    if (game_instance) {
-        delete game_instance;
-        game_instance = nullptr;
-    }
-    if (handle) {
-        platform_free(handle);
-        handle = nullptr;
-    }
+  if (game_instance != nullptr) {
+    delete game_instance;
+    game_instance = nullptr;
+  }
+  if (handle != nullptr) {
+    platform_free(handle);
+    handle = nullptr;
+  }
 }
 
 GameDll::~GameDll() {

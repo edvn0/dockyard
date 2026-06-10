@@ -32,8 +32,10 @@
 #include <implot.h>
 
 #include <nfd.hpp>
+#include <thread>
 
 #include "./cube_vertices.inl"
+#include "dockyard/types.hpp"
 
 namespace {
 auto resize_viewport(Dockforge &app) -> void {
@@ -67,8 +69,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
   game_memory = GameMemory::create();
 
-
-  if (auto result = GameDll::load("build/user-ninja-debug/sandbox.dll")) {
+  if (auto result = GameDll::load("build/local-release-clang/sandbox.so")) {
     game_dll = std::move(*result);
     game_dll->start_watching();
   } else {
@@ -826,6 +827,7 @@ auto Dockforge::draw_toolbar() -> void {
 
     ImGui::SameLine();
     if (ImGui::Button("Reload DLL")) {
+      PROFILE_SCOPE("Reload dll");
       game_dll.reset();
       if (auto result = GameDll::load(game_dll_path)) {
         game_dll = std::move(*result);
@@ -1062,17 +1064,19 @@ auto update_local_to_world_matrices(entt::registry &registry) -> void {
 }
 
 auto Dockforge::play() -> void {
-  if (is_playing || !game_dll || !game_dll->game()) return;
+  if (is_playing || !game_dll || (game_dll->game() == nullptr))
+    return;
 
   runtime_scene = std::make_shared<Scene>();
-  runtime_scene->group<Components::Transform, Components::LocalToWorld,
-                       Components::Mesh>();
 
-  std::vector<uint8_t> snapshot_buf;
+  std::vector<u8> snapshot_buf;
   MemoryWriter writer{snapshot_buf};
   SceneSerializer::serialize(*editor_scene, writer);
   MemoryReader reader{snapshot_buf};
   SceneSerializer::deserialize(*runtime_scene, reader);
+
+  runtime_scene->group<Components::Transform, Components::LocalToWorld,
+                       Components::Mesh>();
 
   active_scene = runtime_scene.get();
   game_memory.reset();
@@ -1201,7 +1205,6 @@ void compute_world_matrices(entt::registry &registry) {
 auto Dockforge::render(RenderContext &ctx) -> u64 {
   TracyVkCollectHost(renderer->tracy_vk_ctx);
   if (state.hierarchy_dirty) [[unlikely]] {
-        info("hierarchy_dirty: recomputing world matrices (frame {})", ctx.frame_index);
     compute_world_matrices(active_scene->registry());
     shadow_map_state.invalid = true;
     state.hierarchy_dirty = false;
