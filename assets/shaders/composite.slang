@@ -62,12 +62,10 @@ float4 fragmentMain(V2F input, uniform CompositePushConstants pc) : SV_Target
     float exposure = 1;
     hdr *= exposure;
 
-    // 1. Convert Linear HDR -> Linear LDR (Rec.709)
     float3 ldr = tonemap_aces(hdr);
 
-    // 2. Apply look adjustments safely in linear space
     // ldr = agx_look_punchy(ldr);
 
-    // 3. Return linear LDR. The _SRGB target automatically converts this to sRGB.
+    // _SRGB swapchain target applies gamma automatically
     return float4(ldr, 1.0);
 }

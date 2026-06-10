@@ -273,8 +273,7 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
   entt::entity best = entt::null;
   float best_t = std::numeric_limits<float>::max();
 
-  // 1. View LocalToWorld instead of Transform to get absolute world space
-  // positions
+  // LocalToWorld gives absolute world-space positions; Transform is local only
   for (auto &&[e, ltw, m] :
        active_scene->view<Components::LocalToWorld, Components::Mesh>()
            .each()) {
@@ -361,7 +360,6 @@ auto Dockforge::draw_inspector() -> void {
     return;
   }
 
-  // ── Tag — always visible, inline edit, no remove button ──────────────
   if (auto *tag = entity.try_get<Components::Tag>()) {
     char buf[128];
     std::snprintf(buf, sizeof(buf), "%.*s", static_cast<int>(tag->tag.size()),
@@ -421,13 +419,10 @@ void Dockforge::draw_scene_outliner() {
       if (!filter.PassFilter(label.data()))
         continue;
 
-      // 1. Handle Indentation
       if (cached.depth > 0) {
         ImGui::Indent(static_cast<float>(cached.depth) * 16.0f);
       }
 
-      // 2. Check if this entity has children to determine if we show a dropdown
-      // arrow
       bool has_children = false;
       for (auto child : child_view) {
         if (child_view.get<Components::ParentOf>(child).parent ==
@@ -439,7 +434,6 @@ void Dockforge::draw_scene_outliner() {
 
       bool is_expanded = state.expanded_entities.contains(cached.entity);
 
-      // 3. Draw Dropdown Arrow
       ImGui::PushID(static_cast<int>(static_cast<uint32_t>(cached.entity)));
       if (has_children) {
         ImGuiDir arrow_dir = is_expanded ? ImGuiDir_Down : ImGuiDir_Right;
@@ -459,7 +453,6 @@ void Dockforge::draw_scene_outliner() {
         ImGui::SameLine();
       }
 
-      // 4. Draw Row Text Content
       std::array<char, 128> row_label{};
       if (mesh != nullptr) {
         std::snprintf(row_label.data(), std::size(row_label), "[M] %.*s  (%u)",
@@ -817,7 +810,6 @@ auto Dockforge::build_ui() -> void {
                    ImGuiDockNodeFlags_PassthruCentralNode);
   ImGui::End();
 
-  // ── Viewport panel ───────────────────────────────────────────────────
   ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2{0.0f, 0.0f});
   ImGui::Begin("Viewport");
   ImGui::PopStyleVar();
@@ -1073,14 +1065,11 @@ auto resolve_material_slot(Entity e) -> u32 {
 } // namespace
 
 void compute_world_matrices(entt::registry &registry) {
-    // 1. Set base matrices for all entities with a transform
     auto base_view = registry.view<Components::Transform, Components::LocalToWorld>();
     for (auto &&[entity, xt, ltw] : base_view.each()) {
         ltw.matrix = xt.matrix();
     }
 
-    // 2. Walk hierarchy depth-first without sorting storage
-    // Build parent->children map once
     std::unordered_map<entt::entity, std::vector<entt::entity>> children;
     auto relation_view = registry.view<Components::ParentOf>();
     for (auto entity : relation_view) {
@@ -1089,7 +1078,7 @@ void compute_world_matrices(entt::registry &registry) {
             children[rel.parent].push_back(entity);
     }
 
-    // 3. Propagate from roots only
+    // propagate from roots only — avoids re-multiplying already-resolved children
     std::function<void(entt::entity)> propagate = [&](entt::entity e) {
         auto *parent_ltw = registry.try_get<Components::LocalToWorld>(e);
         if (!parent_ltw) return;
@@ -1395,7 +1384,6 @@ auto prepare_result = renderer->prepare({
         ctx.main_cb, viewport_resources.hierarchical_depth_pyramid_target);
   }
 
-  // ── 4. Forward MSAA pass ────────────────────────────────────────────
   {
     VkRenderingAttachmentInfo forward_color{};
     forward_color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -1543,7 +1531,6 @@ auto prepare_result = renderer->prepare({
     vkCmdEndRendering(ctx.main_cb);
   }
 
-  // ── 7. Present barrier ──────────────────────────────────────────────
   {
     VkImageMemoryBarrier2 present_barrier{};
     present_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;

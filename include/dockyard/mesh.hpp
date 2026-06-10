@@ -69,10 +69,10 @@ struct MeshLod {
   u32 first_index = 0;
 };
 
-static constexpr auto k_lod_min_triangles = 300UZ;
+static constexpr auto lod_min_triangles = 300UZ;
 static constexpr auto max_lods = 6UZ;
 [[nodiscard]] constexpr auto should_generate_lods(const auto &prim) -> bool {
-  return (prim.indices.size() / 3) >= k_lod_min_triangles;
+  return (prim.indices.size() / 3) >= lod_min_triangles;
 }
 
 struct MeshLodGroup {

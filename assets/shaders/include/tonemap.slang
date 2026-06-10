@@ -22,19 +22,19 @@ float3 tonemap_agx(float3 color)
     const float min_ev = -12.4f;
     const float max_ev = 4.0f;
 
-    // 1. Transform to AgX Space
+    // transform to AgX space
     color = mul(AGX_MAT, color);
 
-    // 2. Log encoding
-    color = clamp(color, 1e-10, 10000.0); // Avoid log(0)
+    // log encoding
+    color = clamp(color, 1e-10, 10000.0); // avoid log(0)
     color = log2(color);
     color = (color - min_ev) / (max_ev - min_ev);
     color = clamp(color, 0.0, 1.0);
 
-    // 3. Apply the AgX sigmoid curve
+    // AgX sigmoid curve
     color = agx_default_curve(color);
 
-    // 4. Transform back to Linear Rec.709
+    // transform back to linear Rec.709
     color = mul(AGX_MAT_INV, color);
 
     return color;

@@ -21,8 +21,6 @@ float4 sample_material_tex(uint idx, float2 uv) {
     return sampled_images[NonUniformResourceIndex(idx)].Sample(samplers[1], uv);
 }
 
-// ── Vertex ───────────────────────────────────────────────────────────────────
-
 [shader("vertex")]
 V2F vertexMain(uint vertex_id: SV_VulkanVertexID,
                uint instance_id: SV_InstanceID,
@@ -63,8 +61,6 @@ V2F vertexMain(uint vertex_id: SV_VulkanVertexID,
 
     return output;
 }
-
-// ── Fragment ─────────────────────────────────────────────────────────────────
 
 [shader("fragment")]
 float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
@@ -112,7 +108,6 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
     float3 f0 = lerp(float3(0.04f), albedo.rgb, metallic);
     float ndotv_safe = max(dot(n, v), 1e-5f);
 
-    // ── Direct Lighting ──
     const float3 sun_color = float3(1.0f, 0.95f, 0.8f);
     const float3 sun_dir = normalize(pc.frame_ubo.sun_direction.xyz);
 

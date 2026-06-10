@@ -74,10 +74,6 @@ struct GPUMaterial {
   // Flags for shader branching
   MaterialFlags flags;
 
-  // ───────────────────────────────────────────────────────────────────────
-  // Extensions & advanced features
-  // ───────────────────────────────────────────────────────────────────────
-
   // Transmission (glass refraction) — KHR_materials_transmission
   float transmission_factor; // [0,1]: 0 = opaque, 1 = fully transmissive
 
@@ -85,7 +81,6 @@ struct GPUMaterial {
   float anisotropy_factor;   // [0,1]: strength of anisotropic reflection
   float anisotropy_rotation; // [0,1]: rotation angle (normalized to [0, 2π])
 
-  // Cull mode: determines which faces to render
   u32 cull_mode;
 
   // UV transformation (cheap variation without extra textures)
@@ -99,11 +94,7 @@ static_assert(std::is_trivially_copyable_v<GPUMaterial>);
 static_assert(sizeof(GPUMaterial) % 16 == 0,
               "GPUMaterial must be 16-byte aligned");
 
-// ─────────────────────────────────────────────────────────────────────────────
-// CPU-side material asset — mirror of GPU, plus resolve function
-// Useful for: editor workflows, material instantiation, per-instance variants
-// ─────────────────────────────────────────────────────────────────────────────
-
+// CPU-side mirror of GPUMaterial; used for editor workflows and per-instance variants.
 struct MaterialAsset {
   std::string name;
 
@@ -143,9 +134,9 @@ struct MaterialAsset {
 };
 
 struct AllocatedOffset {
-  const usize vertex_offset;
-  const usize shadow_vertex_offset;
-  const usize index_offset;
+  usize vertex_offset;
+  usize shadow_vertex_offset;
+  usize index_offset;
 };
 
 struct MaterialOffset {
