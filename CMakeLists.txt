@@ -483,6 +483,8 @@ add_library(dockyard STATIC
   src/dockyard/component_traits.cpp
   src/dockyard/bindless_handle.cpp
   src/dockyard/texture_upload_pool.cpp
+  src/dockyard/game_memory.cpp
+  src/dockyard/game_dll.cpp
 )
 
 dockyard_configure_renderdoc(dockyard
@@ -579,6 +581,22 @@ target_set_warnings(dockforge)
 
 set_target_properties(dockforge PROPERTIES
   FOLDER apps
+)
+
+add_library(sandbox SHARED
+  src/sandbox/sandbox.cpp
+)
+
+target_link_libraries(sandbox PRIVATE dockyard)
+target_enable_native_arch(sandbox)
+
+target_compile_options(sandbox PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/MP>
+)
+
+set_target_properties(sandbox PROPERTIES
+  FOLDER apps
+  PREFIX ""
 )
 
 if(DOCKYARD_BUILD_TOOLS)
