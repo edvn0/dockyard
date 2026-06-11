@@ -6,11 +6,11 @@
 #include <dockforge/matrix_cache.hpp>
 
 #include <dockyard/binary_stream.hpp>
-#include <dockyard/game_dll.hpp>
-#include <dockyard/game_memory.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/context.hpp>
+#include <dockyard/game_dll.hpp>
+#include <dockyard/game_memory.hpp>
 #include <dockyard/imgui_renderer.hpp>
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene.hpp>
@@ -19,11 +19,11 @@
 #include <dockyard/vfs.hpp>
 
 #include <GLFW/glfw3.h>
+#include <dockforge/component_inspector.hpp>
+#include <dockforge/component_renderers.hpp>
 #include <glm/gtc/random.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
-#include <dockforge/component_inspector.hpp>
-#include <dockforge/component_renderers.hpp>
 
 #include <imgui.h>
 
@@ -68,10 +68,10 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   context = &ctx.context;
 
   game_memory = GameMemory::create();
-
-  if (auto result = GameDll::load("build/local-release-clang/sandbox.so")) {
+  if (auto result = GameDll::load(
+          VFSPath::create("binary://sandbox.{}", shared_extension))) {
     game_dll = std::move(*result);
-    game_dll->start_watching();
+    game_dll->start_watching(renderer->thread_pool);
   } else {
     warn("GameDll: {}", result.error());
   }
@@ -199,8 +199,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     for (auto i = 0; i < 300; i++) {
       auto entity = active_scene->make("Helmet", parent);
       entity.emplace<Components::Mesh>(*loaded);
-      entity.get<Components::Transform>().mut().position = glm::linearRand(
-          glm::vec3{-size}, glm::vec3{size});
+      entity.get<Components::Transform>().mut().position =
+          glm::linearRand(glm::vec3{-size}, glm::vec3{size});
     }
   }
 
@@ -230,10 +230,9 @@ auto Dockforge::on_mouse_moved(const events::MouseMoved &e) -> void {
     editor_camera->on_mouse_delta(e.dx, e.dy);
 }
 
-auto Dockforge::on_mouse_scrolled(const events::MouseScrolled& e) -> void {
-	editor_camera->on_mouse_scrolled(e);
+auto Dockforge::on_mouse_scrolled(const events::MouseScrolled &e) -> void {
+  editor_camera->on_mouse_scrolled(e);
 }
-
 
 auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
   if (e.key == GLFW_KEY_ESCAPE) {
@@ -741,8 +740,6 @@ auto draw_performance_overlay() -> void {
 auto Dockforge::draw_hdr_selector() -> void {
   static NullableVFSPath selected_hdr;
 
-  auto &renderer = *this->renderer;
-
   if (!ImGui::Begin("Environment")) {
     ImGui::End();
     return;
@@ -753,8 +750,7 @@ auto Dockforge::draw_hdr_selector() -> void {
   if (!selected_hdr.valid()) {
     ImGui::TextDisabled("No external HDR selected");
   } else {
-    ImGui::TextWrapped("%.*s",
-                       static_cast<int>(selected_hdr.view().size()),
+    ImGui::TextWrapped("%.*s", static_cast<int>(selected_hdr.view().size()),
                        selected_hdr.view().data());
   }
 
@@ -771,12 +767,11 @@ auto Dockforge::draw_hdr_selector() -> void {
         NFD::OpenDialog(out_path, filters, std::size(filters));
 
     if (result == NFD_OKAY) {
-      const auto virtual_hdr_path =
-          VFS::get().mount_file("external_hdr",
-                                std::filesystem::path{out_path.get()});
+      const auto virtual_hdr_path = VFS::get().mount_file(
+          "external_hdr", std::filesystem::path{out_path.get()});
 
       selected_hdr = NullableVFSPath{virtual_hdr_path};
-      renderer.set_hdr_map(virtual_hdr_path);
+      renderer->set_hdr_map(virtual_hdr_path);
     } else if (result == NFD_ERROR) {
       warn("Native file dialog failed: {}", NFD::GetError());
     }
@@ -787,15 +782,15 @@ auto Dockforge::draw_hdr_selector() -> void {
   if (ImGui::Button("Use packaged sunset")) {
     const auto sunset = VFSPath::create("textures://env/sunset_f16.ktx2");
     selected_hdr = NullableVFSPath{sunset};
-    renderer.set_hdr_map(sunset);
+    renderer->set_hdr_map(sunset);
   }
 
-  if (renderer.ibl_probe.valid()) {
+  if (renderer->ibl_probe.valid()) {
     ImGui::SeparatorText("GPU handles");
-    ImGui::Text("Env map:     %u", renderer.ibl_probe.env_map.index());
-    ImGui::Text("Irradiance:  %u", renderer.ibl_probe.irradiance.index());
-    ImGui::Text("Prefiltered: %u", renderer.ibl_probe.prefiltered.index());
-    ImGui::Text("BRDF LUT:    %u", renderer.ibl_probe.brdf_lut.index());
+    ImGui::Text("Env map:     %u", renderer->ibl_probe.env_map.index());
+    ImGui::Text("Irradiance:  %u", renderer->ibl_probe.irradiance.index());
+    ImGui::Text("Prefiltered: %u", renderer->ibl_probe.prefiltered.index());
+    ImGui::Text("BRDF LUT:    %u", renderer->ibl_probe.brdf_lut.index());
   }
 
   ImGui::End();
@@ -820,18 +815,20 @@ auto Dockforge::draw_toolbar() -> void {
   if (!is_playing) {
     ImGui::SameLine();
     ImGui::SetNextItemWidth(300.0f);
-    char buf[256]{};
-    std::snprintf(buf, sizeof(buf), "%s", game_dll_path.c_str());
-    if (ImGui::InputText("Game DLL", buf, sizeof(buf)))
-      game_dll_path = buf;
+
+    std::array<char, 256> buf{};
+    std::ranges::copy(game_dll_stem, buf.begin());
+    if (ImGui::InputText("Game DLL", buf.data(), buf.size()))
+      game_dll_stem = buf.data();
 
     ImGui::SameLine();
     if (ImGui::Button("Reload DLL")) {
       PROFILE_SCOPE("Reload dll");
       game_dll.reset();
-      if (auto result = GameDll::load(game_dll_path)) {
+      auto path = VFSPath::create("binary://{}{}", game_dll_stem, shared_extension);
+      if (auto result = dy::GameDll::load(path)) {
         game_dll = std::move(*result);
-        game_dll->start_watching();
+        game_dll->start_watching(renderer->thread_pool);
       } else {
         warn("GameDll: {}", result.error());
       }
@@ -967,12 +964,12 @@ auto Dockforge::build_ui() -> void {
       state.hierarchy_dirty = true;
     }
 
-        ImGui::Separator();
+    ImGui::Separator();
     ImGui::SeparatorText("Shadow Settings");
-    ImGui::DragFloat("Shadow Distance", &shadow_map_state.far_plane,
-                     1.0F, 10.0F, 1000.0F, "%.0f m");
+    ImGui::DragFloat("Shadow Distance", &shadow_map_state.far_plane, 1.0F,
+                     10.0F, 1000.0F, "%.0f m");
     if (ImGui::IsItemDeactivatedAfterEdit())
-        shadow_map_state.invalid = true;
+      shadow_map_state.invalid = true;
   }
   ImGui::End();
 
@@ -1021,7 +1018,8 @@ auto Dockforge::build_ui() -> void {
 }
 
 auto Dockforge::destroy() -> void {
-  if (is_playing) stop();
+  if (is_playing)
+    stop();
 
   if (game_dll) {
     game_dll->stop_watching();
@@ -1086,7 +1084,8 @@ auto Dockforge::play() -> void {
 }
 
 auto Dockforge::stop() -> void {
-  if (!is_playing) return;
+  if (!is_playing)
+    return;
 
   if (game_dll && game_dll->game())
     game_dll->game()->destroy(&game_memory, active_scene);
@@ -1138,23 +1137,24 @@ void emit_barrier(VkCommandBuffer cmd,
 }
 
 void Dockforge::flush_material_overrides() {
-    auto view = active_scene->registry().view<Components::MaterialOverride>();
-    for (auto&& [e, override_slot] : view.each()) {
-      if (override_slot.gpu_slot ==
-          Components::MaterialOverride::invalid_material) {
-        if (auto slot = renderer->override_pool.alloc()) {
-          override_slot.gpu_slot = *slot;
-          override_slot.dirty = true;
-        } else {
-          warn("MaterialOverridePool full — override skipped this frame");
-        }
+  auto view = active_scene->registry().view<Components::MaterialOverride>();
+  for (auto &&[e, override_slot] : view.each()) {
+    if (override_slot.gpu_slot ==
+        Components::MaterialOverride::invalid_material) {
+      if (auto slot = renderer->override_pool.alloc()) {
+        override_slot.gpu_slot = *slot;
+        override_slot.dirty = true;
+      } else {
+        warn("MaterialOverridePool full — override skipped this frame");
       }
-        if (override_slot.dirty) {
-            renderer->geometry_pool->get_materials_mut(override_slot.gpu_slot, 1)[0] = override_slot.material;
-            renderer->geometry_pool->flush_material(override_slot.gpu_slot);
-            override_slot.dirty = false;
-        }
     }
+    if (override_slot.dirty) {
+      renderer->geometry_pool->get_materials_mut(override_slot.gpu_slot, 1)[0] =
+          override_slot.material;
+      renderer->geometry_pool->flush_material(override_slot.gpu_slot);
+      override_slot.dirty = false;
+    }
+  }
 }
 
 namespace {
@@ -1169,37 +1169,40 @@ auto resolve_material_slot(Entity e) -> u32 {
 } // namespace
 
 void compute_world_matrices(entt::registry &registry) {
-    auto base_view = registry.view<Components::Transform, Components::LocalToWorld>();
-    for (auto &&[entity, xt, ltw] : base_view.each()) {
-        ltw.matrix = xt.matrix();
-    }
+  auto base_view =
+      registry.view<Components::Transform, Components::LocalToWorld>();
+  for (auto &&[entity, xt, ltw] : base_view.each()) {
+    ltw.matrix = xt.matrix();
+  }
 
-    std::unordered_map<entt::entity, std::vector<entt::entity>> children;
-    auto relation_view = registry.view<Components::ParentOf>();
-    for (auto entity : relation_view) {
-        auto &rel = relation_view.get<Components::ParentOf>(entity);
-        if (registry.valid(rel.parent))
-            children[rel.parent].push_back(entity);
-    }
+  std::unordered_map<entt::entity, std::vector<entt::entity>> children;
+  auto relation_view = registry.view<Components::ParentOf>();
+  for (auto entity : relation_view) {
+    auto &rel = relation_view.get<Components::ParentOf>(entity);
+    if (registry.valid(rel.parent))
+      children[rel.parent].push_back(entity);
+  }
 
-    // propagate from roots only — avoids re-multiplying already-resolved children
-    std::function<void(entt::entity)> propagate = [&](entt::entity e) {
-        auto *parent_ltw = registry.try_get<Components::LocalToWorld>(e);
-        if (!parent_ltw) return;
-        auto it = children.find(e);
-        if (it == children.end()) return;
-        for (auto child : it->second) {
-            auto *child_ltw = registry.try_get<Components::LocalToWorld>(child);
-            if (child_ltw)
-                child_ltw->matrix = parent_ltw->matrix * child_ltw->matrix;
-            propagate(child);
-        }
-    };
-
-    for (auto entity : base_view) {
-        if (!registry.any_of<Components::ParentOf>(entity))
-            propagate(entity);
+  // propagate from roots only — avoids re-multiplying already-resolved children
+  std::function<void(entt::entity)> propagate = [&](entt::entity e) {
+    auto *parent_ltw = registry.try_get<Components::LocalToWorld>(e);
+    if (!parent_ltw)
+      return;
+    auto it = children.find(e);
+    if (it == children.end())
+      return;
+    for (auto child : it->second) {
+      auto *child_ltw = registry.try_get<Components::LocalToWorld>(child);
+      if (child_ltw)
+        child_ltw->matrix = parent_ltw->matrix * child_ltw->matrix;
+      propagate(child);
     }
+  };
+
+  for (auto entity : base_view) {
+    if (!registry.any_of<Components::ParentOf>(entity))
+      propagate(entity);
+  }
 }
 
 auto Dockforge::render(RenderContext &ctx) -> u64 {
@@ -1259,14 +1262,16 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     };
   }
 
-auto prepare_result = renderer->prepare({
-    .frame_index  = ctx.frame_index,
-    .view         = view,
-    .projection   = projection,
-    .camera_near_far = glm::vec2(editor_camera->near_plane(), editor_camera->far_plane()),
-    .shadow_near_far = glm::vec2(shadow_map_state.near_plane, shadow_map_state.far_plane),
-    .point_lights = std::span(gpu_lights.data(), light_count),
-});
+  auto prepare_result = renderer->prepare({
+      .frame_index = ctx.frame_index,
+      .view = view,
+      .projection = projection,
+      .camera_near_far =
+          glm::vec2(editor_camera->near_plane(), editor_camera->far_plane()),
+      .shadow_near_far =
+          glm::vec2(shadow_map_state.near_plane, shadow_map_state.far_plane),
+      .point_lights = std::span(gpu_lights.data(), light_count),
+  });
   if (prepare_result.failed()) {
     return ctx.next_frame_wait_value();
   }
@@ -1338,13 +1343,15 @@ auto prepare_result = renderer->prepare({
         .extent = shadow_extent,
     };
 
-
-    const auto& pipeline = renderer->pipeline_registry->get(renderer->shadow_pipeline);
+    const auto &pipeline =
+        renderer->pipeline_registry->get(renderer->shadow_pipeline);
     vkCmdBindPipeline(ctx.main_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    vkCmdBindDescriptorSets(ctx.main_cb, VK_PIPELINE_BIND_POINT_GRAPHICS, renderer->pipeline_layout,
-        0U, 1u, &renderer->bindless.set, 0u, nullptr);
-    vkCmdBindIndexBuffer(ctx.main_cb, renderer->geometry_pool->index_buffer->get_buffer(), 0u,
-        VK_INDEX_TYPE_UINT32);
+    vkCmdBindDescriptorSets(ctx.main_cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            renderer->pipeline_layout, 0U, 1u,
+                            &renderer->bindless.set, 0u, nullptr);
+    vkCmdBindIndexBuffer(ctx.main_cb,
+                         renderer->geometry_pool->index_buffer->get_buffer(),
+                         0u, VK_INDEX_TYPE_UINT32);
     for (u32 cascade_idx = 0U; cascade_idx < shadow_map_cascade_count;
          ++cascade_idx) {
       VkRenderingAttachmentInfo depth_att{};

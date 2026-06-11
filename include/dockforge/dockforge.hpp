@@ -70,7 +70,7 @@ struct Dockforge : App {
   std::unique_ptr<dy::GameDll> game_dll;
   dy::GameMemory               game_memory;
   bool                         is_playing   = false;
-  std::string                  game_dll_path = "sandbox.dll";
+  std::string                  game_dll_stem = "sandbox";
 
   ~Dockforge() override;
 

@@ -278,16 +278,16 @@ if(DOCKYARD_BUILD_TOOLS)
 endif()
 
 if (DOCKYARD_BUILD_TESTING)
-CPMAddPackage(
+  CPMAddPackage(
   NAME doctest
   GITHUB_REPOSITORY doctest/doctest
   GIT_TAG v2.5.2
 )
-enable_testing()
-if(doctest_ADDED)
-  # Append doctest's custom cmake folder to your module path
-  list(APPEND CMAKE_MODULE_PATH "${doctest_SOURCE_DIR}/scripts/cmake")
-endif()
+  enable_testing()
+  if(doctest_ADDED)
+    # Append doctest's custom cmake folder to your module path
+    list(APPEND CMAKE_MODULE_PATH "${doctest_SOURCE_DIR}/scripts/cmake")
+  endif()
 endif()
 
 function(target_set_warnings target)
@@ -615,6 +615,14 @@ target_compile_options(sandbox PRIVATE
 set_target_properties(sandbox PROPERTIES
   FOLDER apps
   PREFIX ""
+  RUNTIME_OUTPUT_DIRECTORY         "${ASSETS_ROOT_ABS}/binary"
+  RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${ASSETS_ROOT_ABS}/binary"
+  RUNTIME_OUTPUT_DIRECTORY_RELEASE "${ASSETS_ROOT_ABS}/binary"
+  RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${ASSETS_ROOT_ABS}/binary"
+  LIBRARY_OUTPUT_DIRECTORY         "${ASSETS_ROOT_ABS}/binary"
+  LIBRARY_OUTPUT_DIRECTORY_DEBUG   "${ASSETS_ROOT_ABS}/binary"
+  LIBRARY_OUTPUT_DIRECTORY_RELEASE "${ASSETS_ROOT_ABS}/binary"
+  LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${ASSETS_ROOT_ABS}/binary"
 )
 
 if(DOCKYARD_BUILD_TOOLS)
@@ -635,31 +643,95 @@ if(DOCKYARD_BUILD_TOOLS)
   )
 endif()
 
-# ==========================================
-# Automated Unit Tests
-# ==========================================
-
 if (DOCKYARD_BUILD_TESTING)
-# ==========================================
-# Automated Unit Tests
-# ==========================================
+  set(TEST_DLL_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/test_dlls")
 
-add_executable(dockyard-testing
-  tests/test_main.cpp
-  tests/test_scene_serialisation.cpp
-)
+  add_library(test-dll-valid SHARED
+    tests/helpers/dll_valid.cpp
+  )
+  target_include_directories(test-dll-valid PRIVATE include)
+  set_target_properties(test-dll-valid PROPERTIES
+    PREFIX ""
+    RUNTIME_OUTPUT_DIRECTORY                    "${TEST_DLL_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG              "${TEST_DLL_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE            "${TEST_DLL_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO     "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY                    "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_DEBUG              "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE            "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO     "${TEST_DLL_OUTPUT_DIR}"
+    FOLDER tests/helpers
+  )
 
-target_enable_native_arch(dockyard-testing)
-target_set_warnings(dockyard-testing)
+  add_library(test-dll-no-symbol SHARED
+    tests/helpers/dll_no_symbol.cpp
+  )
+  set_target_properties(test-dll-no-symbol PROPERTIES
+    PREFIX ""
+    RUNTIME_OUTPUT_DIRECTORY                    "${TEST_DLL_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG              "${TEST_DLL_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE            "${TEST_DLL_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO     "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY                    "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_DEBUG              "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE            "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO     "${TEST_DLL_OUTPUT_DIR}"
+    FOLDER tests/helpers
+  )
 
-target_link_libraries(dockyard-testing PRIVATE
-  dockyard
-  doctest::doctest
-)
+  add_library(test-dll-null-factory SHARED
+    tests/helpers/dll_null_factory.cpp
+  )
+  target_include_directories(test-dll-null-factory PRIVATE include)
+  set_target_properties(test-dll-null-factory PROPERTIES
+    PREFIX ""
+    RUNTIME_OUTPUT_DIRECTORY                    "${TEST_DLL_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG              "${TEST_DLL_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE            "${TEST_DLL_OUTPUT_DIR}"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO     "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY                    "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_DEBUG              "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELEASE            "${TEST_DLL_OUTPUT_DIR}"
+    LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO     "${TEST_DLL_OUTPUT_DIR}"
+    FOLDER tests/helpers
+  )
 
-include(doctest)
+  add_executable(dockyard-testing
+    tests/test_main.cpp
+    tests/test_scene_serialisation.cpp
+    tests/test_game_dll.cpp
+  )
 
-doctest_discover_tests(dockyard-testing)
+  add_dependencies(dockyard-testing
+    test-dll-valid
+    test-dll-no-symbol
+    test-dll-null-factory
+  )
 
-set_solution_folder("tests" dockyard-testing)
+  target_enable_native_arch(dockyard-testing)
+  target_set_warnings(dockyard-testing)
+
+  target_compile_definitions(dockyard-testing PRIVATE
+      "TEST_DLL_DIR=\"${TEST_DLL_OUTPUT_DIR}\""
+      "TEST_DLL_VALID_NAME=\"$<TARGET_FILE_NAME:test-dll-valid>\""
+      "TEST_DLL_NO_SYMBOL_NAME=\"$<TARGET_FILE_NAME:test-dll-no-symbol>\""
+      "TEST_DLL_NULL_FACTORY_NAME=\"$<TARGET_FILE_NAME:test-dll-null-factory>\""
+      "TEST_DLL_SUFFIX=\"${CMAKE_SHARED_LIBRARY_SUFFIX}\""
+  )
+
+  target_link_libraries(dockyard-testing PRIVATE
+    dockyard
+    doctest::doctest
+  )
+
+  include(doctest)
+
+  doctest_discover_tests(dockyard-testing)
+
+  set_solution_folder("tests"
+    dockyard-testing
+    test-dll-valid
+    test-dll-no-symbol
+    test-dll-null-factory
+  )
 endif()

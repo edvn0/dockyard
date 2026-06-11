@@ -1,13 +1,13 @@
 #include "dockyard/vfs_path.hpp"
 #include <dockyard/vfs.hpp>
 
-
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
 
 namespace dy {
 
-  namespace {
+namespace {
 
 auto valid_vfs_scheme(std::string_view scheme) -> bool {
   if (scheme.empty())
@@ -24,7 +24,7 @@ auto generic_vfs_filename(const std::filesystem::path &path) -> std::string {
 
 } // namespace
 
-void VFS::initialize(const std::filesystem::path& assets_root) {
+void VFS::initialize(const std::filesystem::path &assets_root) {
   std::scoped_lock lock(mutex);
 
   if (!std::filesystem::exists(assets_root) ||
@@ -44,11 +44,24 @@ void VFS::initialize(const std::filesystem::path& assets_root) {
   mounts["editor"] = root / "editor";
   mounts["textures"] = root / "textures";
   mounts["meshes"] = root / "meshes";
+  mounts["binary"] = root / "binary";
 
   info("[VFS] Initialized with root: {}", root);
   for (auto &&[k, v] : mounts) {
     info("\t[VFS]: Mount {} -> {}", k, v);
   }
+}
+
+auto VFS::last_write_time(const VFSPath &path)
+    -> std::expected<std::filesystem::file_time_type, std::error_code> {
+  std::error_code ec{};
+  auto const time{std::filesystem::last_write_time(resolve(path), ec)};
+
+  if (ec) {
+    return std::unexpected{ec};
+  }
+
+  return time;
 }
 
 auto VFS::resolve(const VFSPath &virtual_path) -> std::filesystem::path {
@@ -190,11 +203,12 @@ auto VFS::mount(std::string_view scheme,
   info("[VFS] Mount {} -> {}", scheme, canonical_root.string());
 }
 
-auto VFS::mount_file(std::string_view scheme,
-                     const std::filesystem::path &file) -> VFSPath {
+auto VFS::mount_file(std::string_view scheme, const std::filesystem::path &file)
+    -> VFSPath {
   ensure_initialised();
 
-  if (!std::filesystem::exists(file) || !std::filesystem::is_regular_file(file)) {
+  if (!std::filesystem::exists(file) ||
+      !std::filesystem::is_regular_file(file)) {
     error("VFS: mount_file target is not a file: {}", file.string());
     std::abort();
   }

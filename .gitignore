@@ -23,3 +23,4 @@ assets/textures/**/*.exr
 assets/textures/**/*.ktx2
 assets/textures/**/*.ktx
 
+assets/binary/**/*

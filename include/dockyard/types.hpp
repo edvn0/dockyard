@@ -2,14 +2,13 @@
 
 #include <dockyard/log.hpp>
 
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string_view>
-#include <array>
 #include <unordered_map>
-
 
 namespace dy {
 
@@ -31,8 +30,7 @@ using f32 = float;
 using f64 = double;
 
 inline constexpr u32 frames_in_flight = 2;
-  template<typename T>
-  using FrameArray = std::array<T, frames_in_flight>;
+template <typename T> using FrameArray = std::array<T, frames_in_flight>;
 
 constexpr usize next_power_of_two(usize n) {
   if (n == 0)
@@ -123,5 +121,11 @@ struct NanoProfiler {
     h = (h ^ p[i]) * 1099511628211ULL;
   return h;
 }
+
+#if _WIN32
+inline constexpr std::string_view shared_extension = "dll";
+#else
+inline constexpr std::string_view shared_extension = "so";
+#endif
 
 } // namespace dy

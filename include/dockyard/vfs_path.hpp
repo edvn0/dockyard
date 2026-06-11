@@ -102,10 +102,16 @@ struct NullableVFSPath {
     };
   }
 
+  auto operator=(const VFSPath& other) -> auto& {
+      path = other;
+      return *this;
+  }
+
   [[nodiscard]] auto valid() const -> bool { return path.has_value(); }
   [[nodiscard]] auto view() const -> std::string_view {
     return path ? path->view() : std::string_view{};
   }
+  [[nodiscard]] auto value() const { return *path; }
 };
 
 } // namespace dy

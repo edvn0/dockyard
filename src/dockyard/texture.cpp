@@ -351,10 +351,6 @@ auto set_view_debug_name(VkDevice device, VkImageView view,
 
 } // namespace
 
-// ---------------------------------------------------------------------------
-// Texture::load_ktx2_hdr_texture
-// ---------------------------------------------------------------------------
-
 auto Texture::load_ktx2_hdr_texture(const VulkanContext &ctx,
                                      const VFSPath &path) -> Texture {
   const auto real_path = VFS::get().resolve(path);
@@ -392,10 +388,6 @@ auto Texture::load_ktx2_hdr_texture(const VulkanContext &ctx,
       .storage_view  = false,
   });
 }
-
-// ---------------------------------------------------------------------------
-// Texture::destroy
-// ---------------------------------------------------------------------------
 
 auto Texture::destroy(const VulkanContext &ctx, SubImagePool *sub_images)
     -> void {
@@ -472,9 +464,6 @@ void Texture::destroy(const VulkanContext &ctx) {
   *this = {};
 }
 
-// ---------------------------------------------------------------------------
-// Texture::create
-// ---------------------------------------------------------------------------
 
 auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
                      u32 height, VkFormat format, VkImageUsageFlags usage,
@@ -563,10 +552,6 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
 
   return rt;
 }
-
-// ---------------------------------------------------------------------------
-// Texture::from_bytes
-// ---------------------------------------------------------------------------
 
 auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
                          const CreateInfo &ci) -> Texture {
@@ -796,10 +781,6 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
   return tex;
 }
 
-// ---------------------------------------------------------------------------
-// Texture::create_cubemap
-// ---------------------------------------------------------------------------
-
 auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
                              const CubemapInfo &ci) -> Texture {
   Texture tex{};
@@ -896,10 +877,6 @@ auto Texture::create_cubemap(const VulkanContext &ctx, std::string_view name,
 
   return tex;
 }
-
-// ---------------------------------------------------------------------------
-// Texture::register_sub_views
-// ---------------------------------------------------------------------------
 
 auto Texture::register_sub_views(const VulkanContext &ctx,
                                  SubImagePool &sub_images,

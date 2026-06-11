@@ -13,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -36,7 +37,7 @@ public:
    * @brief Required Initialization.
    * @param assets_root The physical path to the primary assets folder.
    */
-  void initialize(const std::filesystem::path&);
+  void initialize(const std::filesystem::path &);
 
   /**
    * @brief Maps "prefix://path" to an absolute physical path.
@@ -65,20 +66,20 @@ public:
   auto read_binary_async(std::string_view virtual_path)
       -> std::future<std::expected<std::vector<u32>, std::string>>;
 
-/**
- * @brief Adds or replaces a mount point.
- * Example: mount("external_hdr", "C:/assets/hdr") allows
- * "external_hdr://studio.hdr".
- */
-auto mount(std::string_view scheme, const std::filesystem::path &physical_root)
-    -> void;
+  /**
+   * @brief Adds or replaces a mount point.
+   * Example: mount("external_hdr", "C:/assets/hdr") allows
+   * "external_hdr://studio.hdr".
+   */
+  auto mount(std::string_view scheme,
+             const std::filesystem::path &physical_root) -> void;
 
-/**
- * @brief Mounts the parent directory of a file and returns a VFS path to the file.
- * Example: C:/foo/studio.hdr -> external_hdr://studio.hdr
- */
-auto mount_file(std::string_view scheme, const std::filesystem::path &file)
-    -> VFSPath;
+  /**
+   * @brief Mounts the parent directory of a file and returns a VFS path to the
+   * file. Example: C:/foo/studio.hdr -> external_hdr://studio.hdr
+   */
+  auto mount_file(std::string_view scheme, const std::filesystem::path &file)
+      -> VFSPath;
 
   struct Filter {
     std::unordered_set<std::string_view> ignored_dirs;
@@ -86,6 +87,8 @@ auto mount_file(std::string_view scheme, const std::filesystem::path &file)
   };
   auto list(std::string_view virtual_path, const Filter &filter = {})
       -> std::vector<std::filesystem::path>;
+
+  auto last_write_time(const VFSPath &) -> std::expected<std::filesystem::file_time_type, std::error_code>;
 
   auto initialised() const -> bool;
 
