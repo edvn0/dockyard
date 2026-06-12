@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <fstream>
 
 namespace dy {
 
@@ -50,6 +51,34 @@ void VFS::initialize(const std::filesystem::path &assets_root) {
   for (auto &&[k, v] : mounts) {
     info("\t[VFS]: Mount {} -> {}", k, v);
   }
+}
+
+auto VFS::resolve_to_output_stream(const VFSPath &path)
+    -> std::expected<std::ofstream, std::string> {
+  return resolve_to_output_stream(path.view());
+}
+auto VFS::resolve_to_input_stream(const VFSPath &path)
+    -> std::expected<std::ifstream, std::string> {
+  return resolve_to_input_stream(path.view());
+}
+auto VFS::resolve_to_output_stream(std::string_view p)
+    -> std::expected<std::ofstream, std::string> {
+  auto real_path = resolve(p);
+  std::ofstream f{real_path.string()};
+  if (!f.is_open())
+    return std::unexpected(
+        std::format("Failed to open '{}' for writing", real_path.string()));
+  return f;
+}
+
+auto VFS::resolve_to_input_stream(std::string_view p)
+    -> std::expected<std::ifstream, std::string> {
+  auto real_path = resolve(p);
+  std::ifstream f{real_path.string()};
+  if (!f.is_open())
+    return std::unexpected(
+        std::format("Failed to open '{}' for reading", real_path.string()));
+  return f;
 }
 
 auto VFS::last_write_time(const VFSPath &path)

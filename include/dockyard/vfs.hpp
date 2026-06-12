@@ -48,6 +48,15 @@ public:
    */
   auto resolve(const VFSPath &virtual_path) -> std::filesystem::path;
 
+  auto resolve_to_output_stream(const VFSPath &)
+      -> std::expected<std::ofstream, std::string>;
+  auto resolve_to_output_stream(std::string_view)
+      -> std::expected<std::ofstream, std::string>;
+  auto resolve_to_input_stream(const VFSPath &)
+      -> std::expected<std::ifstream, std::string>;
+  auto resolve_to_input_stream(std::string_view)
+      -> std::expected<std::ifstream, std::string>;
+
   /**
    * @brief Synchronous binary read.
    */

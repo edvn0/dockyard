@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <thread>
+#include <type_traits>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -179,7 +180,7 @@ auto GameDll::do_reload() -> bool {
         dy::error("GameDll: reload copy failed: {}", ec.message());
 
         generation  = old_generation;
-        loaded_path = old_loaded_path;
+        loaded_path = std::move(old_loaded_path);
         reload_pending = true;
 
         return false;
@@ -192,7 +193,7 @@ auto GameDll::do_reload() -> bool {
 
         std::filesystem::remove(loaded_path, ec);
         generation  = old_generation;
-        loaded_path = old_loaded_path;
+        loaded_path = std::move(old_loaded_path);
         reload_pending = true;
 
         return false;
@@ -208,7 +209,7 @@ auto GameDll::do_reload() -> bool {
         std::filesystem::remove(loaded_path, ec);
 
         generation  = old_generation;
-        loaded_path = old_loaded_path;
+        loaded_path = std::move(old_loaded_path);
         reload_pending = true;
 
         return false;
@@ -223,7 +224,7 @@ auto GameDll::do_reload() -> bool {
         std::filesystem::remove(loaded_path, ec);
 
         generation  = old_generation;
-        loaded_path = old_loaded_path;
+        loaded_path = std::move(old_loaded_path);
         reload_pending = true;
 
         return false;
@@ -232,9 +233,8 @@ auto GameDll::do_reload() -> bool {
     game_instance = new_game_instance;
     handle        = new_handle;
 
-    if (old_game_instance != nullptr) {
-        delete old_game_instance;
-    }
+    std::default_delete<IGame> del{};
+    del(old_game_instance);
 
     if (old_handle != nullptr) {
         platform_free(old_handle);

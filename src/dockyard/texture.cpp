@@ -69,7 +69,7 @@ struct KtxTexture2Guard {
 };
 
 [[nodiscard]] auto ktx_error_string(KTX_error_code error) -> std::string {
-  return std::format("{}", std::to_underlying(error));
+  return std::format("{}", ktxErrorString(error));
 }
 
 [[nodiscard]] auto is_sampled_format_supported(const VulkanContext &ctx,
@@ -1012,7 +1012,6 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
         std::format("stbi_loadf failed: {}", stbi_failure_reason()));
   }
 
-  // stbi lifetime guard
   struct StbiGuard {
     float *ptr;
     explicit StbiGuard(float *p) : ptr(p) {}
@@ -1029,18 +1028,20 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
     }
   } stbi_guard(data);
 
+  const u32 num_levels = static_cast<u32>(
+      std::bit_width(static_cast<u32>(std::max(width, height))));
+
   ktxTextureCreateInfo create_info{
-      .vkFormat         = VK_FORMAT_R16G16B16A16_SFLOAT,
-      .baseWidth        = static_cast<u32>(width),
-      .baseHeight       = static_cast<u32>(height),
-      .baseDepth        = 1,
-      .numDimensions    = 2,
-      .numLevels        = static_cast<u32>(
-          std::bit_width(static_cast<u32>(std::max(width, height)))),
-      .numLayers        = 1,
-      .numFaces         = 1,
-      .isArray          = KTX_FALSE,
-      .generateMipmaps  = KTX_FALSE,
+      .vkFormat = VK_FORMAT_R16G16B16A16_SFLOAT,
+      .baseWidth = static_cast<u32>(width),
+      .baseHeight = static_cast<u32>(height),
+      .baseDepth = 1,
+      .numDimensions = 2,
+      .numLevels = num_levels,
+      .numLayers = 1,
+      .numFaces = 1,
+      .isArray = KTX_FALSE,
+      .generateMipmaps = KTX_FALSE,
   };
 
   ktxTexture2 *ktx{};
@@ -1050,51 +1051,43 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
     return std::unexpected(
         std::format("ktxTexture2_Create failed: {}", std::to_underlying(err)));
   }
-
   KtxTexture2Guard guard{ktx};
 
+  // Write level 0 directly into libktx's allocated slab.
   {
     const auto pixel_count = static_cast<usize>(width) * height;
-    std::vector<u16> f16_data(pixel_count * 4);
-
-    for (usize i = 0; i < pixel_count * 4; ++i) {
-      f16_data[i] = glm::packHalf1x16(data[i]);
+    std::vector<u16> f16(pixel_count * 4);
+    for (usize i = 0; i < f16.size(); ++i) {
+      f16[i] = glm::packHalf1x16(data[i]);
     }
 
-    const auto byte_size = f16_data.size() * sizeof(u16);
-    if (const auto err = ktxTexture_SetImageFromMemory(
-            ktxTexture(ktx), 0, 0, 0,
-            reinterpret_cast<const u8 *>(f16_data.data()),
-            byte_size);
-        err != KTX_SUCCESS) {
-      return std::unexpected(std::format(
-          "ktxTexture_SetImageFromMemory (base) failed: {}",
-          std::to_underlying(err)));
-    }
+    ktx_size_t offset{};
+    ktxTexture_GetImageOffset(ktxTexture(ktx), 0, 0, 0, &offset);
+    std::memcpy(ktxTexture_GetData(ktxTexture(ktx)) + offset, f16.data(),
+                f16.size() * sizeof(u16));
   }
 
+  // Build + write mip chain, keeping f32 intermediates to avoid error
+  // accumulation.
   {
     u32 src_w = static_cast<u32>(width);
     u32 src_h = static_cast<u32>(height);
-
-    // Keep previous mip as f32 for quality; avoids accumulating f16 rounding
     std::vector<float> prev_f32(data, data + src_w * src_h * 4);
 
-    for (u32 level = 1; level < create_info.numLevels; ++level) {
+    for (u32 level = 1; level < num_levels; ++level) {
       const u32 dst_w = std::max(1u, src_w / 2);
       const u32 dst_h = std::max(1u, src_h / 2);
 
-      std::vector<float> dst_f32(dst_w * dst_h * 4, 0.0f);
+      std::vector<float> dst_f32(dst_w * dst_h * 4);
 
       for (u32 y = 0; y < dst_h; ++y) {
         for (u32 x = 0; x < dst_w; ++x) {
           const u32 sx = x * 2;
           const u32 sy = y * 2;
+          const u32 sx1 = std::min(sx + 1, src_w - 1);
+          const u32 sy1 = std::min(sy + 1, src_h - 1);
 
           for (u32 c = 0; c < 4; ++c) {
-            const u32 sx1 = std::min(sx + 1, src_w - 1);
-            const u32 sy1 = std::min(sy + 1, src_h - 1);
-
             dst_f32[(y * dst_w + x) * 4 + c] =
                 (prev_f32[(sy  * src_w + sx ) * 4 + c] +
                  prev_f32[(sy  * src_w + sx1) * 4 + c] +
@@ -1109,15 +1102,10 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
         f16_mip[i] = glm::packHalf1x16(dst_f32[i]);
       }
 
-      if (const auto err = ktxTexture_SetImageFromMemory(
-              ktxTexture(ktx), level, 0, 0,
-              reinterpret_cast<const u8 *>(f16_mip.data()),
-              f16_mip.size() * sizeof(u16));
-          err != KTX_SUCCESS) {
-        return std::unexpected(std::format(
-            "ktxTexture_SetImageFromMemory (mip {}) failed: {}",
-            level, std::to_underlying(err)));
-      }
+      ktx_size_t offset{};
+      ktxTexture_GetImageOffset(ktxTexture(ktx), level, 0, 0, &offset);
+      std::memcpy(ktxTexture_GetData(ktxTexture(ktx)) + offset, f16_mip.data(),
+                  f16_mip.size() * sizeof(u16));
 
       prev_f32 = std::move(dst_f32);
       src_w = dst_w;
@@ -1125,13 +1113,16 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
     }
   }
 
-  // --- Write KTX2 file ---
-  if (const auto err = ktxTexture_WriteToNamedFile(
-          ktxTexture(ktx), output.string().c_str());
+  const auto name = output.string();
+  const auto name_cstr = name.c_str();
+  char writer[100];
+  snprintf(writer, sizeof(writer), "%s version %s", "Dockyard", "1.0.0");
+  ktxHashList_AddKVPair(&ktx->kvDataHead, KTX_WRITER_KEY,
+                        static_cast<ktx_uint32_t>(strlen(writer)) + 1, writer);
+  if (const auto err = ktxTexture_WriteToNamedFile(ktxTexture(ktx), name_cstr);
       err != KTX_SUCCESS) {
-    return std::unexpected(std::format(
-        "ktxTexture_WriteToNamedFile failed: {}",
-        std::to_underlying(err)));
+    return std::unexpected(std::format("ktxTexture_WriteToNamedFile failed: {}",
+                                       std::to_underlying(err)));
   }
 
   return {};
