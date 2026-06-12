@@ -1003,6 +1003,9 @@ namespace {
 auto convert_hdr_to_ktx2(const std::filesystem::path &input,
                          const std::filesystem::path &output)
     -> std::expected<void, std::string> {
+
+
+
   int width{};
   int height{};
   int channels{};
@@ -1053,21 +1056,31 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
   }
   KtxTexture2Guard guard{ktx};
 
-  // Write level 0 directly into libktx's allocated slab.
+  auto set_level = [&](u32 level, const u16 *pixels, ktx_size_t byte_size) -> std::expected<void, std::string> {
+    if (const auto err = ktxTexture_SetImageFromMemory(
+            ktxTexture(ktx), level, 0, 0,
+            reinterpret_cast<const ktx_uint8_t *>(pixels), byte_size);
+        err != KTX_SUCCESS) {
+      return std::unexpected(std::format(
+          "ktxTexture_SetImageFromMemory failed at level {}: {}", level,
+          std::to_underlying(err)));
+    }
+    return {};
+  };
+
+  // Convert and upload level 0.
   {
     const auto pixel_count = static_cast<usize>(width) * height;
     std::vector<u16> f16(pixel_count * 4);
     for (usize i = 0; i < f16.size(); ++i) {
       f16[i] = glm::packHalf1x16(data[i]);
     }
-
-    ktx_size_t offset{};
-    ktxTexture_GetImageOffset(ktxTexture(ktx), 0, 0, 0, &offset);
-    std::memcpy(ktxTexture_GetData(ktxTexture(ktx)) + offset, f16.data(),
-                f16.size() * sizeof(u16));
+    if (auto r = set_level(0, f16.data(), f16.size() * sizeof(u16)); !r) {
+      return std::unexpected(r.error());
+    }
   }
 
-  // Build + write mip chain, keeping f32 intermediates to avoid error
+  // Build + upload mip chain, keeping f32 intermediates to avoid error
   // accumulation.
   {
     u32 src_w = static_cast<u32>(width);
@@ -1102,10 +1115,9 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
         f16_mip[i] = glm::packHalf1x16(dst_f32[i]);
       }
 
-      ktx_size_t offset{};
-      ktxTexture_GetImageOffset(ktxTexture(ktx), level, 0, 0, &offset);
-      std::memcpy(ktxTexture_GetData(ktxTexture(ktx)) + offset, f16_mip.data(),
-                  f16_mip.size() * sizeof(u16));
+      if (auto r = set_level(level, f16_mip.data(), f16_mip.size() * sizeof(u16)); !r) {
+        return std::unexpected(r.error());
+      }
 
       prev_f32 = std::move(dst_f32);
       src_w = dst_w;
@@ -1129,10 +1141,14 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
 }
 } // namespace
 
-auto convert_hdr_to_ktx2(const VFSPath &input, const VFSPath &output)
+auto convert_hdr_to_ktx2(const VFSPath &input, const VFSPath &output, bool force)
     -> std::expected<void, std::string> {
-  return convert_hdr_to_ktx2(VFS::get().resolve(input),
-                             VFS::get().resolve(output));
+  const auto resolved_output = VFS::get().resolve(output);
+  if (!force && std::filesystem::exists(resolved_output)) {
+    info("Already converted.");
+    return {};
+  }
+  return convert_hdr_to_ktx2(VFS::get().resolve(input), resolved_output);
 }
 
 } // namespace dy

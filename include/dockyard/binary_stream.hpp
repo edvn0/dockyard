@@ -43,6 +43,47 @@ private:
   std::vector<std::uint8_t> &buffer;
 };
 
+class OwningMemoryWriter : public BinaryWriter {
+public:
+  OwningMemoryWriter() = default;
+
+  // Non-copyable — copying a large buffer mid-serialization would be
+  // accidental and expensive.
+  OwningMemoryWriter(const OwningMemoryWriter &) = delete;
+  OwningMemoryWriter &operator=(const OwningMemoryWriter &) = delete;
+
+  // Movable — futures need to capture it by move.
+  OwningMemoryWriter(OwningMemoryWriter &&other) noexcept
+      : buffer(std::move(other.buffer)) {}
+
+  OwningMemoryWriter &operator=(OwningMemoryWriter &&other) noexcept {
+    if (this != &other) {
+      buffer = std::move(other.buffer);
+    }
+    return *this;
+  }
+
+  ~OwningMemoryWriter() override = default;
+
+  void write(const void *data, std::size_t size) override {
+    const auto *bytes = static_cast<const std::uint8_t *>(data);
+    buffer.insert(buffer.end(), bytes, bytes + size);
+  }
+
+  [[nodiscard]] auto take() noexcept -> std::vector<std::uint8_t> &&{
+    return std::move(buffer);
+  }
+
+  [[nodiscard]] auto data() const noexcept ->const auto& {
+    return buffer;
+  }
+
+  [[nodiscard]] std::size_t size() const noexcept { return buffer.size(); }
+
+private:
+  std::vector<std::uint8_t> buffer;
+};
+
 class MemoryReader : public BinaryReader {
 public:
   explicit MemoryReader(const std::vector<std::uint8_t> &buf)

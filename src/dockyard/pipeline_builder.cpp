@@ -326,7 +326,7 @@ auto build_compute_pipeline(VulkanContext& ctx,
         std::format("{}: expected exactly one compute entry point, got {}",
                     desc.shader_path.view(), stages.size()));
 
-  stages[0].materialise(ctx.device);
+  // stages[0].materialise(ctx.device);
 
   const VkComputePipelineCreateInfo ci{
       .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
@@ -336,7 +336,6 @@ auto build_compute_pipeline(VulkanContext& ctx,
   };
 
   VkPipeline pipeline = VK_NULL_HANDLE;
-  auto func_ptr = &vkCreateComputePipelines;
   const VkResult vr = vkCreateComputePipelines(ctx.device, VK_NULL_HANDLE, 1u, &ci,
                                                nullptr, &pipeline);
   if (vr != VK_SUCCESS)
@@ -353,6 +352,8 @@ auto build_compute_pipeline(VulkanContext& ctx,
                                     : "with auto-reflection layout");
   name_info.pObjectName = resolved_name.c_str();
   vk::check(vkSetDebugUtilsObjectNameEXT(ctx.device, &name_info));
+
+  // stages[0].destroy_module(ctx.device);
 
   return pipeline;
 }

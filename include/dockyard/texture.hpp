@@ -127,6 +127,6 @@ struct Texture {
   auto destroy(const VulkanContext &) -> void;
 };
 
-auto convert_hdr_to_ktx2(const VFSPath &input, const VFSPath &output) -> std::expected<void, std::string>;
+auto convert_hdr_to_ktx2(const VFSPath &input, const VFSPath &output, bool force = false) -> std::expected<void, std::string>;
 
 } // namespace dy

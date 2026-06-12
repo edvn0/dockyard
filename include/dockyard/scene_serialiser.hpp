@@ -1,11 +1,13 @@
 #pragma once
-
 #include <cassert>
-
 #include <dockyard/binary_stream.hpp>
 #include <dockyard/component_traits.hpp>
 #include <dockyard/scene.hpp>
 #include <entt/entt.hpp>
+#include <BS_thread_pool.hpp>
+#include <future>
+#include <thread>
+#include <vector>
 
 namespace dy {
 
@@ -36,9 +38,7 @@ public:
   static void serialize(Scene &scene, BinaryWriter &writer) {
     entt::snapshot snapshot{scene.registry()};
     CompileTimeOutputArchive archive{writer};
-
     snapshot.get<entt::entity>(archive);
-
     for_each_type<MasterComponentList>([&]<typename Component>() {
       if constexpr (ComponentConfig<Component>::serializable &&
                     has_valid_serializer<Component>) {
@@ -49,19 +49,81 @@ public:
     });
   }
 
+  static void serialize_parallel(BS::priority_thread_pool &thread_pool,
+                                 Scene &scene, BinaryWriter &writer) {
+    {
+      entt::snapshot snapshot{scene.registry()};
+      CompileTimeOutputArchive archive{writer};
+      snapshot.get<entt::entity>(archive);
+    }
+
+    // Count serializable component types at compile time so we can size the
+    // slot array without a runtime push_back loop.
+    constexpr std::size_t component_count = []() constexpr -> std::size_t {
+      std::size_t n = 0;
+      for_each_type<MasterComponentList>([&]<typename Component>() {
+        if constexpr (ComponentConfig<Component>::serializable &&
+                      has_valid_serializer<Component>) {
+          ++n;
+        }
+      });
+      return n;
+    }();
+
+    // One owned writer per serializable component type, indexed in
+    // MasterComponentList order so the flush is deterministic regardless of
+    // which tasks finish first.
+    struct Slot {
+      OwningMemoryWriter writer;
+      std::future<void> task;
+    };
+    std::array<Slot, component_count> slots;
+
+    // Dispatch — each lambda captures its slot's writer by reference.
+    // The slots array is stable for the lifetime of this function so the
+    // reference is safe across the async boundary.
+    std::size_t slot_idx = 0;
+    for_each_type<MasterComponentList>([&]<typename Component>() {
+      if constexpr (ComponentConfig<Component>::serializable &&
+                    has_valid_serializer<Component>) {
+        const std::size_t my_slot = slot_idx++;
+
+        slots[my_slot].task =
+            thread_pool.submit_task([&registry = scene.registry(),
+                                     &local_writer = slots[my_slot].writer]() {
+              CompileTimeOutputArchive local_archive{local_writer};
+
+              constexpr u32 type_id = entt::type_hash<Component>::value();
+              local_writer.write(&type_id, sizeof(type_id));
+
+              entt::snapshot snapshot{registry};
+              snapshot.template get<Component>(local_archive);
+            });
+      }
+    });
+
+    // Synchronise and flush in compile-time order.
+    for (auto &slot : slots) {
+      if (slot.task.valid()) {
+        slot.task.get(); // propagates any worker exception
+        auto buf = std::move(slot.writer.take());
+        if (!buf.empty()) {
+          writer.write(buf.data(), buf.size());
+        }
+      }
+    }
+  }
+
   static void deserialize(Scene &scene, BinaryReader &reader) {
     entt::snapshot_loader loader{scene.registry()};
     CompileTimeInputArchive archive{reader};
-
     loader.get<entt::entity>(archive);
-
     for_each_type<MasterComponentList>([&]<typename Component>() {
       if constexpr (ComponentConfig<Component>::serializable &&
                     has_valid_serializer<Component>) {
         u32 expected_id = entt::type_hash<Component>::value();
         u32 read_id = 0;
         reader.read(&read_id, sizeof(read_id));
-
         assert(read_id == expected_id &&
                "Scene component layout structural mismatch!");
         if (read_id == expected_id) {

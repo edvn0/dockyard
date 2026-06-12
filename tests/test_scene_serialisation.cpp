@@ -3,6 +3,8 @@
 #include <dockyard/scene.hpp>
 #include <doctest/doctest.h>
 
+static auto thread_pool = BS::priority_thread_pool{};
+
 TEST_CASE("Scene Serialization and Deserialization") {
   using namespace dy;
 
@@ -82,97 +84,330 @@ TEST_CASE("Scene Serialization with Mesh Components") {
   REQUIRE(target_registry.all_of<Components::Mesh>(deserialized_entity));
 }
 
+#ifdef RUN_SERIALISATION_SMOKE_TESTS
 TEST_CASE("Scene Serialization - High Volume Stress Test") {
   using namespace dy;
 
-  Scene original_scene;
   constexpr std::string_view str = "Procedural_Static_Mesh_Instance";
-  constexpr int entity_count = 1000000;
+  constexpr int entity_count = 1'000'000;
 
-  for (int i = 0; i < entity_count; ++i) {
-    auto entity = original_scene.registry().create();
+  // -------------------------------------------------------------------------
+  // Phase 1: Scene Setup
+  // -------------------------------------------------------------------------
+  Scene original_scene;
+  {
+    auto t0 = std::chrono::high_resolution_clock::now();
 
-    const auto unique_tag = std::format("{}_{}", str, i);
-    original_scene.registry().emplace<Components::Tag>(entity, unique_tag);
+    for (int i = 0; i < entity_count; ++i) {
+      auto entity = original_scene.registry().create();
 
-    // Procedural spatial data
-    Components::Transform transform{};
-    transform.mut().position =
-        glm::vec3(static_cast<float>(i) * 0.1f, 0.0f, -1.0f);
-    original_scene.registry().emplace<Components::Transform>(entity, transform);
+      original_scene.registry().emplace<Components::Tag>(
+          entity, std::format("{}_{}", str, i));
 
-    // Add the Mesh target component
-    Components::Mesh mesh_component{};
-    original_scene.registry().emplace<Components::Mesh>(entity, mesh_component);
+      Components::Transform transform{};
+      transform.mut().position =
+          glm::vec3(static_cast<float>(i) * 0.1f, 0.0f, -1.0f);
+      original_scene.registry().emplace<Components::Transform>(entity,
+                                                                transform);
+
+      original_scene.registry().emplace<Components::Mesh>(entity,
+                                                           Components::Mesh{});
+    }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    MESSAGE("  [Setup]       ", entity_count, " entities created in ",
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0)
+                .count(),
+            " ms.");
   }
 
+  // -------------------------------------------------------------------------
+  // Phase 2: Serialization
+  // -------------------------------------------------------------------------
   std::vector<u8> serialization_buffer;
-
   {
     MemoryWriter writer(serialization_buffer);
 
-    auto start_time = std::chrono::high_resolution_clock::now();
-
+    auto t0 = std::chrono::high_resolution_clock::now();
     REQUIRE_NOTHROW(SceneSerializer::serialize(original_scene, writer));
+    auto t1 = std::chrono::high_resolution_clock::now();
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        end_time - start_time)
-                        .count();
+    const auto duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    const auto size_kb = serialization_buffer.size() / 1024;
+    const auto throughput_mbps =
+        duration_ms > 0
+            ? static_cast<double>(serialization_buffer.size()) /
+                  (1024.0 * 1024.0) /
+                  (static_cast<double>(duration_ms) / 1000.0)
+            : 0.0;
 
-    // Print diagnostics to the test runner stdout
-    MESSAGE("Serialized ", entity_count, " mesh entities into ",
-            (serialization_buffer.size() / 1024), " KB in ", duration, " ms.");
+    const auto throughput = std::format("{:.1f}", throughput_mbps);
+    MESSAGE("  [Serialize]   ", entity_count, " entities -> ", size_kb,
+            " KB in ", duration_ms, " ms  (", throughput, " MB/s)");
+
+    REQUIRE(serialization_buffer.size() > 0);
   }
 
-  // Baseline size safety check: Ensure it wrote a significant payload
-  REQUIRE(serialization_buffer.size() > 0);
-
-  // 3. Measure Deserialization Stability on Large Volume
+  // -------------------------------------------------------------------------
+  // Phase 3: Deserialization
+  // -------------------------------------------------------------------------
   Scene deserialized_scene;
   {
     MemoryReader reader(serialization_buffer);
 
-    auto start_time = std::chrono::high_resolution_clock::now();
-
+    auto t0 = std::chrono::high_resolution_clock::now();
     REQUIRE_NOTHROW(SceneSerializer::deserialize(deserialized_scene, reader));
+    auto t1 = std::chrono::high_resolution_clock::now();
 
-    auto end_time = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        end_time - start_time)
-                        .count();
+    const auto duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    const auto throughput_mbps =
+        duration_ms > 0
+            ? static_cast<double>(serialization_buffer.size()) /
+                  (1024.0 * 1024.0) /
+                  (static_cast<double>(duration_ms) / 1000.0)
+            : 0.0;
 
-    MESSAGE("Deserialized ", entity_count, " mesh entities in ", duration,
-            " ms.");
+    const auto throughput = std::format("{:.1f}", throughput_mbps);
+    MESSAGE("  [Deserialize] ", entity_count, " entities in ", duration_ms,
+            " ms  (", throughput, " MB/s)");
   }
 
-  // 4. Spot Check Validation (Beginning, Middle, and End of Stream)
+  // -------------------------------------------------------------------------
+  // Phase 4: Correctness Validation
+  // -------------------------------------------------------------------------
   auto &target_registry = deserialized_scene.registry();
+
+  // Entity count integrity
+  REQUIRE(target_registry.view<Components::Tag>().size() == entity_count);
+  REQUIRE(target_registry.view<Components::Transform>().size() == entity_count);
+  REQUIRE(target_registry.view<Components::Mesh>().size() == entity_count);
+
+  // Build a tag -> transform map for O(n) multi-spot validation in one pass
+  // rather than three separate O(n) scans.
+  struct SpotResult {
+    std::string expected_tag;
+    float expected_pos_x;
+    bool found = false;
+    bool position_valid = false;
+  };
+
+  const int spots[] = {0, entity_count / 2, entity_count - 1};
+  std::array<SpotResult, 3> spot_checks;
+  for (int i = 0; i < 3; ++i) {
+    spot_checks[i].expected_tag = std::format("{}_{}", str, spots[i]);
+    spot_checks[i].expected_pos_x = static_cast<float>(spots[i]) * 0.1f;
+  }
+
   auto view =
       target_registry
           .view<Components::Tag, Components::Transform, Components::Mesh>();
 
-  // Ensure absolutely all entities crossed the pipeline completely intact
-  REQUIRE(target_registry.view<Components::Tag>().size() == entity_count);
-
-  // Let's grab a specific index from the middle of the layout to check for
-  // cumulative offset drift
-  int target_spot_index = entity_count / 2;
-  std::string expected_tag =
-      "Procedural_Static_Mesh_Instance_" + std::to_string(target_spot_index);
-  float expected_pos_x = static_cast<float>(target_spot_index) * 0.1f;
-
-  bool spot_checked_and_passed = false;
-
+  int remaining = 3;
   for (auto [entity, tag, transform, mesh] : view.each()) {
-    if (tag.tag == expected_tag) {
-      CHECK(transform.get().position.x == doctest::Approx(expected_pos_x));
-      spot_checked_and_passed = true;
-      break;
+    if (remaining == 0) break;
+    for (auto &spot : spot_checks) {
+      if (!spot.found && tag.tag == spot.expected_tag) {
+        spot.found = true;
+        spot.position_valid =
+            std::abs(transform.get().position.x - spot.expected_pos_x) <
+            1e-5f;
+        --remaining;
+        break;
+      }
     }
   }
 
-  // Guarantee that our spot check match wasn't lost in a corrupted data stream
-  // layout
-  REQUIRE(spot_checked_and_passed);
+  MESSAGE("  [Spot checks] index=0, index=", entity_count / 2,
+          ", index=", entity_count - 1);
+
+  for (int i = 0; i < 3; ++i) {
+    const auto &spot = spot_checks[i];
+    INFO("Spot check failed for entity index ", spots[i], " (tag='",
+         spot.expected_tag, "')");
+    REQUIRE(spot.found);
+    CHECK(spot.position_valid);
+  }
 }
+
+TEST_CASE("Scene Serialization - High Volume Stress Test") {
+  using namespace dy;
+
+  constexpr std::string_view str = "Procedural_Static_Mesh_Instance";
+  constexpr int entity_count = 1'000'000;
+
+  // -------------------------------------------------------------------------
+  // Phase 1: Scene Setup
+  // -------------------------------------------------------------------------
+  Scene original_scene;
+  {
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < entity_count; ++i) {
+      auto entity = original_scene.registry().create();
+
+      original_scene.registry().emplace<Components::Tag>(
+          entity, std::format("{}_{}", str, i));
+
+      Components::Transform transform{};
+      transform.mut().position =
+          glm::vec3(static_cast<float>(i) * 0.1f, 0.0f, -1.0f);
+      original_scene.registry().emplace<Components::Transform>(entity,
+                                                                transform);
+
+      original_scene.registry().emplace<Components::Mesh>(entity,
+                                                           Components::Mesh{});
+    }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    MESSAGE("  [Setup]            ",
+            entity_count, " entities created in ",
+            std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
+            " ms.");
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 2a: Sequential Serialization
+  // -------------------------------------------------------------------------
+  std::vector<u8> sequential_buffer;
+  {
+    MemoryWriter writer(sequential_buffer);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    REQUIRE_NOTHROW(SceneSerializer::serialize(original_scene, writer));
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    const auto duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    const auto throughput =
+        std::format("{:.1f}",
+            duration_ms > 0
+                ? static_cast<double>(sequential_buffer.size()) /
+                      (1024.0 * 1024.0) / (static_cast<double>(duration_ms) / 1000.0)
+                : 0.0);
+
+    MESSAGE("  [Serialize Seq]    ",
+            entity_count, " entities -> ",
+            sequential_buffer.size() / 1024, " KB in ",
+            duration_ms, " ms  (", throughput, " MB/s)");
+
+    REQUIRE(sequential_buffer.size() > 0);
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 2b: Parallel Serialization
+  // -------------------------------------------------------------------------
+  std::vector<u8> parallel_buffer;
+  {
+    MemoryWriter writer(parallel_buffer);
+
+    const auto hw = std::thread::hardware_concurrency();
+    auto t0 = std::chrono::high_resolution_clock::now();
+    REQUIRE_NOTHROW(
+        SceneSerializer::serialize_parallel(thread_pool, original_scene, writer));
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    const auto duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    const auto throughput =
+        std::format("{:.1f}",
+            duration_ms > 0
+                ? static_cast<double>(parallel_buffer.size()) /
+                      (1024.0 * 1024.0) / (static_cast<double>(duration_ms) / 1000.0)
+                : 0.0);
+
+    MESSAGE("  [Serialize Par]    ",
+            entity_count, " entities -> ",
+            parallel_buffer.size() / 1024, " KB in ",
+            duration_ms, " ms  (", throughput, " MB/s)  [",
+            hw, " logical cores]");
+
+    REQUIRE(parallel_buffer.size() > 0);
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 2c: Output equivalence — both paths must produce identical bytes.
+  // If this fails the parallel path has an ordering or flushing bug.
+  // -------------------------------------------------------------------------
+  REQUIRE(sequential_buffer.size() == parallel_buffer.size());
+  REQUIRE(sequential_buffer == parallel_buffer);
+
+  // -------------------------------------------------------------------------
+  // Phase 3: Deserialization (from sequential buffer — canonical)
+  // -------------------------------------------------------------------------
+  Scene deserialized_scene;
+  {
+    MemoryReader reader(sequential_buffer);
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    REQUIRE_NOTHROW(SceneSerializer::deserialize(deserialized_scene, reader));
+    auto t1 = std::chrono::high_resolution_clock::now();
+
+    const auto duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    const auto throughput =
+        std::format("{:.1f}",
+            duration_ms > 0
+                ? static_cast<double>(sequential_buffer.size()) /
+                      (1024.0 * 1024.0) / (static_cast<double>(duration_ms) / 1000.0)
+                : 0.0);
+
+    MESSAGE("  [Deserialize]      ",
+            entity_count, " entities in ",
+            duration_ms, " ms  (", throughput, " MB/s)");
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 4: Correctness Validation
+  // -------------------------------------------------------------------------
+  auto &target_registry = deserialized_scene.registry();
+
+  REQUIRE(target_registry.view<Components::Tag>().size() == entity_count);
+  REQUIRE(target_registry.view<Components::Transform>().size() == entity_count);
+  REQUIRE(target_registry.view<Components::Mesh>().size() == entity_count);
+
+  // Three anchor spot checks in a single O(n) pass.
+  struct SpotResult {
+    std::string expected_tag;
+    float expected_pos_x;
+    bool found = false;
+    bool position_valid = false;
+  };
+
+  const int spots[] = {0, entity_count / 2, entity_count - 1};
+  std::array<SpotResult, 3> spot_checks;
+  for (int i = 0; i < 3; ++i) {
+    spot_checks[i].expected_tag = std::format("{}_{}", str, spots[i]);
+    spot_checks[i].expected_pos_x = static_cast<float>(spots[i]) * 0.1f;
+  }
+
+  auto view = target_registry
+                  .view<Components::Tag, Components::Transform, Components::Mesh>();
+
+  int remaining = 3;
+  for (auto [entity, tag, transform, mesh] : view.each()) {
+    if (remaining == 0) break;
+    for (auto &spot : spot_checks) {
+      if (!spot.found && tag.tag == spot.expected_tag) {
+        spot.found = true;
+        spot.position_valid =
+            std::abs(transform.get().position.x - spot.expected_pos_x) < 1e-5f;
+        --remaining;
+        break;
+      }
+    }
+  }
+
+  MESSAGE("  [Spot checks]     index=0, index=", entity_count / 2,
+          ", index=", entity_count - 1);
+
+  for (int i = 0; i < 3; ++i) {
+    const auto &spot = spot_checks[i];
+    INFO("Spot check failed for entity index ", spots[i],
+         " (tag='", spot.expected_tag, "')");
+    REQUIRE(spot.found);
+    CHECK(spot.position_valid);
+  }
+}
+#endif
