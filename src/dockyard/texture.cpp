@@ -3,6 +3,7 @@
 #include <bit>
 #include <cassert>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 #include <dockyard/app.hpp>
@@ -13,9 +14,10 @@
 #include <ktx.h>
 #include <ktxvulkan.h>
 
+#include <glm/gtc/packing.hpp>
 #include <stb_image.h>
 #include <stb_image_write.h>
-#include <glm/gtc/packing.hpp>
+
 namespace dy {
 
 namespace {
@@ -82,29 +84,38 @@ struct KtxTexture2Guard {
 [[nodiscard]] auto transcode_ktx2_hdr_if_needed(const VulkanContext &ctx,
                                                 ktxTexture2 *ktx)
     -> std::expected<VkFormat, std::string> {
-  if (ktxTexture2_NeedsTranscoding(ktx)) {
-    return std::unexpected(
-        "HDR KTX2 textures must be pre-encoded as BC6H_UFLOAT_BLOCK; "
-        "BasisU/UASTC HDR transcoding is not supported"
-    );
+  constexpr VkFormat uastc_hdr_intermediate = VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK;
+
+  const bool needs_transcode =
+      ktxTexture2_NeedsTranscoding(ktx) ||
+      static_cast<VkFormat>(ktx->vkFormat) == uastc_hdr_intermediate;
+
+  if (needs_transcode) {
+    constexpr VkFormat target_fmt = VK_FORMAT_BC6H_UFLOAT_BLOCK;
+    if (!is_sampled_format_supported(ctx, target_fmt)) {
+      return std::unexpected(
+          "VK_FORMAT_BC6H_UFLOAT_BLOCK not supported on this device");
+    }
+    const auto err = ktxTexture2_TranscodeBasis(ktx, KTX_TTF_BC6HU, 0);
+    if (err != KTX_SUCCESS) {
+      return std::unexpected(std::format(
+          "ktxTexture2_TranscodeBasis failed: {}", ktx_error_string(err)));
+    }
+    return target_fmt;
   }
 
-  const auto format = static_cast<VkFormat>(ktx->vkFormat);
-
-  if (format == VK_FORMAT_UNDEFINED) {
+  // Already a native GPU format — validate it.
+  const auto fmt = static_cast<VkFormat>(ktx->vkFormat);
+  if (fmt == VK_FORMAT_UNDEFINED) {
     return std::unexpected(
-        "KTX2 has VK_FORMAT_UNDEFINED and does not require transcoding"
-    );
+        "KTX2 has VK_FORMAT_UNDEFINED with no transcoding needed");
   }
-
-  if (!is_sampled_format_supported(ctx, format)) {
+  if (!is_sampled_format_supported(ctx, fmt)) {
     return std::unexpected(std::format(
-        "KTX2 VkFormat {} is not supported as sampled optimal-tiled image",
-        std::to_underlying(format)
-    ));
+        "KTX2 VkFormat {} not supported as sampled optimal-tiled image",
+        std::to_underlying(fmt)));
   }
-
-  return format;
+  return fmt;
 }
 
 [[nodiscard]] auto decode_ktx2_hdr_texture(const VulkanContext &ctx,
@@ -204,6 +215,40 @@ namespace {
 
 auto mip_count(u32 w, u32 h) -> u32 {
   return static_cast<u32>(std::bit_width(std::max(w, h)));
+}
+
+struct FormatBlockInfo {
+  u32 block_width;
+  u32 block_height;
+  u32 block_size_bytes;
+};
+
+auto get_format_block_info(VkFormat format) -> FormatBlockInfo {
+  switch (format) {
+  case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
+    return {4, 4, 16};
+  case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
+    return {5, 4, 16};
+  case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
+    return {5, 5, 16};
+  // Add other ASTC HDR/LDR variants if needed...
+
+  // BC6H (The format you transcode to in your fallback code)
+  case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+  case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+    return {4, 4, 16};
+
+  // Standard uncompressed formats fall back to 1x1 blocks
+  case VK_FORMAT_R8G8B8A8_UNORM:
+    return {1, 1, 4};
+  case VK_FORMAT_R16G16B16A16_SFLOAT:
+    return {1, 1, 8};
+  case VK_FORMAT_R32G32B32A32_SFLOAT:
+    return {1, 1, 16};
+
+  default:
+    return {.block_width = 1, .block_height = 1, .block_size_bytes = 4};
+  }
 }
 
 auto bytes_per_texel(VkFormat fmt) -> u32 {
@@ -352,14 +397,16 @@ auto set_view_debug_name(VkDevice device, VkImageView view,
 } // namespace
 
 auto Texture::load_ktx2_hdr_texture(const VulkanContext &ctx,
-                                     const VFSPath &path) -> Texture {
+                                    const VFSPath &path)
+    -> std::expected<Texture, std::string> {
   const auto real_path = VFS::get().resolve(path);
 
   auto result = decode_ktx2_hdr_texture(ctx, real_path);
   if (!result) {
-    error("Failed to decode KTX2 HDR texture '{}': {}",
-          real_path.string(), result.error());
-    std::abort();
+    const auto str = std::format("Failed to decode KTX2 HDR texture '{}': {}",
+                                 real_path.string(), result.error());
+    error("{}", str);
+    return std::unexpected(str);
   }
 
   auto &decoded = *result;
@@ -562,7 +609,6 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
 
   u32 mips = 1u;
   VkDeviceSize total_byte_size = 0;
-  const u32 bytes_per_pixel = bytes_per_texel(ci.format);
 
   struct MipCopyRegion {
     VkDeviceSize buffer_offset;
@@ -571,13 +617,19 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
   };
   std::vector<MipCopyRegion> copy_regions;
 
+  const auto block_info = get_format_block_info(ci.format);
+
   if (has_custom_mips) {
     mips = static_cast<u32>(ci.mips.size() + 1);
     copy_regions.reserve(mips);
 
     total_byte_size =
         static_cast<VkDeviceSize>(ci.bytes.size_bytes());
-    copy_regions.push_back({0, ci.width, ci.height});
+    copy_regions.push_back({
+        .buffer_offset = 0,
+        .width = ci.width,
+        .height = ci.height,
+    });
 
     VkDeviceSize current_offset = total_byte_size;
     for (const auto &mip : ci.mips) {
@@ -587,8 +639,15 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
     total_byte_size = current_offset;
   } else {
     mips = ci.generate_mips ? mip_count(ci.width, ci.height) : 1u;
-    total_byte_size =
-        static_cast<VkDeviceSize>(ci.width) * ci.height * bytes_per_pixel;
+
+    // Round up dimensions to block boundaries
+    u32 num_blocks_x =
+        (ci.width + block_info.block_width - 1) / block_info.block_width;
+    u32 num_blocks_y =
+        (ci.height + block_info.block_height - 1) / block_info.block_height;
+
+    total_byte_size = static_cast<VkDeviceSize>(num_blocks_x) * num_blocks_y *
+                      block_info.block_size_bytes;
     copy_regions.push_back({0, ci.width, ci.height});
   }
 
@@ -1000,12 +1059,51 @@ auto Texture::register_sub_views(const VulkanContext &ctx,
 }
 
 namespace {
-auto convert_hdr_to_ktx2(const std::filesystem::path &input,
-                         const std::filesystem::path &output)
+// Assuming a standard RGBA 32-bit float source image structure
+struct FloatPixel {
+  float r, g, b, a;
+};
+
+struct HDRScaleResult {
+  float scale_factor;
+  float shader_multiplier;
+};
+
+auto calculate_hdr_scale(std::span<const FloatPixel> &source_pixels)
+    -> HDRScaleResult {
+  float max_value = 0.0F;
+
+  // 1. Find the maximum finite value in the source image
+  for (const auto &pixel : source_pixels) {
+    // We generally only care about color channels (RGB) for HDR scaling
+    for (float channel : {pixel.r, pixel.g, pixel.b}) {
+      if (std::isfinite(channel)) {
+        max_value = std::max(max_value, std::abs(channel));
+      }
+    }
+  }
+
+  if (max_value <= 0.0F) {
+    return {.scale_factor = 1.0F, .shader_multiplier = 1.0};
+  }
+
+  constexpr auto astc_hdr_max = 65216.0F;
+
+  if (max_value > astc_hdr_max) {
+    float compression_scale = astc_hdr_max / max_value;
+
+    float shader_multiplier = max_value / astc_hdr_max;
+
+    return {.scale_factor = compression_scale,
+            .shader_multiplier = shader_multiplier};
+  }
+
+  return {.scale_factor = 1.0F, .shader_multiplier = 1.0F};
+}
+
+[[nodiscard]] auto convert_hdr_to_ktx2(const std::filesystem::path &input,
+                                       const std::filesystem::path &output)
     -> std::expected<void, std::string> {
-
-
-
   int width{};
   int height{};
   int channels{};
@@ -1015,29 +1113,35 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
         std::format("stbi_loadf failed: {}", stbi_failure_reason()));
   }
 
+  for (usize px = 0; px < static_cast<usize>(width) * height; ++px) {
+    float *p = data + (px * 4);
+    for (int c = 0; c < 3; ++c) { // RGB only, leave alpha alone
+      if (!std::isfinite(p[c]) || p[c] > 65504.0f)
+        p[c] = 65504.0f;
+      else if (p[c] < 0.0f)
+        p[c] = 0.0f; // BC6H_UFLOAT can't represent negatives
+    }
+  }
+
   struct StbiGuard {
     float *ptr;
     explicit StbiGuard(float *p) : ptr(p) {}
     ~StbiGuard() { stbi_image_free(ptr); }
     StbiGuard(const StbiGuard &) = delete;
     StbiGuard &operator=(const StbiGuard &) = delete;
-    StbiGuard(StbiGuard &&other) noexcept : ptr(std::exchange(other.ptr, nullptr)) {}
-    StbiGuard &operator=(StbiGuard &&other) noexcept {
-      if (this != &other) {
-        stbi_image_free(ptr);
-        ptr = std::exchange(other.ptr, nullptr);
-      }
-      return *this;
-    }
-  } stbi_guard(data);
+  } stbi_guard{data};
 
-  const u32 num_levels = static_cast<u32>(
-      std::bit_width(static_cast<u32>(std::max(width, height))));
+  const u32 base_w = static_cast<u32>(width);
+  const u32 base_h = static_cast<u32>(height);
+  const u32 num_levels =
+      static_cast<u32>(std::bit_width(std::max(base_w, base_h)));
 
-  ktxTextureCreateInfo create_info{
+  // BasisU HDR encoding requires VK_FORMAT_UNDEFINED — the internal
+  // format is managed by the BasisU encoder, not the vkFormat field.
+  const ktxTextureCreateInfo create_info{
       .vkFormat = VK_FORMAT_R16G16B16A16_SFLOAT,
-      .baseWidth = static_cast<u32>(width),
-      .baseHeight = static_cast<u32>(height),
+      .baseWidth = base_w,
+      .baseHeight = base_h,
       .baseDepth = 1,
       .numDimensions = 2,
       .numLevels = num_levels,
@@ -1052,93 +1156,105 @@ auto convert_hdr_to_ktx2(const std::filesystem::path &input,
           &create_info, KTX_TEXTURE_CREATE_ALLOC_STORAGE, &ktx);
       err != KTX_SUCCESS) {
     return std::unexpected(
-        std::format("ktxTexture2_Create failed: {}", std::to_underlying(err)));
+        std::format("ktxTexture2_Create failed: {}", ktx_error_string(err)));
   }
   KtxTexture2Guard guard{ktx};
 
-  auto set_level = [&](u32 level, const u16 *pixels, ktx_size_t byte_size) -> std::expected<void, std::string> {
+  u32 src_w = base_w;
+  u32 src_h = base_h;
+  std::vector<float> prev(data, data + src_w * src_h * 4);
+
+  for (u32 level = 0; level < num_levels; ++level) {
+    const usize n = static_cast<usize>(src_w) * src_h * 4;
+    std::vector<u16> f16(n);
+    for (usize i = 0; i < n; ++i) {
+      f16[i] = glm::packHalf1x16(prev[i]);
+    }
+
     if (const auto err = ktxTexture_SetImageFromMemory(
             ktxTexture(ktx), level, 0, 0,
-            reinterpret_cast<const ktx_uint8_t *>(pixels), byte_size);
+            reinterpret_cast<const ktx_uint8_t *>(f16.data()),
+            f16.size() * sizeof(u16));
         err != KTX_SUCCESS) {
-      return std::unexpected(std::format(
-          "ktxTexture_SetImageFromMemory failed at level {}: {}", level,
-          std::to_underlying(err)));
+      return std::unexpected(
+          std::format("SetImageFromMemory failed at level {}: {}", level,
+                      ktx_error_string(err)));
     }
-    return {};
-  };
 
-  // Convert and upload level 0.
-  {
-    const auto pixel_count = static_cast<usize>(width) * height;
-    std::vector<u16> f16(pixel_count * 4);
-    for (usize i = 0; i < f16.size(); ++i) {
-      f16[i] = glm::packHalf1x16(data[i]);
-    }
-    if (auto r = set_level(0, f16.data(), f16.size() * sizeof(u16)); !r) {
-      return std::unexpected(r.error());
-    }
-  }
-
-  // Build + upload mip chain, keeping f32 intermediates to avoid error
-  // accumulation.
-  {
-    u32 src_w = static_cast<u32>(width);
-    u32 src_h = static_cast<u32>(height);
-    std::vector<float> prev_f32(data, data + src_w * src_h * 4);
-
-    for (u32 level = 1; level < num_levels; ++level) {
+    if (level + 1 < num_levels) {
       const u32 dst_w = std::max(1u, src_w / 2);
       const u32 dst_h = std::max(1u, src_h / 2);
-
-      std::vector<float> dst_f32(dst_w * dst_h * 4);
-
+      std::vector<float> next(dst_w * dst_h * 4);
       for (u32 y = 0; y < dst_h; ++y) {
         for (u32 x = 0; x < dst_w; ++x) {
-          const u32 sx = x * 2;
-          const u32 sy = y * 2;
+          const u32 sx = x * 2, sy = y * 2;
           const u32 sx1 = std::min(sx + 1, src_w - 1);
           const u32 sy1 = std::min(sy + 1, src_h - 1);
-
           for (u32 c = 0; c < 4; ++c) {
-            dst_f32[(y * dst_w + x) * 4 + c] =
-                (prev_f32[(sy  * src_w + sx ) * 4 + c] +
-                 prev_f32[(sy  * src_w + sx1) * 4 + c] +
-                 prev_f32[(sy1 * src_w + sx ) * 4 + c] +
-                 prev_f32[(sy1 * src_w + sx1) * 4 + c]) * 0.25f;
+            next[(y * dst_w + x) * 4 + c] =
+                (prev[(sy * src_w + sx) * 4 + c] +
+                 prev[(sy * src_w + sx1) * 4 + c] +
+                 prev[(sy1 * src_w + sx) * 4 + c] +
+                 prev[(sy1 * src_w + sx1) * 4 + c]) *
+                0.25f;
           }
         }
       }
-
-      std::vector<u16> f16_mip(dst_w * dst_h * 4);
-      for (usize i = 0; i < f16_mip.size(); ++i) {
-        f16_mip[i] = glm::packHalf1x16(dst_f32[i]);
-      }
-
-      if (auto r = set_level(level, f16_mip.data(), f16_mip.size() * sizeof(u16)); !r) {
-        return std::unexpected(r.error());
-      }
-
-      prev_f32 = std::move(dst_f32);
+      prev = std::move(next);
       src_w = dst_w;
       src_h = dst_h;
     }
   }
 
-  const auto name = output.string();
-  const auto name_cstr = name.c_str();
-  char writer[100];
-  snprintf(writer, sizeof(writer), "%s version %s", "Dockyard", "1.0.0");
-  ktxHashList_AddKVPair(&ktx->kvDataHead, KTX_WRITER_KEY,
-                        static_cast<ktx_uint32_t>(strlen(writer)) + 1, writer);
-  if (const auto err = ktxTexture_WriteToNamedFile(ktxTexture(ktx), name_cstr);
+  // v5 API: `uastc` bool replaced by `codec` enum; `compressionLevel`
+  // renamed to `etc1sCompressionLevel`.
+  ktxBasisParams bp{};
+  bp.structSize = sizeof(bp);
+  bp.codec = KTX_BASIS_CODEC_UASTC_HDR_4x4;
+  bp.uastcFlags = KTX_PACK_UASTC_LEVEL_DEFAULT;
+  bp.etc1sCompressionLevel = KTX_ETC1S_DEFAULT_COMPRESSION_LEVEL;
+  bp.threadCount = 8;
+
+  if (const auto err = ktxTexture2_CompressBasisEx(ktx, &bp);
       err != KTX_SUCCESS) {
-    return std::unexpected(std::format("ktxTexture_WriteToNamedFile failed: {}",
-                                       std::to_underlying(err)));
+    return std::unexpected(std::format("ktxTexture2_CompressBasisEx failed: {}",
+                                       ktx_error_string(err)));
+  }
+
+  // Zstd supercompression on top of the UASTC HDR payload.
+  if (const auto err = ktxTexture2_DeflateZstd(ktx, 6); err != KTX_SUCCESS) {
+    return std::unexpected(std::format("ktxTexture2_DeflateZstd failed: {}",
+                                       ktx_error_string(err)));
+  }
+
+  const auto writer = std::format("Dockyard - 1.0.0");
+  ktxHashList_AddKVPair(&ktx->kvDataHead, KTX_WRITER_KEY,
+                        static_cast<ktx_uint32_t>(writer.size() + 1),
+                        writer.data());
+
+  const auto pixel_count = static_cast<usize>(width) * height;
+  const auto *pixel_data = reinterpret_cast<const FloatPixel *>(data);
+  std::span<const FloatPixel> source_pixels(pixel_data, pixel_count);
+  auto [scale_factor, shader_multiplier] = calculate_hdr_scale(source_pixels);
+  // Format your calculated scale factor as a string
+  const auto hdr_scale_str = std::format(
+      "{:.6f}", scale_factor); // Replace 1.0f with your actual calculated scale
+
+  // Inject into the KTX2 hash list
+  ktxHashList_AddKVPair(&ktx->kvDataHead, "HDRScale",
+                        static_cast<ktx_uint32_t>(hdr_scale_str.size() + 1),
+                        hdr_scale_str.data());
+
+  if (const auto err =
+          ktxTexture_WriteToNamedFile(ktxTexture(ktx), output.string().c_str());
+      err != KTX_SUCCESS) {
+    return std::unexpected(
+        std::format("WriteToNamedFile failed: {}", ktx_error_string(err)));
   }
 
   return {};
 }
+
 } // namespace
 
 auto convert_hdr_to_ktx2(const VFSPath &input, const VFSPath &output, bool force)

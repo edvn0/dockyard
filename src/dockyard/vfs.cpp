@@ -146,34 +146,39 @@ auto VFS::read_binary(const VFSPath &p)
   return read_binary(p.view());
 }
 
-/**struct Filter {
-    std::unordered_set<std::string_view> ignored_dirs;
-    std::unordered_set<std::string_view> included_extensions;
-  }; */
 auto VFS::list(std::string_view virtual_path, const Filter &filter)
     -> std::vector<std::filesystem::path> {
-  std::filesystem::path physical = resolve(virtual_path);
+  const std::filesystem::path physical = resolve(virtual_path);
   std::vector<std::filesystem::path> paths;
 
   if (!std::filesystem::exists(physical) ||
       !std::filesystem::is_directory(physical)) {
-    warn("VFS: Path does not exist or is not a directory: {}",
+    warn("VFS: path does not exist or is not a directory: {}",
          physical.string());
     return paths;
   }
 
-  for (const auto &entry :
-       std::filesystem::recursive_directory_iterator(physical)) {
-    if (entry.is_regular_file()) {
-      if (!filter.ignored_dirs.contains(
-              entry.path().parent_path().filename().string())) {
-        if (filter.included_extensions.empty() ||
-            filter.included_extensions.contains(
-                entry.path().extension().string())) {
-          paths.push_back(entry.path());
-        }
-      }
+  for (auto it = std::filesystem::recursive_directory_iterator(physical);
+       it != std::filesystem::recursive_directory_iterator{}; ++it) {
+    if (it.depth() > static_cast<int>(filter.depth)) {
+      it.disable_recursion_pending();
+      continue;
     }
+
+    if (!it->is_regular_file())
+      continue;
+
+    const auto rel = std::filesystem::relative(it->path(), physical);
+
+    if (filter.ignored_dirs.contains(
+            it->path().parent_path().filename().string()))
+      continue;
+
+    if (!filter.included_extensions.empty() &&
+        !filter.included_extensions.contains(it->path().extension().string()))
+      continue;
+
+    paths.push_back(rel);
   }
 
   return paths;

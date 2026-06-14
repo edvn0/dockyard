@@ -1,6 +1,6 @@
-import include.ibl;
+import ibl;
 import bindless;
-import include.pbr;
+import pbr;
 
 [shader("compute")]
 [numthreads(8, 8, 1)]

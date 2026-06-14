@@ -120,6 +120,13 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
         grid_side,
         grid_side,
     };
+
+    auto human_like = scene.make("Human");
+    auto xt = human_like.get<Components::Transform>().mut();
+    xt.position = glm::vec3(0.0f, 0.875f, 0.0f); // centred vertically
+    human_like.emplace<Components::Mesh>(mesh_handle);
+    xt.scale = glm::vec3(0.2f, 1.75f, 0.2f); // thin 1.75m pillar
+
     auto floor = scene.make("Floor");
     floor.emplace<Components::Mesh>(mesh_handle);
     floor.get<Components::Transform>().mut().scale = {30, 1, 30};
@@ -825,7 +832,8 @@ auto Dockforge::draw_toolbar() -> void {
     if (ImGui::Button("Reload DLL")) {
       PROFILE_SCOPE("Reload dll");
       game_dll.reset();
-      auto path = VFSPath::create("binary://{}{}", game_dll_stem, shared_extension);
+      auto path =
+          VFSPath::create("binary://{}.{}", game_dll_stem, shared_extension);
       if (auto result = dy::GameDll::load(path)) {
         game_dll = std::move(*result);
         game_dll->start_watching(renderer->thread_pool);
@@ -1099,11 +1107,14 @@ auto Dockforge::stop() -> void {
 
 auto Dockforge::update(float ts) -> void {
   if (is_playing && game_dll && game_dll->game()) {
-    if (game_dll->poll_reload())
+    if (game_dll->poll_reload()) {
+      game_dll->game()->destroy(&game_memory, active_scene);
+      game_memory.reset();
+      game_dll->game()->init(&game_memory, active_scene);
       info("Game DLL hot reloaded");
+    }
     game_dll->game()->update(&game_memory, active_scene, ts);
   }
-
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
 

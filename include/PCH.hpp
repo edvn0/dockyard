@@ -22,7 +22,6 @@
 #include <vector>
 
 #include <GLFW/glfw3.h>
-#include <VkBootstrap.h>
 #include <entt/entt.hpp>
 #include <spdlog/spdlog.h>
 #include <vk_mem_alloc.h>

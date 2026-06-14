@@ -32,9 +32,9 @@ float3 face_uv_to_dir(uint face, float2 uv)
 
 float2 dir_to_equirect_uv(float3 dir)
 {
-    float phi = atan2(dir.z, dir.x);             // [-π, π]
-    float theta = asin(clamp(dir.y, -1.0, 1.0)); // [-π/2, π/2]
-    return float2(phi / (2.0 * PI) + 0.5, theta / PI + 0.5);
+    float phi = atan2(dir.z, dir.x);
+    float theta = asin(clamp(dir.y, -1.0, 1.0));
+    return float2(phi / (2.0 * PI) + 0.5, 0.5 - theta / PI);
 }
 
 float radical_inverse_vdc(uint bits)

@@ -71,7 +71,7 @@ struct Texture {
                      u32 mip_levels = 1U,
                      bool dedicated_memory = false) -> Texture;
   static auto load_ktx2_hdr_texture(const VulkanContext &, const VFSPath &)
-      -> Texture;
+      -> std::expected<Texture, std::string>;
 
   struct CubemapInfo {
     u32 size;

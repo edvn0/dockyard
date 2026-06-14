@@ -93,9 +93,12 @@ public:
   struct Filter {
     std::unordered_set<std::string_view> ignored_dirs;
     std::unordered_set<std::string_view> included_extensions;
+    u32 depth = static_cast<u32>(~0); // No depth
   };
-  auto list(std::string_view virtual_path, const Filter &filter = {})
-      -> std::vector<std::filesystem::path>;
+  auto list(std::string_view virtual_path,
+            const Filter &filter = {
+                .depth = static_cast<u32>(~0),
+            }) -> std::vector<std::filesystem::path>;
 
   auto last_write_time(const VFSPath &) -> std::expected<std::filesystem::file_time_type, std::error_code>;
 

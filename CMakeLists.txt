@@ -211,13 +211,28 @@ CPMAddPackage(
 CPMAddPackage(
         NAME ktx
         GITHUB_REPOSITORY KhronosGroup/KTX-Software
-        GIT_TAG v4.4.2
+        GIT_TAG main
         OPTIONS
         "KTX_FEATURE_STATIC_LIBRARY ON"
         "KTX_FEATURE_TOOLS OFF"
         "KTX_FEATURE_DOCS OFF"
         "KTX_FEATURE_TESTS OFF"
 )
+# KTX-Software HEAD bundles an old vulkan_core.h inside dfdutils which
+# shadows the real Vulkan SDK headers when picked up as a regular -I.
+# Strip it from ktx's public interface so vk-bootstrap and our own code
+# see the SDK headers instead.
+foreach(_ktx_target IN ITEMS ktx ktx_read)
+    if (TARGET ${_ktx_target})
+        get_target_property(_ktx_iface_includes ${_ktx_target} INTERFACE_INCLUDE_DIRECTORIES)
+        if (_ktx_iface_includes)
+            list(FILTER _ktx_iface_includes EXCLUDE REGEX "dfdutils")
+            set_target_properties(${_ktx_target} PROPERTIES
+                    INTERFACE_INCLUDE_DIRECTORIES "${_ktx_iface_includes}"
+            )
+        endif ()
+    endif ()
+endforeach()
 
 CPMAddPackage(
         NAME stb
@@ -514,7 +529,12 @@ dockyard_configure_renderdoc(dockyard
         INCLUDE_CACHE_VARIABLE
         RENDERDOC_INCLUDE_PATH
 )
-
+if (ktx_SOURCE_DIR)
+    target_include_directories(dockyard PRIVATE
+            "${ktx_SOURCE_DIR}/external/basis_universal/encoder"
+            "${ktx_SOURCE_DIR}/external/basis_universal/transcoder"
+    )
+endif ()
 target_compile_options(dockyard PRIVATE
         $<$<CXX_COMPILER_ID:MSVC>:/MP>
 )

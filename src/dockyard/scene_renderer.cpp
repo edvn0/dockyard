@@ -591,7 +591,7 @@ auto SceneRenderer::initialise_bindless() -> void {
 
   {
     ZoneScopedNC("IBL Probe Init", 0xFFD700);
-    pending_hdr_map = VFSPath::create("textures://env/studio.hdr");
+    pending_hdr_map = VFSPath::create("textures://env/quattro_canti_1k.hdr");
   }
 }
 
@@ -1647,17 +1647,23 @@ CompressedInstanceData::CompressedInstanceData(const glm::mat4 &t,
 }
 
 auto SceneRenderer::create_ibl_probe_from_hdr(SceneRenderer &renderer,
-                                              const VFSPath &path) -> IblProbe {
+                                              const VFSPath &path)
+    -> std::expected<IblProbe, std::string> {
   ZoneScopedNC("create_ibl_probe_from_hdr", 0xFFD700);
 
   auto equirect_tex = Texture::load_ktx2_hdr_texture(renderer.ctx, path);
+  if (!equirect_tex) {
+    return std::unexpected("Could not load texture");
+  }
 
   const auto equirect = renderer.textures.create(TextureEntry{
-      .texture = std::move(equirect_tex),
+      .texture = std::move(equirect_tex.value()),
       .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
   });
 
   auto probe = IblProbe::create(renderer.ctx, renderer, equirect);
+  if (!probe)
+    return std::unexpected(probe.error());
 
   if (auto *entry = renderer.textures.get(equirect)) {
     entry->texture.destroy(renderer.ctx, &renderer.textures);
@@ -1697,15 +1703,20 @@ auto SceneRenderer::process_pending_hdr_map() -> void {
   const auto ktx2_path = source_path.with_extension(".ktx2");
 
   if (needs_conversion) {
-    auto result = convert_hdr_to_ktx2(source_path, ktx2_path);
+    auto result = convert_hdr_to_ktx2(source_path, ktx2_path, /*force=*/false);
     if (!result) {
       error("Failed to convert HDR map: {}", result.error());
       return;
     }
   }
 
-  auto new_probe = create_ibl_probe_from_hdr(*this, ktx2_path);
-  auto old_probe = std::exchange(ibl_probe, std::move(new_probe));
+  auto new_probe = SceneRenderer::create_ibl_probe_from_hdr(*this, ktx2_path);
+  IblProbe old_probe = ibl_probe;
+  if (new_probe) {
+    old_probe = std::exchange(ibl_probe, std::move(new_probe.value()));
+  } else {
+    return;
+  }
 
   vkDeviceWaitIdle(ctx.device);
   old_probe.destroy(ctx, *this);

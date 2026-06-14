@@ -1,4 +1,4 @@
-import include.ibl;
+import ibl;
 import bindless;
 
 [shader("compute")]

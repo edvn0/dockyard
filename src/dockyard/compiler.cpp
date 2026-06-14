@@ -55,6 +55,7 @@ private:
 };
 
 struct SlangVFSAdapter final : ISlangFileSystem {
+
   SlangVFSAdapter(std::string_view mount) : mount(mount) {}
 
   SLANG_NO_THROW SlangResult SLANG_MCALL
@@ -87,21 +88,25 @@ struct SlangVFSAdapter final : ISlangFileSystem {
     auto result = VFS::get().read_bytes(vfs_path);
 
     if (!result) {
-      const auto fallback_path =
-          VFSPath::create(std::format("shaders://include/{}", path));
-      result = VFS::get().read_bytes(fallback_path);
+      const auto filename = std::filesystem::path{path}.filename().string();
 
-      if (result) {
-        info("found file in fallback: {}", fallback_path.view());
+      for (const auto &dir : include_dirs()) {
+        const auto fallback =
+            VFSPath::create(std::format("shaders://{}/{}", dir, filename));
+        result = VFS::get().read_bytes(fallback);
+        if (result) {
+          info("found '{}' via shaders://{}/", filename, dir);
+          break;
+        }
       }
     }
 
     if (!result) {
       const std::string_view sv{path};
       if (!sv.ends_with(".slang-module")) {
-        warn("could not find file in primary ({}) or fallback "
-             "(shaders://include/{})",
-             vfs_path.view(), path);
+        warn("could not resolve '{}' in shaders:// or any top-level "
+             "subdirectory",
+             path);
       }
       return SLANG_E_NOT_FOUND;
     }
@@ -113,6 +118,23 @@ struct SlangVFSAdapter final : ISlangFileSystem {
 private:
   std::atomic<uint32_t> reference_count{1};
   std::string mount;
+
+  auto include_dirs() -> const std::vector<std::string> & {
+    std::call_once(include_dirs_flag, [this] {
+      const auto root = VFS::get().resolve("shaders://");
+      std::error_code ec;
+      for (const auto &entry : std::filesystem::directory_iterator{root, ec}) {
+        if (entry.is_directory()) {
+          dirs.push_back(entry.path().filename().string());
+          info("shader include dir: {}", entry.path().filename().string());
+        }
+      }
+    });
+    return dirs;
+  }
+
+  std::once_flag include_dirs_flag;
+  std::vector<std::string> dirs;
 
 public:
   void *castAs(const SlangUUID &guid) override { return nullptr; }

@@ -679,7 +679,8 @@ auto VulkanContext::one_time_submit_without_being_end(
 }
 
 auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
-                      TextureHandle equirect) -> IblProbe {
+                      TextureHandle equirect)
+    -> std::expected<IblProbe, std::string> {
   IblProbe probe{};
 
   struct PushConstants {
@@ -772,32 +773,38 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
                                          renderer.comparison_samplers,
                                          renderer.subimages);
 
-  auto make_pipeline = [&, desc_layout =
-                               renderer.bindless.layout](const VFSPath &path) {
-    auto could =
+  const auto desc_layout = renderer.bindless.layout;
+
+  auto make_pipeline =
+      [&](const char *path) -> std::expected<PipelineHandle, std::string> {
+    auto result =
         renderer.pipeline_registry->create_compute(ComputePipelineDescription{
-            .shader_path = path,
+            .shader_path = VFSPath::create(path),
             .descriptor_set_layout = desc_layout,
             .layout = VK_NULL_HANDLE,
         });
-    if (!could)
-      std::abort();
-    return could.value();
+    if (!result)
+      return std::unexpected(std::format("Failed to compile pipeline '{}': {}",
+                                         path, result.error()));
+    return result.value();
   };
 
-  auto compile_all = [](auto factory, auto... paths) {
-    std::array pipelines{factory(VFSPath::create(paths))...};
+  auto pipe_equirect = make_pipeline("shaders://ibl/equirect_to_cubemap.slang");
+  auto pipe_irradiance =
+      make_pipeline("shaders://ibl/irradiance_convolve.slang");
+  auto pipe_prefilter = make_pipeline("shaders://ibl/specular_prefilter.slang");
+  auto pipe_brdf_lut = make_pipeline("shaders://ibl/brdf_lut_gen.slang");
 
-    return std::apply(
-        [](auto... elems) { return std::make_tuple(std::move(elems)...); },
-        std::move(pipelines));
-  };
+  if (!pipe_equirect)
+    return std::unexpected(pipe_equirect.error());
+  if (!pipe_irradiance)
+    return std::unexpected(pipe_irradiance.error());
+  if (!pipe_prefilter)
+    return std::unexpected(pipe_prefilter.error());
+  if (!pipe_brdf_lut)
+    return std::unexpected(pipe_brdf_lut.error());
 
-  auto [pipe_equirect, pipe_irradiance, pipe_prefilter, pipe_brdf_lut] =
-      compile_all(make_pipeline, "shaders://equirect_to_cubemap.slang",
-                  "shaders://irradiance_convolve.slang",
-                  "shaders://specular_prefilter.slang",
-                  "shaders://brdf_lut_gen.slang");
+  // --- barrier/dispatch helpers (unchanged) ---
 
   auto cube_barrier =
       [](VkImage image, u32 mip_levels, VkPipelineStageFlags2 src_stage,
@@ -893,11 +900,10 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
     }
 
     {
-      const auto &entry = renderer.pipeline_registry->get_entry(pipe_equirect);
+      const auto &entry = renderer.pipeline_registry->get_entry(*pipe_equirect);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
                               0u, 1u, &renderer.bindless.set, 0u, nullptr);
-
       const PushConstants pc{
           .equirect_index = equirect.index(),
           .size = 512u,
@@ -906,7 +912,6 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       };
       vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
                          sizeof(pc), &pc);
-
       vkCmdDispatch(cmd, 64u, 64u, 6u);
     }
 
@@ -921,13 +926,11 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
 
     {
       const auto &entry =
-          renderer.pipeline_registry->get_entry(pipe_irradiance);
+          renderer.pipeline_registry->get_entry(*pipe_irradiance);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
                               0u, 1u, &renderer.bindless.set, 0u, nullptr);
-
       const auto target_size = irr_entry->texture.extent.width;
-
       const PushConstants pc{
           .equirect_index = probe.env_map.index(),
           .size = target_size,
@@ -936,24 +939,20 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       };
       vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
                          sizeof(pc), &pc);
-
       const auto group_count_x = (target_size + 7u) / 8u;
       const auto group_count_y = (target_size + 7u) / 8u;
-      const auto group_count_z = 6u; // Always 6 cubemap faces
-
-      vkCmdDispatch(cmd, group_count_x, group_count_y, group_count_z);
+      vkCmdDispatch(cmd, group_count_x, group_count_y, 6u);
     }
 
     {
-      const auto &entry = renderer.pipeline_registry->get_entry(pipe_prefilter);
+      const auto &entry =
+          renderer.pipeline_registry->get_entry(*pipe_prefilter);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
                               0u, 1u, &renderer.bindless.set, 0u, nullptr);
-
       for (u32 mip = 0u; mip < prefiltered_mips; ++mip) {
         const u32 mip_size = std::max(1u, prefiltered_size >> mip);
         const u32 groups = std::max(1u, mip_size / 8u);
-
         const PushConstants pc{
             .equirect_index = probe.env_map.index(),
             .mip = mip,
@@ -964,25 +963,21 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
         };
         vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
                            sizeof(pc), &pc);
-
         vkCmdDispatch(cmd, groups, groups, 6u);
       }
     }
 
     {
-      const auto &entry = renderer.pipeline_registry->get_entry(pipe_brdf_lut);
+      const auto &entry = renderer.pipeline_registry->get_entry(*pipe_brdf_lut);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
                               0u, 1u, &renderer.bindless.set, 0u, nullptr);
-
       const PushConstants pc{
           .size = 512u,
           .out_index = probe.brdf_lut.index(),
       };
       vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
                          sizeof(pc), &pc);
-
-      // 512 / 8 = 64 groups per dim
       vkCmdDispatch(cmd, 64u, 64u, 1u);
     }
 
@@ -1011,8 +1006,8 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
     }
   });
 
-  renderer.pipeline_registry->destroy(pipe_equirect, pipe_irradiance,
-                                      pipe_prefilter, pipe_brdf_lut);
+  renderer.pipeline_registry->destroy(*pipe_equirect, *pipe_irradiance,
+                                      *pipe_prefilter, *pipe_brdf_lut);
 
   return probe;
 }

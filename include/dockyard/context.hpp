@@ -130,10 +130,13 @@ struct IblProbe {
 
   u32 prefiltered_mip_count{};
 
-  auto valid() const { return env_map.valid() && irradiance.valid() && prefiltered.valid() && brdf_lut.valid(); }
+  [[nodiscard]] auto valid() const {
+    return env_map.valid() && irradiance.valid() && prefiltered.valid() &&
+           brdf_lut.valid();
+  }
 
   static auto create(const VulkanContext &, SceneRenderer &, TextureHandle)
-      -> IblProbe;
+      -> std::expected<IblProbe, std::string>;
   auto destroy(const VulkanContext &, SceneRenderer &) -> void;
 };
 

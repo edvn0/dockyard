@@ -394,23 +394,23 @@ struct SceneRenderer {
 
   auto set_hdr_map(VFSPath) -> void;
 auto process_pending_hdr_map() -> void;
-auto create_ibl_probe_from_hdr(SceneRenderer &renderer, const VFSPath &path)
-    -> IblProbe;
+static auto create_ibl_probe_from_hdr(SceneRenderer &renderer,
+                                      const VFSPath &path)
+    -> std::expected<IblProbe, std::string>;
 
-  template <typename Handle>
-  auto resolve(Handle handle) const -> decltype(auto) {
-    if constexpr (std::is_same_v<Handle, TextureHandle>) {
-      return textures.get(handle)->texture;
-    } else if constexpr (std::is_same_v<Handle, SamplerHandle>) {
-      return samplers.get(handle)->sampler;
-    } else if constexpr (std::is_same_v<Handle, ComparisonSamplerHandle>) {
-      return comparison_samplers.get(handle)->sampler;
-    } else if constexpr (std::is_same_v<Handle, MeshAssetHandle>) {
-      return mesh_registry.get(handle);
-    } else {
-      static_assert(false, "Unsupported handle type");
-    }
+template <typename Handle> auto resolve(Handle handle) const -> decltype(auto) {
+  if constexpr (std::is_same_v<Handle, TextureHandle>) {
+    return textures.get(handle)->texture;
+  } else if constexpr (std::is_same_v<Handle, SamplerHandle>) {
+    return samplers.get(handle)->sampler;
+  } else if constexpr (std::is_same_v<Handle, ComparisonSamplerHandle>) {
+    return comparison_samplers.get(handle)->sampler;
+  } else if constexpr (std::is_same_v<Handle, MeshAssetHandle>) {
+    return mesh_registry.get(handle);
+  } else {
+    static_assert(false, "Unsupported handle type");
   }
+}
 
   template <typename Handle> auto resolve_mut(Handle handle) -> decltype(auto) {
     if constexpr (std::is_same_v<Handle, TextureHandle>) {
