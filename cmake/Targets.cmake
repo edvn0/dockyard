@@ -129,6 +129,8 @@ add_executable(dockforge
         src/dockforge/editor_camera.cpp
         src/dockforge/editor_utils.cpp
         src/dockforge/matrix_cache.cpp
+        src/dockforge/scene_outliner_panel.cpp
+        src/dockforge/inspector_panel.cpp
 )
 target_enable_native_arch(dockforge)
 target_link_libraries(dockforge PRIVATE dockyard imgui nfd)

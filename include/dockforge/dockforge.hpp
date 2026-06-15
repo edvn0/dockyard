@@ -1,6 +1,7 @@
 #pragma once
 
-#include <dockforge/scene_outlier.hpp>
+#include <dockforge/editor_state.hpp>
+#include <dockforge/ipanel.hpp>
 #include <dockyard/app.hpp>
 #include <dockyard/canvas_renderer.hpp>
 #include <dockyard/freelist_pool.hpp>
@@ -10,6 +11,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 // Should be able to remove these includes if I wrap the gizmo operation
 #include <imgui.h>
@@ -51,9 +53,6 @@ struct Dockforge : App {
   ViewportResources viewport_resources;
 
   std::optional<glm::vec2> pending_pick;
-  entt::entity pending_duplicate = entt::null;
-  entt::entity pending_delete = entt::null;
-  entt::entity delete_candidate = entt::null;
   ImGuizmo::OPERATION gizmo_op = ImGuizmo::TRANSLATE;
   VkExtent2D viewport_panel_extent{};
   VkExtent2D viewport_panel_offset{};
@@ -61,7 +60,7 @@ struct Dockforge : App {
   VkExtent2D last_ui_offset{};
   std::optional<VkExtent2D> pending_viewport_resize{std::nullopt};
   std::optional<VkExtent2D> candidate_viewport_resize{std::nullopt};
-  SceneOutlinerState state;
+  EditorState editor_state;
   ShadowMapState shadow_map_state;
 
   double last_resize_change_time = 0.0;
@@ -71,6 +70,8 @@ struct Dockforge : App {
   dy::GameMemory               game_memory;
   bool                         is_playing   = false;
   std::string                  game_dll_stem = "sandbox";
+
+  std::vector<std::unique_ptr<IPanel>> panels;
 
   ~Dockforge() override;
 
@@ -85,13 +86,10 @@ struct Dockforge : App {
   auto resize(u32 w, u32 h) -> void override;
 
   auto try_pick_entity(glm::vec2 mouse_screen) -> void;
-  void refresh_entity_cache();
-  void draw_scene_outliner();
-  void draw_inspector();
   auto build_ui() -> void;
   auto draw_debug_shapes() -> void;
   auto duplicate_entity(Entity) -> Entity;
-  void flush_material_overrides();
+  auto flush_material_overrides() -> void;
   auto draw_hdr_selector() -> void;
 
   auto destroy() -> void override;

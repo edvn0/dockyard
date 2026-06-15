@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <dockforge/dockforge.hpp>
+#include <dockforge/inspector_panel.hpp>
+#include <dockforge/scene_outliner_panel.hpp>
 
 #include <dockforge/editor_camera.hpp>
 #include <dockforge/editor_utils.hpp>
@@ -227,6 +229,13 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
   }
 
+  editor_state.active_scene = active_scene;
+  editor_state.renderer     = renderer.get();
+
+  panels.push_back(std::make_unique<SceneOutlinerPanel>(
+      [this](Entity ent) { return duplicate_entity(ent); }));
+  panels.push_back(std::make_unique<InspectorPanel>());
+
   auto frustum_entity = active_scene->make("DebugFrustum");
   auto &df_transform = frustum_entity.get<Components::Transform>();
   df_transform.mut().position = glm::vec3{5, -5, -10};
@@ -317,259 +326,9 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
     }
   }
 
-  state.selected = best;
+  editor_state.selected = best;
 }
 
-void Dockforge::refresh_entity_cache() {
-  ZoneScopedNC("Dockforge::refresh_entity_cache", 0x808080);
-  state.entity_cache.clear();
-  auto &registry = active_scene->registry();
-
-  std::vector<entt::entity> roots;
-  auto tag_view = registry.view<Components::Tag>();
-  for (auto entity : tag_view) {
-    if (!registry.any_of<Components::ParentOf>(entity)) {
-      roots.push_back(entity);
-    }
-  }
-
-  auto &cache = state.entity_cache;
-  auto child_view = registry.view<Components::ParentOf>();
-
-  auto const add_to_cache_recursive =
-      [&, &s = state](this auto &&self, entt::entity current,
-                      u32 current_depth) -> void {
-    bool has_children = false;
-    for (auto child : child_view) {
-      if (child_view.get<Components::ParentOf>(child).parent == current) {
-        has_children = true;
-        break;
-      }
-    }
-
-    cache.push_back({
-        .entity = current,
-        .depth = current_depth,
-        .is_visible = true,
-    });
-
-    if (has_children && s.expanded_entities.contains(current)) {
-      for (auto child : child_view) {
-        if (child_view.get<Components::ParentOf>(child).parent == current) {
-          self(child, current_depth + 1);
-        }
-      }
-    }
-  };
-
-  for (auto root : roots) {
-    add_to_cache_recursive(root, 0);
-  }
-
-  state.cache_dirty = false;
-}
-
-auto Dockforge::draw_inspector() -> void {
-  if (!ImGui::Begin("Inspector")) {
-    ImGui::End();
-    return;
-  }
-
-  if (state.selected == entt::null) {
-    ImGui::TextDisabled("Nothing selected");
-    ImGui::End();
-    return;
-  }
-
-  Entity entity{*active_scene, state.selected};
-  if (!entity.valid()) {
-    state.selected = entt::null;
-    ImGui::End();
-    return;
-  }
-
-  if (auto *tag = entity.try_get<Components::Tag>()) {
-    char buf[128];
-    std::snprintf(buf, sizeof(buf), "%.*s", static_cast<int>(tag->tag.size()),
-                  tag->tag.data());
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {6.F, 5.F});
-    ImGui::SetNextItemWidth(-1.F);
-    if (ImGui::InputText("##tag", buf, sizeof(buf)))
-      tag->tag = buf;
-    ImGui::PopStyleVar();
-  }
-
-  ImGui::Separator();
-  ImGui::Spacing();
-  if (ComponentInspector::draw(*renderer, entity)) {
-    state.hierarchy_dirty = true;
-  }
-  ImGui::End();
-}
-
-void Dockforge::draw_scene_outliner() {
-  if (state.cache_dirty) {
-    refresh_entity_cache();
-  }
-
-  if (!ImGui::Begin("Entities")) {
-    ImGui::End();
-    return;
-  }
-
-  static ImGuiTextFilter filter;
-  filter.Draw("##filter", -1.0F);
-
-  ImGui::Separator();
-
-  const float item_height = ImGui::GetTextLineHeightWithSpacing();
-  ImGui::BeginChild("##entity_list", ImVec2(0, 0), ImGuiChildFlags_None,
-                    ImGuiWindowFlags_HorizontalScrollbar);
-
-  ImGuiListClipper clipper;
-  clipper.Begin(static_cast<int>(state.entity_cache.size()), item_height);
-
-  auto &registry = active_scene->registry();
-  auto child_view = registry.view<Components::ParentOf>();
-
-  while (clipper.Step()) {
-    for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-      const auto &cached = state.entity_cache[static_cast<usize>(i)];
-      Entity entity{*active_scene, cached.entity};
-
-      auto *tag = entity.try_get<Components::Tag>();
-      auto *mesh = entity.try_get<Components::Mesh>();
-
-      if (tag == nullptr)
-        continue;
-
-      const std::string_view label = tag->tag;
-      if (!filter.PassFilter(label.data()))
-        continue;
-
-      if (cached.depth > 0) {
-        ImGui::Indent(static_cast<float>(cached.depth) * 16.0f);
-      }
-
-      bool has_children = false;
-      for (auto child : child_view) {
-        if (child_view.get<Components::ParentOf>(child).parent ==
-            cached.entity) {
-          has_children = true;
-          break;
-        }
-      }
-
-      bool is_expanded = state.expanded_entities.contains(cached.entity);
-
-      ImGui::PushID(static_cast<int>(static_cast<uint32_t>(cached.entity)));
-      if (has_children) {
-        ImGuiDir arrow_dir = is_expanded ? ImGuiDir_Down : ImGuiDir_Right;
-        if (ImGui::ArrowButton("##toggle", arrow_dir)) {
-          if (is_expanded) {
-            state.expanded_entities.erase(cached.entity);
-          } else {
-            state.expanded_entities.insert(cached.entity);
-          }
-          state.cache_dirty =
-              true; // Rebuild cache on next frame since size changed!
-        }
-        ImGui::SameLine();
-      } else {
-        // Keep spacing aligned for leaf items without arrows
-        ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), 0));
-        ImGui::SameLine();
-      }
-
-      std::array<char, 128> row_label{};
-      if (mesh != nullptr) {
-        std::snprintf(row_label.data(), std::size(row_label), "[M] %.*s  (%u)",
-                      static_cast<int>(label.size()), label.data(),
-                      mesh->handle.index());
-      } else {
-        std::snprintf(row_label.data(), std::size(row_label), "%.*s",
-                      static_cast<int>(label.size()), label.data());
-      }
-
-      const bool is_selected = (state.selected == cached.entity);
-      if (ImGui::Selectable(row_label.data(), is_selected,
-                            ImGuiSelectableFlags_SpanAllColumns)) {
-        state.selected = cached.entity;
-      }
-
-      if (ImGui::BeginPopupContextItem("##entity_ctx")) {
-        if (ImGui::MenuItem("Duplicate")) {
-          pending_duplicate = cached.entity;
-        }
-
-        ImGui::Separator();
-
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4{0.9F, 0.35F, 0.35F, 1.F});
-        if (ImGui::MenuItem("Delete")) {
-          delete_candidate = cached.entity;
-        }
-        ImGui::PopStyleColor();
-
-        ImGui::EndPopup();
-      }
-
-      ImGui::PopID(); // entity ID
-
-      if (cached.depth > 0) {
-        ImGui::Unindent(static_cast<float>(cached.depth) * 16.0f);
-      }
-
-      if (is_selected) {
-        ImGui::SetItemDefaultFocus();
-      }
-    }
-  }
-  clipper.End();
-
-  if (pending_duplicate != entt::null) {
-    duplicate_entity({*active_scene, pending_duplicate});
-    pending_duplicate = entt::null;
-    state.cache_dirty = true;
-  }
-  if (pending_delete != entt::null) {
-    if (state.selected == pending_delete)
-      state.selected = entt::null;
-    active_scene->destroy_and_all_children(pending_delete, *renderer);
-    state.cache_dirty = true;
-    pending_delete = entt::null;
-  }
-
-  if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
-      state.selected != entt::null &&
-      ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
-    delete_candidate = state.selected;
-  }
-
-  ImGui::EndChild();
-
-  if (delete_candidate != entt::null)
-    ImGui::OpenPopup("Delete Entity?");
-
-  if (ImGui::BeginPopupModal("Delete Entity?", nullptr,
-                             ImGuiWindowFlags_AlwaysAutoResize)) {
-    ImGui::Text("Are you sure? This deletes all child entities too.");
-    ImGui::Separator();
-    if (ImGui::Button("OK", ImVec2(120, 0))) {
-      pending_delete = delete_candidate;
-      delete_candidate = entt::null;
-      ImGui::CloseCurrentPopup();
-    }
-    ImGui::SetItemDefaultFocus();
-    ImGui::SameLine();
-    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
-      delete_candidate = entt::null;
-      ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndPopup();
-  }
-
-  ImGui::End();
-}
 
 [[nodiscard]] auto draw_material_editor(GPUMaterial &mat) -> bool {
   bool changed = false;
@@ -667,7 +426,7 @@ auto Dockforge::duplicate_entity(Entity src) -> Entity {
     ov->dirty = true;
   }
 
-  state.cache_dirty = true;
+  editor_state.cache_dirty = true;
   return dst;
 }
 
@@ -925,8 +684,8 @@ auto Dockforge::build_ui() -> void {
     pending_pick = glm::vec2(mp.x, mp.y);
   }
 
-  if (state.selected != entt::null) {
-    Entity selected_entity{*active_scene, state.selected};
+  if (editor_state.selected != entt::null) {
+    Entity selected_entity{*active_scene, editor_state.selected};
     auto &transform = selected_entity.get<Components::Transform>();
     auto &ltw = selected_entity.get<Components::LocalToWorld>();
     auto &&[view, proj] = resolve_camera();
@@ -973,7 +732,7 @@ auto Dockforge::build_ui() -> void {
         rot = glm::normalize(new_rot);
         scale = new_scale;
 
-        state.hierarchy_dirty = true;
+        editor_state.hierarchy_dirty = true;
       }
     }
   }
@@ -986,7 +745,7 @@ auto Dockforge::build_ui() -> void {
     if (ImGui::DragFloat3("Sun direction",
                           glm::value_ptr(renderer->sun_direction), 0.1F, -1.0F,
                           1.0F)) {
-      state.hierarchy_dirty = true;
+      editor_state.hierarchy_dirty = true;
     }
 
     ImGui::Separator();
@@ -998,11 +757,11 @@ auto Dockforge::build_ui() -> void {
   }
   ImGui::End();
 
-  { ZoneScopedNC("draw_toolbar", 0x888888);          draw_toolbar(); }
-  { ZoneScopedNC("draw_scene_outliner", 0x888888);   draw_scene_outliner(); }
-  { ZoneScopedNC("draw_inspector", 0x888888);        draw_inspector(); }
+  { ZoneScopedNC("draw_toolbar", 0x888888);             draw_toolbar(); }
+  for (auto& panel : panels)
+    panel->draw(editor_state);
   { ZoneScopedNC("draw_performance_overlay", 0x888888); draw_performance_overlay(); }
-  { ZoneScopedNC("draw_hdr_selector", 0x888888);    draw_hdr_selector(); }
+  { ZoneScopedNC("draw_hdr_selector", 0x888888);        draw_hdr_selector(); }
 
   auto draw_csm = [](CsmResources &resources) {
     if (ImGui::Begin("Cascaded Shadow Map Debug")) {
@@ -1105,11 +864,12 @@ auto Dockforge::play() -> void {
                        Components::Mesh>();
 
   active_scene = runtime_scene.get();
+  editor_state.active_scene = active_scene;
   game_memory.reset();
   game_dll->game()->init(&game_memory, active_scene);
   TracyMessage("Game started", 12);
   is_playing = true;
-  state.cache_dirty = true;
+  editor_state.cache_dirty = true;
 }
 
 auto Dockforge::stop() -> void {
@@ -1122,9 +882,10 @@ auto Dockforge::stop() -> void {
   game_memory.reset();
   TracyMessage("Game stopped", 12);
   active_scene = editor_scene.get();
+  editor_state.active_scene = active_scene;
   runtime_scene.reset();
   is_playing = false;
-  state.cache_dirty = true;
+  editor_state.cache_dirty = true;
 }
 
 auto Dockforge::update(float ts) -> void {
@@ -1244,10 +1005,10 @@ void compute_world_matrices(entt::registry &registry) {
 
 auto Dockforge::render(RenderContext &ctx) -> u64 {
   ZoneScopedNC("Dockforge::render", 0xFF6347);
-  if (state.hierarchy_dirty) [[unlikely]] {
+  if (editor_state.hierarchy_dirty) [[unlikely]] {
     compute_world_matrices(active_scene->registry());
     shadow_map_state.invalid = true;
-    state.hierarchy_dirty = false;
+    editor_state.hierarchy_dirty = false;
   }
 
   if (pending_pick) [[unlikely]] {
