@@ -635,6 +635,7 @@ auto Dockforge::draw_toolbar() -> void {
       if (auto result = dy::GameDll::load(path)) {
         game_dll = std::move(*result);
         game_dll->start_watching(renderer->thread_pool);
+        game_dll->game()->pre_init(*asset_loader);
       } else {
         warn("GameDll: {}", result.error());
       }

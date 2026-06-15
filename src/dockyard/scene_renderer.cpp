@@ -302,8 +302,13 @@ constexpr std::byte operator""_b(unsigned long long val) {
 
 SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
     : ctx(c), swapchain(sc),
+      tracy_vk_ctx(
+          std::unique_ptr<ProfilingContext,
+                          decltype(+[](ProfilingContext *) -> void {})>{
+              new ProfilingContext{},
+              +[](ProfilingContext *ctx) { delete ctx; }}),
       depth_prepass(RenderPassType::DepthPrepass, ctx.allocator, *this),
-      forward_pass(RenderPassType::Forward, ctx.allocator, *this), tracy_vk_ctx(std::unique_ptr<ProfilingContext, decltype(+[](ProfilingContext*) -> void{})>{new ProfilingContext{}, +[](ProfilingContext *ctx) {delete ctx;}}) {
+      forward_pass(RenderPassType::Forward, ctx.allocator, *this) {
   ZoneScopedNC("SceneRenderer::SceneRenderer", 0x4169E1);
   constexpr auto vertex_count = 1'000'000;
   constexpr auto index_count = 10'000'000;

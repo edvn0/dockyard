@@ -229,7 +229,7 @@ if (DOCKYARD_ENABLE_TRACY)
   CPMAddPackage(
           NAME Tracy
           GITHUB_REPOSITORY wolfpld/tracy
-          GIT_TAG 05cceee
+          GIT_TAG a98956f2
           OPTIONS
           "TRACY_ENABLE ON"
           "TRACY_ON_DEMAND ON"
