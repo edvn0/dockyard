@@ -427,18 +427,18 @@ inline auto ComponentInspector::draw_add_button(
     dy::for_each_type<dy::MasterComponentList>([&]<typename T>() {
       if constexpr (dy::ComponentConfig<T>::ui_inspectable) {
         using R = ComponentRenderer<T>;
-        if constexpr (!R::addable)
-          return;
-        if (entity.template try_get<T>() != nullptr)
-          return;
+        if constexpr (R::addable) {
+          if (entity.template try_get<T>() != nullptr)
+            return;
 
-        if (ImGui::MenuItem(R::label.data())) {
-          pending_add = [&, entity]() mutable {
-            if constexpr (has_add_hook<R>)
-              R::on_add(renderer, entity);
-            else
-              entity.template emplace<T>();
-          };
+          if (ImGui::MenuItem(R::label.data())) {
+            pending_add = [&, entity]() mutable {
+              if constexpr (has_add_hook<R>)
+                R::on_add(renderer, entity);
+              else
+                entity.template emplace<T>();
+            };
+          }
         }
       }
     });

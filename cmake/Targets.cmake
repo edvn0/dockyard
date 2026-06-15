@@ -219,6 +219,13 @@ if (DOCKYARD_BUILD_TESTING)
   endif ()
   target_link_libraries(dockyard-testing PRIVATE dockyard doctest::doctest)
 
+  add_custom_command(TARGET dockyard-testing POST_BUILD
+          COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              $<TARGET_RUNTIME_DLLS:dockyard-testing>
+              $<TARGET_FILE_DIR:dockyard-testing>
+          COMMAND_EXPAND_LISTS
+  )
+
   include(doctest)
   doctest_discover_tests(dockyard-testing)
 

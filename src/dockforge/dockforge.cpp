@@ -539,6 +539,12 @@ void Dockforge::draw_scene_outliner() {
     pending_delete = entt::null;
   }
 
+  if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
+      state.selected != entt::null &&
+      ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
+    delete_candidate = state.selected;
+  }
+
   ImGui::EndChild();
 
   if (delete_candidate != entt::null)
