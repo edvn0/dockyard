@@ -7,8 +7,16 @@
 
 set -euo pipefail
 
-BUILD_DIR="build/user-ninja-debug"
 _SKIP="${SKIP:-}"
+
+# Prefer user presets when available; fall back to the shared presets.
+if cmake --list-presets workflow 2>/dev/null | grep -q '"user-debug"'; then
+    PRESET="user-debug"
+    BUILD_DIR="build/user-ninja-debug"
+else
+    PRESET="debug"
+    BUILD_DIR="build/ninja-debug"
+fi
 
 # ── colour ───────────────────────────────────────────────────────────────────
 if [ -t 1 ]; then
@@ -80,12 +88,12 @@ else
 fi
 
 # ── cmake build + ctest ──────────────────────────────────────────────────────
-_sect "cmake  [user-debug]"
+_sect "cmake  [$PRESET]"
 if ! _wants cmake; then
     _skip "cmake"
 else
     STATUS=0
-    cmake --workflow --preset user-debug || STATUS=$?
+    cmake --workflow --preset "$PRESET" || STATUS=$?
     if [ "$STATUS" -eq 0 ]; then
         _pass "build and tests passed"
     else

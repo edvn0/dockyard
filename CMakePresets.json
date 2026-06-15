@@ -46,24 +46,63 @@
     {
       "name": "debug",
       "configurePreset": "ninja-debug",
-      "targets": [
-        "dockforge"
-      ]
+      "targets": ["sandbox", "dockforge", "gltf-imagemap", "dockyard-testing"]
     },
     {
       "name": "release",
       "configurePreset": "ninja-release",
-      "targets": [
-        "dockforge"
-      ]
+      "targets": ["sandbox", "dockforge", "gltf-imagemap", "dockyard-testing"]
     },
     {
       "name": "relwithdebinfo",
       "configurePreset": "ninja-relwithdebinfo",
-      "targets": [
-        "dockforge"
-      ]
+      "targets": ["sandbox", "dockforge", "gltf-imagemap", "dockyard-testing"]
     }
   ],
-  "testPresets": []
+  "testPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "ninja-debug",
+      "output": { "verbosity": "default" }
+    },
+    {
+      "name": "release",
+      "configurePreset": "ninja-release",
+      "output": { "verbosity": "default" }
+    },
+    {
+      "name": "relwithdebinfo",
+      "configurePreset": "ninja-relwithdebinfo",
+      "output": { "verbosity": "default" }
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "debug",
+      "displayName": "Configure, build, and test Debug",
+      "steps": [
+        { "type": "configure", "name": "ninja-debug" },
+        { "type": "build",     "name": "debug" },
+        { "type": "test",      "name": "debug" }
+      ]
+    },
+    {
+      "name": "release",
+      "displayName": "Configure, build, and test Release",
+      "steps": [
+        { "type": "configure", "name": "ninja-release" },
+        { "type": "build",     "name": "release" },
+        { "type": "test",      "name": "release" }
+      ]
+    },
+    {
+      "name": "relwithdebinfo",
+      "displayName": "Configure, build, and test RelWithDebInfo",
+      "steps": [
+        { "type": "configure", "name": "ninja-relwithdebinfo" },
+        { "type": "build",     "name": "relwithdebinfo" },
+        { "type": "test",      "name": "relwithdebinfo" }
+      ]
+    }
+  ]
 }
