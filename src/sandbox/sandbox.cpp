@@ -1,7 +1,10 @@
 #include <cmath>
+#include <dockyard/asset_loader.hpp>
+#include <glm/gtc/random.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/game_memory.hpp>
 #include <dockyard/igame.hpp>
+#include <dockyard/log.hpp>
 #include <dockyard/scene.hpp>
 #include <numbers>
 #include <vector>
@@ -25,19 +28,43 @@ struct SandboxState {
 };
 
 struct Sandbox : IGame {
-  void init(GameMemory *mem, Scene *scene) override {
+  MeshAssetHandle helmet_mesh{};
+
+  void pre_init(IAssetLoader &assets) override {
+    ZoneScopedNC("Sandbox::pre_init", 0x00FF88);
+    auto result = assets.load_mesh(
+        VFSPath::create("meshes://damaged_helmet/DamagedHelmet.glb"));
+    if (result) {
+      helmet_mesh = *result;
+      dy::info("Sandbox: helmet mesh ready (handle index {})", helmet_mesh.index());
+    } else {
+      dy::warn("Sandbox: failed to preload helmet mesh: {}", result.error());
+    }
+  }
+
+  void init(GameMemory *mem, Scene *scene, IAssetLoader &) override {
     ZoneScopedNC("Sandbox::init", 0x00FF88);
     auto *state = mem->allocate<SandboxState>();
 
     auto entity = scene->make("Player 4");
     state->player = entity.id();
 
-    using namespace Components;
+    if (helmet_mesh.valid()) {
+      constexpr auto size = 25.0F;
+      auto parent = scene->make("Helmet parent");
+      for (auto i = 0; i < 300; i++) {
+        auto child = scene->make("Helmet", parent);
+        child.emplace<Components::Mesh>(helmet_mesh);
+        child.get<Components::Transform>().mut().position =
+            glm::linearRand(glm::vec3{-size}, glm::vec3{size});
+      }
+    }
 
+    using namespace Components;
     scene->view<Transform, Components::Mesh>().each(
         [&](entt::entity e, const Transform &transform,
             const Components::Mesh &mesh) {
-          if (mesh.handle.index() != 1)
+          if (!mesh.handle.valid())
             return;
 
           scene->registry().emplace<HelmetTag>(e);

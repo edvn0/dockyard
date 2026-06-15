@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <format>
 #include <thread>
 #include <type_traits>
 
@@ -69,7 +70,15 @@ auto GameDll::load(const VFSPath path)
 
     dll->handle = platform_load(dll->loaded_path);
     if (dll->handle == nullptr) {
-        return std::unexpected("Failed to load game DLL");
+#ifdef _WIN32
+        char msg[256]{};
+        FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, nullptr, GetLastError(),
+                       MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+                       msg, sizeof(msg), nullptr);
+        return std::unexpected(std::format("Failed to load game DLL ({}): {}", dll->loaded_path.string(), msg));
+#else
+        return std::unexpected(std::format("Failed to load game DLL ({}): {}", dll->loaded_path.string(), dlerror()));
+#endif
     }
 
     auto* factory = reinterpret_cast<GameFactory>(
@@ -95,6 +104,7 @@ auto GameDll::load(const VFSPath path)
         warn("Could not check last write time for '{}'", path.view());
     }
 
+    info("GameDll: loaded '{}' (gen {})", dll->source_path.filename().string(), dll->generation);
     return dll;
 }
 

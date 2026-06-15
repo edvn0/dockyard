@@ -3,9 +3,11 @@
 namespace dy {
 class Scene;
 struct GameMemory;
+struct IAssetLoader;
 
 struct IGame {
-    virtual void init   (GameMemory*, Scene*) = 0;
+    virtual void pre_init(IAssetLoader&) {}
+    virtual void init   (GameMemory*, Scene*, IAssetLoader&) = 0;
     virtual void update (GameMemory*, Scene*, float ts) = 0;
     virtual void destroy(GameMemory*, Scene*) = 0;
     virtual ~IGame() = default;

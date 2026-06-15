@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <unordered_map>
 #include <dockforge/dockforge.hpp>
 #include <dockforge/inspector_panel.hpp>
 #include <dockforge/scene_outliner_panel.hpp>
@@ -14,6 +15,7 @@
 #include <dockyard/game_dll.hpp>
 #include <dockyard/game_memory.hpp>
 #include <dockyard/imgui_renderer.hpp>
+#include <dockyard/asset_loader.hpp>
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/scene_renderer.hpp>
@@ -39,6 +41,25 @@
 #include <tracy/Tracy.hpp>
 
 namespace {
+
+struct AssetLoader : dy::IAssetLoader {
+    dy::SceneRenderer &renderer;
+    std::unordered_map<std::string, dy::MeshAssetHandle> mesh_cache;
+
+    explicit AssetLoader(dy::SceneRenderer &r) : renderer(r) {}
+
+    auto load_mesh(const dy::VFSPath &path)
+        -> std::expected<dy::MeshAssetHandle, std::string> override {
+        auto key = std::string{path.view()};
+        if (auto it = mesh_cache.find(key); it != mesh_cache.end())
+            return it->second;
+        auto result = dy::mesh::load_from_path(path, renderer);
+        if (result)
+            mesh_cache.emplace(std::move(key), *result);
+        return result;
+    }
+};
+
     inline auto pack_normal(glm::vec3 n) {
       return glm::packSnorm4x8(glm::vec4(n, 0.0f));
     }
@@ -74,6 +95,7 @@ Dockforge::~Dockforge() = default;
 auto Dockforge::init(const InitialisationContext &ctx) -> void {
   renderer =
       std::make_unique<SceneRenderer>(ctx.context, ctx.swapchain_resources);
+  asset_loader = std::make_unique<AssetLoader>(*renderer);
   context = &ctx.context;
 
   game_memory = GameMemory::create();
@@ -81,6 +103,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
           VFSPath::create("binary://sandbox.{}", shared_extension))) {
     game_dll = std::move(*result);
     game_dll->start_watching(renderer->thread_pool);
+    game_dll->game()->pre_init(*asset_loader);
   } else {
     warn("GameDll: {}", result.error());
   }
@@ -208,18 +231,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       renderer->textures, renderer->samplers, renderer->comparison_samplers,
       renderer->subimages);
 
-  auto loaded = mesh::load_from_path(
-      VFSPath::create("meshes://damaged_helmet/DamagedHelmet.glb"), *renderer);
-  if (loaded) {
-    constexpr auto size = 25.0F;
-    auto parent = active_scene->make("Helmet parent");
-    for (auto i = 0; i < 300; i++) {
-      auto entity = active_scene->make("Helmet", parent);
-      entity.emplace<Components::Mesh>(*loaded);
-      entity.get<Components::Transform>().mut().position =
-          glm::linearRand(glm::vec3{-size}, glm::vec3{size});
-    }
-  }
+
 
   if (auto loaded_sponza = mesh::load_from_path(
           VFSPath::create("meshes://Sponza/MISSING_main_sponza.glb"),
@@ -232,8 +244,19 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   editor_state.active_scene = active_scene;
   editor_state.renderer     = renderer.get();
 
-  panels.push_back(std::make_unique<SceneOutlinerPanel>(
-      [this](Entity ent) { return duplicate_entity(ent); }));
+  editor_actions.duplicate_entity = [this](Entity ent) {
+      return duplicate_entity(ent);
+  };
+  editor_actions.create_entity = [this](std::string_view name) {
+      editor_state.cache_dirty = true;
+      return active_scene->make(name);
+  };
+  editor_actions.destroy_entity = [this](Entity ent) {
+      active_scene->destroy_and_all_children(ent.handle(), *renderer);
+      editor_state.cache_dirty = true;
+  };
+
+  panels.push_back(std::make_unique<SceneOutlinerPanel>());
   panels.push_back(std::make_unique<InspectorPanel>());
 
   auto frustum_entity = active_scene->make("DebugFrustum");
@@ -759,7 +782,7 @@ auto Dockforge::build_ui() -> void {
 
   { ZoneScopedNC("draw_toolbar", 0x888888);             draw_toolbar(); }
   for (auto& panel : panels)
-    panel->draw(editor_state);
+    panel->draw(editor_state, editor_actions);
   { ZoneScopedNC("draw_performance_overlay", 0x888888); draw_performance_overlay(); }
   { ZoneScopedNC("draw_hdr_selector", 0x888888);        draw_hdr_selector(); }
 
@@ -866,7 +889,7 @@ auto Dockforge::play() -> void {
   active_scene = runtime_scene.get();
   editor_state.active_scene = active_scene;
   game_memory.reset();
-  game_dll->game()->init(&game_memory, active_scene);
+  game_dll->game()->init(&game_memory, active_scene, *asset_loader);
   TracyMessage("Game started", 12);
   is_playing = true;
   editor_state.cache_dirty = true;
@@ -894,7 +917,8 @@ auto Dockforge::update(float ts) -> void {
     if (game_dll->poll_reload()) {
       game_dll->game()->destroy(&game_memory, active_scene);
       game_memory.reset();
-      game_dll->game()->init(&game_memory, active_scene);
+      game_dll->game()->pre_init(*asset_loader);
+      game_dll->game()->init(&game_memory, active_scene, *asset_loader);
       info("Game DLL hot reloaded");
       TracyMessage("GameDLL hot reloaded", 20);
     }

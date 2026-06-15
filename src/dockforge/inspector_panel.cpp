@@ -1,6 +1,7 @@
 #include <dockforge/inspector_panel.hpp>
 #include <dockforge/component_inspector.hpp>
 #include <dockforge/component_renderers.hpp>
+#include <dockforge/editor_actions.hpp>
 #include <dockforge/editor_state.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/scene.hpp>
@@ -8,7 +9,7 @@
 
 using namespace dy;
 
-auto InspectorPanel::draw(EditorState& state) -> void {
+auto InspectorPanel::draw(EditorState& state, const EditorActions& /*actions*/) -> void {
     if (!ImGui::Begin("Inspector")) {
         ImGui::End();
         return;

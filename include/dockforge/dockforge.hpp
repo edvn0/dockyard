@@ -1,5 +1,6 @@
 #pragma once
 
+#include <dockforge/editor_actions.hpp>
 #include <dockforge/editor_state.hpp>
 #include <dockforge/ipanel.hpp>
 #include <dockyard/app.hpp>
@@ -21,6 +22,7 @@
 namespace dy {
 class ImGuiRenderer;
 struct SceneRenderer;
+struct IAssetLoader;
 } // namespace dy
 
 using namespace dy;
@@ -61,14 +63,16 @@ struct Dockforge : App {
   std::optional<VkExtent2D> pending_viewport_resize{std::nullopt};
   std::optional<VkExtent2D> candidate_viewport_resize{std::nullopt};
   EditorState editor_state;
+  EditorActions editor_actions;
   ShadowMapState shadow_map_state;
 
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
 
-  std::unique_ptr<dy::GameDll> game_dll;
-  dy::GameMemory               game_memory;
-  bool                         is_playing   = false;
+  std::unique_ptr<dy::GameDll>       game_dll;
+  std::unique_ptr<dy::IAssetLoader>  asset_loader;
+  dy::GameMemory                     game_memory;
+  bool                               is_playing   = false;
   std::string                  game_dll_stem = "sandbox";
 
   std::vector<std::unique_ptr<IPanel>> panels;

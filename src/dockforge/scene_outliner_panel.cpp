@@ -1,4 +1,5 @@
 #include <dockforge/scene_outliner_panel.hpp>
+#include <dockforge/editor_actions.hpp>
 #include <dockforge/editor_state.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/scene.hpp>
@@ -8,9 +9,6 @@
 #include <tracy/Tracy.hpp>
 
 using namespace dy;
-
-SceneOutlinerPanel::SceneOutlinerPanel(const std::function<Entity(Entity)>& on_duplicate_fn)
-    : on_duplicate(on_duplicate_fn) {}
 
 auto SceneOutlinerPanel::refresh_cache(EditorState& state) -> void {
     ZoneScopedNC("SceneOutlinerPanel::refresh_cache", 0x808080);
@@ -53,7 +51,7 @@ auto SceneOutlinerPanel::refresh_cache(EditorState& state) -> void {
     state.cache_dirty = false;
 }
 
-auto SceneOutlinerPanel::draw(EditorState& state) -> void {
+auto SceneOutlinerPanel::draw(EditorState& state, const EditorActions& actions) -> void {
     if (state.cache_dirty || cache.cache_dirty)
         refresh_cache(state);
 
@@ -160,19 +158,18 @@ auto SceneOutlinerPanel::draw(EditorState& state) -> void {
     clipper.End();
 
     if (pending_duplicate != entt::null) {
-        on_duplicate({*state.active_scene, pending_duplicate});
+        actions.duplicate_entity({*state.active_scene, pending_duplicate});
         pending_duplicate = entt::null;
         cache.cache_dirty = true;
     }
     if (pending_delete != entt::null) {
         if (state.selected == pending_delete)
             state.selected = entt::null;
-        state.active_scene->destroy_and_all_children(pending_delete, *state.renderer);
-        pending_delete    = entt::null;
-        cache.cache_dirty = true;
+        actions.destroy_entity({*state.active_scene, pending_delete});
+        pending_delete = entt::null;
     }
 
-    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows) &&
+    if (!ImGui::GetIO().WantTextInput &&
         state.selected != entt::null &&
         ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
         delete_candidate = state.selected;
