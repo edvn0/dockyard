@@ -19,7 +19,6 @@
 #include <BS_thread_pool.hpp>
 #include <deque>
 #include <glm/glm.hpp>
-#include <tracy/TracyVulkan.hpp>
 #include <type_traits>
 
 namespace dy {
@@ -240,10 +239,12 @@ struct CsmResources {
   void destroy(VkDevice device, VmaAllocator allocator);
 };
 
+  struct ProfilingContext;
+
 struct SceneRenderer {
   VulkanContext &ctx;
   SwapchainResources &swapchain;
-  TracyVkCtx tracy_vk_ctx{};
+  std::unique_ptr<ProfilingContext, decltype(+[](ProfilingContext*) -> void{})> tracy_vk_ctx;
 
   BS::priority_thread_pool thread_pool;
 

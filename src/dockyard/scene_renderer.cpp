@@ -8,6 +8,8 @@
 #include <dockyard/texture_upload_pool.hpp>
 #include <dockyard/vfs.hpp>
 
+
+
 #include <atomic>
 #include <execution>
 #include <limits>
@@ -18,8 +20,13 @@
 #include <glm/gtc/packing.hpp>
 
 #include <tracy/Tracy.hpp>
+#include <tracy/TracyVulkan.hpp>
 
 namespace dy {
+
+    struct ProfilingContext {
+        TracyVkCtx ctx{};
+    };
 
 namespace {
 
@@ -296,7 +303,7 @@ constexpr std::byte operator""_b(unsigned long long val) {
 SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
     : ctx(c), swapchain(sc),
       depth_prepass(RenderPassType::DepthPrepass, ctx.allocator, *this),
-      forward_pass(RenderPassType::Forward, ctx.allocator, *this) {
+      forward_pass(RenderPassType::Forward, ctx.allocator, *this), tracy_vk_ctx(std::unique_ptr<ProfilingContext, decltype(+[](ProfilingContext*) -> void{})>{new ProfilingContext{}, +[](ProfilingContext *ctx) {delete ctx;}}) {
   ZoneScopedNC("SceneRenderer::SceneRenderer", 0x4169E1);
   constexpr auto vertex_count = 1'000'000;
   constexpr auto index_count = 10'000'000;
@@ -332,10 +339,11 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
 
   resize();
 
-  tracy_vk_ctx = TracyVkContextHostCalibrated(
+
+  tracy_vk_ctx->ctx = TracyVkContextHostCalibrated(
       ctx.instance.instance, ctx.physical_device, ctx.device,
       vkGetInstanceProcAddr, vkGetDeviceProcAddr);
-  TracyVkContextName(tracy_vk_ctx, "main_gfx", 8);
+  TracyVkContextName(tracy_vk_ctx->ctx, "main_gfx", 8);
 }
 
 auto SceneRenderer::initialise_bindless() -> void {
@@ -627,41 +635,43 @@ auto SceneRenderer::resize() -> void {
 }
 
 auto SceneRenderer::destroy() -> void {
-  ZoneScopedNC("SceneRenderer::destroy", 0xFF0000);
-  TracyVkDestroy(tracy_vk_ctx);
+  {
+    ZoneScopedNC("SceneRenderer::destroy", 0xFF0000);
 
-  csm.destroy(ctx.device, ctx.allocator);
-  ibl_probe.destroy(ctx, *this);
+    csm.destroy(ctx.device, ctx.allocator);
+    ibl_probe.destroy(ctx, *this);
 
-  bindless.destroy();
+    bindless.destroy();
 
-  std::ranges::for_each(textures.mutable_data(),
-                        [&c = ctx, this](TexturePool::Slot &v) {
-                          if ((v.gen & 1u) == 0u)
-                            return;
-                          auto &tex = v.object.texture;
-                          if (!tex.valid())
-                            return;
-                          tex.destroy(c, &textures);
-                          tex.destroy(c, &subimages);
-                        });
-  std::ranges::for_each(samplers.mutable_data(), [&c = ctx](auto &v) {
-    auto &&[sampler] = v.object;
-    DeletionQueue::the().push(
-        [dev = c.device, s = sampler] { vkDestroySampler(dev, s, nullptr); });
-  });
-  std::ranges::for_each(
-      comparison_samplers.mutable_data(), [&c = ctx](auto &v) {
-        auto &&[sampler] = v.object;
-        DeletionQueue::the().push([dev = c.device, s = sampler] {
-          vkDestroySampler(dev, s, nullptr);
+    std::ranges::for_each(textures.mutable_data(),
+                          [&c = ctx, this](TexturePool::Slot &v) {
+                            if ((v.gen & 1u) == 0u)
+                              return;
+                            auto &tex = v.object.texture;
+                            if (!tex.valid())
+                              return;
+                            tex.destroy(c, &textures);
+                            tex.destroy(c, &subimages);
+                          });
+    std::ranges::for_each(samplers.mutable_data(), [&c = ctx](auto &v) {
+      auto &&[sampler] = v.object;
+      DeletionQueue::the().push(
+          [dev = c.device, s = sampler] { vkDestroySampler(dev, s, nullptr); });
+    });
+    std::ranges::for_each(
+        comparison_samplers.mutable_data(), [&c = ctx](auto &v) {
+          auto &&[sampler] = v.object;
+          DeletionQueue::the().push([dev = c.device, s = sampler] {
+            vkDestroySampler(dev, s, nullptr);
+          });
         });
-      });
 
-  if (pipeline_registry)
-    pipeline_registry->cleanup();
-  if (pipeline_layout != VK_NULL_HANDLE)
-    vkDestroyPipelineLayout(ctx.device, pipeline_layout, nullptr);
+    if (pipeline_registry)
+      pipeline_registry->cleanup();
+    if (pipeline_layout != VK_NULL_HANDLE)
+      vkDestroyPipelineLayout(ctx.device, pipeline_layout, nullptr);
+  }
+  TracyVkDestroy(tracy_vk_ctx->ctx);
 }
 
 void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
@@ -734,8 +744,12 @@ void SceneRenderer::ensure_global_capacity(usize instance_count) {
   }
 }
 
+
+
 auto SceneRenderer::prepare(const FrameRenderInfo &info)
     -> PrepareResult {
+  TracyVkCollectHost(tracy_vk_ctx->ctx);
+
   ZoneScopedNC("SceneRenderer::prepare", 0xFF00FF);
   assert(info.point_lights.size() <= FrameUBO::max_point_lights &&
          "too many point lights");
@@ -832,6 +846,7 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info)
   }
 
   const usize submission_hint = fs.entries.size();
+  TracyPlot("draw_submissions", static_cast<i64>(submission_hint));
 
   {
     ZoneScopedNC("Bake Depth Prepass", 0x00FFFF);
@@ -850,7 +865,7 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info)
 void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
                                 VkPipeline override_pipeline) {
   ZoneScopedNC("SceneRenderer::render_pass", 0x32CD32);
-  TracyVkZoneC(tracy_vk_ctx, cmd, "render_pass", 0x32CD32);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "render_pass", 0x32CD32);
 
   auto &pool = *geometry_pool;
   if (pass.batches.empty())
@@ -907,7 +922,7 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
 
 void SceneRenderer::depth_frustum_culling_pass(VkCommandBuffer cmd) {
   ZoneScopedNC("SceneRenderer::depth_frustum_culling_pass", 0x00BFFF);
-  TracyVkZoneC(tracy_vk_ctx, cmd, "depth_frustum_culling_pass", 0x00BFFF);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "depth_frustum_culling_pass", 0x00BFFF);
 
   auto geometry_count = global_instance_data.size();
   if (geometry_count == 0 || depth_prepass.batches.empty() ||
@@ -1003,7 +1018,7 @@ auto SceneRenderer::blit_depth_to_pre_hiz_pass(VkCommandBuffer cmd,
                                                TextureHandle depth_pre_hiz)
     -> void {
   ZoneScopedNC("SceneRenderer::blit_depth_to_pre_hiz_pass", 0x7B68EE);
-  TracyVkZoneC(tracy_vk_ctx, cmd, "blit_depth_to_pre_hiz_pass", 0x7B68EE);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "blit_depth_to_pre_hiz_pass", 0x7B68EE);
 
   const auto &src = textures.get(depth_resolved);
   const auto &dst = textures.get(depth_pre_hiz);
@@ -1104,7 +1119,7 @@ void SceneRenderer::build_hierarchical_depth_pyramid_pass(
     VkCommandBuffer cmd, TextureHandle input_depth_image,
     TextureHandle output_pyramid) {
   ZoneScopedNC("SceneRenderer::build_hiz_pyramid", 0xDDA0DD);
-  TracyVkZoneC(tracy_vk_ctx, cmd, "build_hiz_pyramid", 0xDDA0DD);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "build_hiz_pyramid", 0xDDA0DD);
 
   const auto &resolved_depth = textures.get(input_depth_image);
   const auto &hiz_target = textures.get(output_pyramid);
@@ -1190,7 +1205,7 @@ void SceneRenderer::build_hierarchical_depth_pyramid_pass(
 void SceneRenderer::forward_occlusion_culling_pass(
     VkCommandBuffer cmd, const TextureHandle hiz_target) {
   ZoneScopedNC("SceneRenderer::forward_occlusion_culling_pass", 0xFF8C00);
-  TracyVkZoneC(tracy_vk_ctx, cmd, "forward_occlusion_culling_pass", 0xFF8C00);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "forward_occlusion_culling_pass", 0xFF8C00);
 
   auto geometry_count = global_instance_data.size();
   auto &forward_ws = forward_pass.frame_workspaces.at(current_frame_index);
@@ -1290,7 +1305,7 @@ void SceneRenderer::forward_occlusion_culling_pass(
 
 void SceneRenderer::skybox_pass(VkCommandBuffer cmd) {
   ZoneScopedNC("SceneRenderer::skybox_pass", 0x87CEEB);
-  TracyVkZoneC(tracy_vk_ctx, cmd, "skybox_pass", 0x87CEEB);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "skybox_pass", 0x87CEEB);
 
   const auto &entry = pipeline_registry->get_entry(skybox_pipeline);
 
@@ -1323,7 +1338,7 @@ void SceneRenderer::skybox_pass(VkCommandBuffer cmd) {
 
 void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
   ZoneScopedNC("SceneRenderer::composite_pass", 0xFFA07A);
-  TracyVkZoneC(tracy_vk_ctx, cmd, "composite_pass", 0xFFA07A);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "composite_pass", 0xFFA07A);
 
   const auto &entry = pipeline_registry->get_entry(composite_pipeline);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, entry.pipeline);
@@ -1475,6 +1490,9 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
                     draw_counts.size(), total_global_instances);
   }
 
+  TracyPlot("indirect_commands", static_cast<i64>(commands.size()));
+  TracyPlot("draw_batches",      static_cast<i64>(batches.size()));
+
   {
     ZoneScopedNC("Upload GPU Workspaces", 0xADFF2F);
     auto &ws = frame_workspaces.at(current_frame_index);
@@ -1488,7 +1506,7 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
 void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
                                           u32 cascade_idx) {
   ZoneScopedNC("SceneRenderer::render_shadow_cascade", 0xB8860B);
-  TracyVkZoneC(tracy_vk_ctx, cmd, "render_shadow_cascade", 0xB8860B);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "render_shadow_cascade", 0xB8860B);
 
   auto &pass = depth_prepass;
   if (pass.batches.empty())

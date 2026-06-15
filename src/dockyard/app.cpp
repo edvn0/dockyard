@@ -10,11 +10,13 @@
 #include <dockyard/vk_check.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <ranges>
 #include <span>
+#include <thread>
 #include <vector>
 #include <volk.h>
 
@@ -226,11 +228,17 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     } else {
       vkWaitForFences(ctx.device, 1, &frame.in_flight_fence, VK_TRUE, UINT64_MAX);
     }
-    glfwPollEvents();
-    poll_pending_events();
-    dispatcher.update();
+    {
+      ZoneScopedNC("poll_events", 0xAAAAAA);
+      glfwPollEvents();
+      poll_pending_events();
+      dispatcher.update();
+    }
 
-    update(ts.step());
+    {
+      ZoneScopedNC("App::update", 0x00BFFF);
+      update(ts.step());
+    }
 
     if (render_listener.minimized)
       continue;
@@ -272,15 +280,21 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     if (!cb.begin())
       return -1;
 
-    u64 end_val = render(r_ctx);
+    u64 end_val;
+    {
+      ZoneScopedNC("App::render", 0xFF6347);
+      end_val = render(r_ctx);
+    }
     frame.last_value = end_val;
 
     if (!cb.end())
       return -1;
 
-    vkResetFences(ctx.device, 1, &frame.in_flight_fence);
-    if (!submit_to_queue(ctx, cb.command_buffer, frame, image, end_val))
-      return -1;
+    {
+      ZoneScopedNC("App::submit_and_present", 0x9370DB);
+      vkResetFences(ctx.device, 1, &frame.in_flight_fence);
+      if (!submit_to_queue(ctx, cb.command_buffer, frame, image, end_val))
+        return -1;
 
     VkPresentInfoKHR present_info{};
     present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -312,6 +326,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
     image_last_frame_id[index] = frame_id;
     frame_id++;
+    } // submit_and_present
     last_frame_index = frame_index;
     frame_index = (frame_index + 1) % frames_in_flight;
 
@@ -329,6 +344,11 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   vkDeviceWaitIdle(ctx.device);
   DeletionQueue::the().flush_all();
 
+  tracy::GetProfiler().RequestShutdown();
+  while (!tracy::GetProfiler().HasShutdownFinished()) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
   info("Application exited successfully");
   return 0;
 }
@@ -340,6 +360,7 @@ auto App::on_swapchain_resized(const events::SwapchainResized &e) -> void {
 auto App::recreate_swapchain_manually(GLFWwindow *window,
                                       const RendererListener &render_listener)
     -> void {
+  TracyMessage("Swapchain recreated", 19);
   int w{};
   int h{};
   glfwGetFramebufferSize(window, &w, &h);

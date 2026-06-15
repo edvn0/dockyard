@@ -1,7 +1,3 @@
-inline auto pack_normal(glm::vec3 n) {
-  return glm::packSnorm4x8(glm::vec4(n, 0.0f));
-}
-inline auto pack_uv(glm::vec2 uv) { return glm::packHalf2x16(uv); }
 
 static const std::vector<Vertex> cube_verts = {
     // Front Face (Z+)

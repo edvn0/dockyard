@@ -1,5 +1,7 @@
 #include <dockyard/canvas_renderer.hpp>
 #include <dockyard/scene_renderer.hpp>
+
+#include <tracy/Tracy.hpp>
 #include <dockyard/vk_check.hpp>
 
 #include <glm/ext/matrix_transform.hpp>
@@ -49,6 +51,7 @@ auto CanvasRenderer::frustum(const glm::mat4 &view, const glm::mat4 &proj,
 auto CanvasRenderer::render(
     VkCommandBuffer cmd, const glm::mat4 &mvp,
     std::tuple<VkFormat, VkFormat, VkViewport, VkRect2D> format_tuple) -> void {
+  ZoneScopedNC("CanvasRenderer::render", 0x32CD32);
   line_canvas_3d.set_mvp(mvp);
   line_canvas_3d.render(cmd, std::move(format_tuple), force_recompile);
   force_recompile = false;
@@ -205,6 +208,8 @@ auto CanvasRenderer::LineCanvas3D::render(
     VkCommandBuffer cmd,
     std::tuple<VkFormat, VkFormat, VkViewport, VkRect2D> format_tuple,
     bool force_recompile) -> void {
+  ZoneScopedNC("LineCanvas3D::render", 0x228B22);
+  TracyPlot("canvas_lines", static_cast<int64_t>(lines.size()));
   if (lines.empty())
     return;
 

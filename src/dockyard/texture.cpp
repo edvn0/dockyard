@@ -11,6 +11,8 @@
 #include <dockyard/vfs.hpp>
 #include <dockyard/texture_upload_pool.hpp>
 
+#include <volk.h>
+
 #include <ktx.h>
 #include <ktxvulkan.h>
 

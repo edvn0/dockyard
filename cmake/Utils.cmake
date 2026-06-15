@@ -1,0 +1,25 @@
+function(set_solution_folder folder_name)
+  foreach (target_name IN LISTS ARGN)
+    if (TARGET ${target_name})
+      set_target_properties(${target_name} PROPERTIES FOLDER "${folder_name}")
+    endif ()
+  endforeach ()
+endfunction()
+
+function(target_enable_native_arch target)
+  if (MSVC)
+    target_compile_options(${target} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
+  elseif (CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+    target_compile_options(${target} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:-march=native>)
+  endif ()
+endfunction()
+
+function(target_set_warnings target)
+  if (MSVC)
+    target_compile_options(${target} PRIVATE /W4 /permissive-)
+  else ()
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic -Wconversion)
+  endif ()
+endfunction()

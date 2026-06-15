@@ -1,5 +1,7 @@
 #include <volk.h>
 
+#include <tracy/Tracy.hpp>
+
 #include <dockyard/bindless_descriptor.hpp>
 #include <dockyard/compiler.hpp>
 #include <dockyard/imgui_renderer.hpp>
@@ -79,6 +81,7 @@ ImGuiRenderer::~ImGuiRenderer() {
 }
 
 auto ImGuiRenderer::begin_frame(ImGuiFramebuffer fb) -> void {
+  ZoneScopedNC("ImGuiRenderer::begin_frame", 0xFFA500);
   const auto &dim = std::get<VkExtent2D>(fb);
 
   ImGuiIO &io = ImGui::GetIO();
@@ -125,6 +128,7 @@ auto ImGuiRenderer::acquire_draw_slot() -> DrawableData & {
 }
 
 auto ImGuiRenderer::end_frame() -> void {
+  ZoneScopedNC("ImGuiRenderer::end_frame", 0xFFA500);
   ImGui::EndFrame();
   ImGui::Render();
 
@@ -135,14 +139,19 @@ auto ImGuiRenderer::end_frame() -> void {
 }
 
 auto ImGuiRenderer::render(VkCommandBuffer cmd) -> void {
+  ZoneScopedNC("ImGuiRenderer::render", 0xFFA500);
   render_draw_data(cmd, ImGui::GetDrawData(), main_pipeline);
 }
 
 auto ImGuiRenderer::render_draw_data(VkCommandBuffer cmd, ImDrawData *dd,
                                      const PipelineHandle &pipeline) -> void {
+  ZoneScopedNC("ImGuiRenderer::render_draw_data", 0xFF8C00);
   if (!dd || dd->TotalIdxCount == 0) {
     return;
   }
+  TracyPlot("imgui_vertices",  static_cast<int64_t>(dd->TotalVtxCount));
+  TracyPlot("imgui_indices",   static_cast<int64_t>(dd->TotalIdxCount));
+  TracyPlot("imgui_drawlists", static_cast<int64_t>(dd->CmdListsCount));
 
   const float fb_width = dd->DisplaySize.x * dd->FramebufferScale.x;
   const float fb_height = dd->DisplaySize.y * dd->FramebufferScale.y;

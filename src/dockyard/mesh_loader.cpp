@@ -11,6 +11,8 @@
 #include <fastgltf/tools.hpp>
 #include <fastgltf/types.hpp>
 
+#include <volk.h>
+
 #include <ktx.h>
 #include <ktxvulkan.h>
 

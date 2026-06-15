@@ -6,6 +6,8 @@
 #include <numbers>
 #include <vector>
 
+#include <tracy/Tracy.hpp>
+
 using namespace dy;
 
 struct HelmetTag {};
@@ -24,6 +26,7 @@ struct SandboxState {
 
 struct Sandbox : IGame {
   void init(GameMemory *mem, Scene *scene) override {
+    ZoneScopedNC("Sandbox::init", 0x00FF88);
     auto *state = mem->allocate<SandboxState>();
 
     auto entity = scene->make("Player 4");
@@ -52,6 +55,7 @@ struct Sandbox : IGame {
   }
 
   void update(GameMemory *mem, Scene *scene, float ts) override {
+    ZoneScopedNC("Sandbox::update", 0x00FF88);
     auto *state = mem->root<SandboxState>();
     state->time += ts;
 
@@ -71,6 +75,7 @@ struct Sandbox : IGame {
   }
 
   void destroy(GameMemory *mem, Scene *scene) override {
+    ZoneScopedNC("Sandbox::destroy", 0x00FF88);
     auto *state = mem->root<SandboxState>();
     if (scene->registry().valid(state->player))
       scene->registry().destroy(state->player);

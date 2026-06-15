@@ -1,5 +1,7 @@
 #include <dockforge/editor_camera.hpp>
 
+#include <tracy/Tracy.hpp>
+
 EditorCamera::EditorCamera(GLFWwindow *w, glm::vec3 position, glm::vec3 look_at,
                            u32 width, u32 height)
     : free_controller{camera, w}, path_controller{.camera = camera} {
@@ -22,6 +24,7 @@ auto EditorCamera::save_keyframe(float time_to_reach) -> void {
 }
 
 auto EditorCamera::update(float ts) -> void {
+  ZoneScopedNC("EditorCamera::update", 0x87CEEB);
   if (use_path)
     path_controller.update(ts);
   else

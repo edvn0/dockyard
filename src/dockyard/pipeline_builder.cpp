@@ -76,6 +76,7 @@ auto sorted_copy(R range, Compare comp = {})
     case shader::Stage::Compute:  return VK_SHADER_STAGE_COMPUTE_BIT;
     case shader::Stage::None:     std::abort();
     }
+    std::unreachable();
   }
 
   static auto from_entry_point(shader::CompiledEntryPoint ep,

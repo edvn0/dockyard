@@ -39,7 +39,7 @@ struct Dockforge : App {
 
   GLFWwindow *main_window = nullptr;
 
-  MeshAssetHandle mesh_handle{};
+  MeshAssetHandle cube_mesh_handle{};
   PipelineHandle forward_pipeline{};
   PipelineHandle depth_pipeline{};
 

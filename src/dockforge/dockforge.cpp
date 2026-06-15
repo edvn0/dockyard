@@ -34,11 +34,18 @@
 #include <nfd.hpp>
 #include <thread>
 
-#include "./cube_vertices.inl"
-#include "dockyard/types.hpp"
+#include <tracy/Tracy.hpp>
 
 namespace {
-auto resize_viewport(Dockforge &app) -> void {
+    inline auto pack_normal(glm::vec3 n) {
+      return glm::packSnorm4x8(glm::vec4(n, 0.0f));
+    }
+    inline auto pack_uv(glm::vec2 uv) { return glm::packHalf2x16(uv); }
+
+    #include "./cube_vertices.inl"
+    #include "./capsule_vertices.inl"
+
+    auto resize_viewport(Dockforge &app) -> void {
   double current_time = glfwGetTime();
   double time_since_last_move = current_time - app.last_resize_change_time;
   if (time_since_last_move > Dockforge::resize_debounce_delay) {
@@ -107,14 +114,15 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   }
 
   {
-    mesh_handle =
+    cube_mesh_handle =
         mesh::load_from_memory(*renderer, cube_verts, cube_indices).value();
+    auto capsule_mesh_handle= mesh::load_from_memory(*renderer, capsule_verts, capsule_indices).value();
 
     auto &scene = *active_scene;
     constexpr int grid_side = 10;
 
     auto cube = scene.make("Cube");
-    cube.emplace<Components::Mesh>(mesh_handle);
+    cube.emplace<Components::Mesh>(cube_mesh_handle);
     cube.get<Components::Transform>().mut().scale = {
         grid_side,
         grid_side,
@@ -124,11 +132,11 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     auto human_like = scene.make("Human");
     auto xt = human_like.get<Components::Transform>().mut();
     xt.position = glm::vec3(0.0f, 0.875f, 0.0f); // centred vertically
-    human_like.emplace<Components::Mesh>(mesh_handle);
+    human_like.emplace<Components::Mesh>(capsule_mesh_handle);
     xt.scale = glm::vec3(0.2f, 1.75f, 0.2f); // thin 1.75m pillar
 
     auto floor = scene.make("Floor");
-    floor.emplace<Components::Mesh>(mesh_handle);
+    floor.emplace<Components::Mesh>(cube_mesh_handle);
     floor.get<Components::Transform>().mut().scale = {30, 1, 30};
     floor.get<Components::Transform>().mut().position = {0, -10, 0};
 
@@ -313,6 +321,7 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
 }
 
 void Dockforge::refresh_entity_cache() {
+  ZoneScopedNC("Dockforge::refresh_entity_cache", 0x808080);
   state.entity_cache.clear();
   auto &registry = active_scene->registry();
 
@@ -657,6 +666,7 @@ auto Dockforge::duplicate_entity(Entity src) -> Entity {
 }
 
 auto Dockforge::draw_debug_shapes() -> void {
+  ZoneScopedNC("Dockforge::draw_debug_shapes", 0xAAAAAA);
   for (auto &&[e, line] : active_scene->view<Components::DebugLine>().each()) {
     canvas_renderer->line(line.p1, line.p2, line.color);
   }
@@ -847,6 +857,7 @@ auto Dockforge::draw_toolbar() -> void {
 }
 
 auto Dockforge::build_ui() -> void {
+  ZoneScopedNC("Dockforge::build_ui", 0xFFD700);
   const ImGuiViewport *vp = ImGui::GetMainViewport();
   ImGui::SetNextWindowPos(vp->WorkPos);
   ImGui::SetNextWindowSize(vp->WorkSize);
@@ -981,11 +992,11 @@ auto Dockforge::build_ui() -> void {
   }
   ImGui::End();
 
-  draw_toolbar();
-  draw_scene_outliner();
-  draw_inspector();
-  draw_performance_overlay();
-  draw_hdr_selector();
+  { ZoneScopedNC("draw_toolbar", 0x888888);          draw_toolbar(); }
+  { ZoneScopedNC("draw_scene_outliner", 0x888888);   draw_scene_outliner(); }
+  { ZoneScopedNC("draw_inspector", 0x888888);        draw_inspector(); }
+  { ZoneScopedNC("draw_performance_overlay", 0x888888); draw_performance_overlay(); }
+  { ZoneScopedNC("draw_hdr_selector", 0x888888);    draw_hdr_selector(); }
 
   auto draw_csm = [](CsmResources &resources) {
     if (ImGui::Begin("Cascaded Shadow Map Debug")) {
@@ -1026,6 +1037,8 @@ auto Dockforge::build_ui() -> void {
 }
 
 auto Dockforge::destroy() -> void {
+
+
   if (is_playing)
     stop();
 
@@ -1048,6 +1061,7 @@ auto Dockforge::destroy() -> void {
 }
 
 auto update_local_to_world_matrices(entt::registry &registry) -> void {
+  ZoneScopedNC("update_local_to_world_matrices", 0x98FB98);
   auto render_group =
       registry.group<Components::Transform, Components::LocalToWorld,
                      Components::Mesh>();
@@ -1087,6 +1101,7 @@ auto Dockforge::play() -> void {
   active_scene = runtime_scene.get();
   game_memory.reset();
   game_dll->game()->init(&game_memory, active_scene);
+  TracyMessage("Game started", 12);
   is_playing = true;
   state.cache_dirty = true;
 }
@@ -1099,6 +1114,7 @@ auto Dockforge::stop() -> void {
     game_dll->game()->destroy(&game_memory, active_scene);
 
   game_memory.reset();
+  TracyMessage("Game stopped", 12);
   active_scene = editor_scene.get();
   runtime_scene.reset();
   is_playing = false;
@@ -1106,12 +1122,14 @@ auto Dockforge::stop() -> void {
 }
 
 auto Dockforge::update(float ts) -> void {
+  ZoneScopedNC("Dockforge::update", 0x00BFFF);
   if (is_playing && game_dll && game_dll->game()) {
     if (game_dll->poll_reload()) {
       game_dll->game()->destroy(&game_memory, active_scene);
       game_memory.reset();
       game_dll->game()->init(&game_memory, active_scene);
       info("Game DLL hot reloaded");
+      TracyMessage("GameDLL hot reloaded", 20);
     }
     game_dll->game()->update(&game_memory, active_scene, ts);
   }
@@ -1148,6 +1166,7 @@ void emit_barrier(VkCommandBuffer cmd,
 }
 
 void Dockforge::flush_material_overrides() {
+  ZoneScopedNC("Dockforge::flush_material_overrides", 0xFF8C00);
   auto view = active_scene->registry().view<Components::MaterialOverride>();
   for (auto &&[e, override_slot] : view.each()) {
     if (override_slot.gpu_slot ==
@@ -1180,6 +1199,7 @@ auto resolve_material_slot(Entity e) -> u32 {
 } // namespace
 
 void compute_world_matrices(entt::registry &registry) {
+  ZoneScopedNC("compute_world_matrices", 0x90EE90);
   auto base_view =
       registry.view<Components::Transform, Components::LocalToWorld>();
   for (auto &&[entity, xt, ltw] : base_view.each()) {
@@ -1217,7 +1237,7 @@ void compute_world_matrices(entt::registry &registry) {
 }
 
 auto Dockforge::render(RenderContext &ctx) -> u64 {
-  TracyVkCollectHost(renderer->tracy_vk_ctx);
+  ZoneScopedNC("Dockforge::render", 0xFF6347);
   if (state.hierarchy_dirty) [[unlikely]] {
     compute_world_matrices(active_scene->registry());
     shadow_map_state.invalid = true;
@@ -1233,6 +1253,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       (last_ui_size.width != viewport_panel_extent.width ||
        last_ui_size.height != viewport_panel_extent.height);
   if (size_changed) [[unlikely]] {
+    TracyMessage("Viewport resized", 16);
     resize_viewport(*this);
   }
 
@@ -1272,6 +1293,9 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         .intensity = light.intensity,
     };
   }
+
+  TracyPlot("point_lights",  static_cast<int64_t>(light_count));
+  TracyPlot("mesh_entities", static_cast<int64_t>(render_group.size()));
 
   auto prepare_result = renderer->prepare({
       .frame_index = ctx.frame_index,
@@ -1333,6 +1357,8 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
 
   if (shadow_map_state.invalid) {
+    ZoneScopedNC("Dockforge::shadow_cascades", 0xB8860B);
+    TracyMessage("CSM invalidated", 15);
     const VkExtent2D shadow_extent{
         .width = shadow_map_cascade_resolution,
         .height = shadow_map_cascade_resolution,
@@ -1417,6 +1443,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
 
   {
+    ZoneScopedNC("Dockforge::depth_prepass", 0xFF11AA);
     const auto &resolve_target =
         renderer->resolve(viewport_resources.depth_resolved_target);
     VkRenderingAttachmentInfo depth_attachment{};
@@ -1472,6 +1499,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
 
   // Occlusion culling pass
   {
+    ZoneScopedNC("Dockforge::hiz_build", 0xDDA0DD);
     renderer->blit_depth_to_pre_hiz_pass(
         ctx.main_cb, viewport_resources.depth_resolved_target,
         viewport_resources.depth_pre_hiz);
@@ -1506,6 +1534,8 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
 
   {
+    ZoneScopedNC("Dockforge::geometry_msaa_pass", 0xAA11FF);
+
     VkRenderingAttachmentInfo forward_color{};
     forward_color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     forward_color.imageView =
@@ -1575,6 +1605,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
 
   {
+    ZoneScopedNC("Dockforge::tonemap_pass", 0xFFA07A);
     VkRenderingAttachmentInfo display_color{};
     display_color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     display_color.imageView = display_texture.sampled_view;
@@ -1608,6 +1639,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
 
   {
+    ZoneScopedNC("Dockforge::imgui_pass", 0xFFA500);
     const std::array<VkImageMemoryBarrier2, 1> swapchain_barriers{
         VkImageMemoryBarrier2{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
