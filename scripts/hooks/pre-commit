@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# scripts/hooks/pre-commit
+#
+# clang-format check, clang-tidy, cmake build + ctest.
+# Skip individual checks:  SKIP=clang-format,clang-tidy git commit
+# Skip everything:         git commit --no-verify
+
+set -euo pipefail
+
+BUILD_DIR="build/user-ninja-debug"
+_SKIP="${SKIP:-}"
+
+# ── colour ───────────────────────────────────────────────────────────────────
+if [ -t 1 ]; then
+    R='\033[31m' G='\033[32m' D='\033[2m' B='\033[1m' X='\033[0m'
+else
+    R='' G='' D='' B='' X=''
+fi
+
+NPASS=0 NFAIL=0 NSKIP=0
+T0=$(date +%s)
+
+_pass() { printf "  ${G}pass${X}  %s\n" "$1"; NPASS=$((NPASS + 1)); }
+_fail() { printf "  ${R}fail${X}  %s\n" "$1"; NFAIL=$((NFAIL + 1)); }
+_skip() { printf "  ${D}skip${X}  %s\n" "$1"; NSKIP=$((NSKIP + 1)); }
+_note() { printf "        ${D}%s${X}\n"  "$1"; }
+_sect() { printf "\n${B}%s${X}\n"         "$1"; }
+_wants() { [[ ",$_SKIP," != *",$1,"* ]]; }
+
+printf "${B}pre-commit${X}\n"
+
+# ── staged C++ files ─────────────────────────────────────────────────────────
+STAGED=$(git diff --cached --name-only --diff-filter=ACM \
+    | grep -E '\.(cpp|cxx|cc|hpp|hxx|h)$' || true)
+
+# ── clang-format ─────────────────────────────────────────────────────────────
+_sect "clang-format"
+if ! _wants clang-format; then
+    _skip "clang-format"
+elif ! command -v clang-format >/dev/null 2>&1; then
+    _skip "not in PATH"
+elif [ -z "$STAGED" ]; then
+    _skip "no C++ files staged"
+else
+    UNFORMATTED=()
+    while IFS= read -r f; do
+        clang-format --dry-run --Werror "$f" 2>/dev/null || UNFORMATTED+=("$f")
+    done <<< "$STAGED"
+    if [ "${#UNFORMATTED[@]}" -eq 0 ]; then
+        _pass "all staged files are formatted"
+    else
+        _fail "${#UNFORMATTED[@]} file(s) need formatting"
+        for f in "${UNFORMATTED[@]}"; do _note "$f"; done
+        _note "run: clang-format -i <files>"
+    fi
+fi
+
+# ── clang-tidy ───────────────────────────────────────────────────────────────
+_sect "clang-tidy"
+if ! _wants clang-tidy; then
+    _skip "clang-tidy"
+elif ! command -v clang-tidy >/dev/null 2>&1; then
+    _skip "not in PATH"
+elif [ -z "$STAGED" ]; then
+    _skip "no C++ files staged"
+elif [ ! -f "$BUILD_DIR/compile_commands.json" ]; then
+    _skip "compile_commands.json missing — configure first"
+else
+    TIDY_LOG=$(mktemp)
+    STATUS=0
+    readarray -t _files <<< "$STAGED"
+    clang-tidy -p "$BUILD_DIR" --quiet "${_files[@]}" >"$TIDY_LOG" 2>&1 || STATUS=$?
+    if [ "$STATUS" -eq 0 ]; then
+        _pass "no diagnostics"
+    else
+        _fail "diagnostics found"
+        while IFS= read -r line; do _note "$line"; done <"$TIDY_LOG"
+    fi
+    rm -f "$TIDY_LOG"
+fi
+
+# ── cmake build + ctest ──────────────────────────────────────────────────────
+_sect "cmake  [user-debug]"
+if ! _wants cmake; then
+    _skip "cmake"
+else
+    STATUS=0
+    cmake --workflow --preset user-debug || STATUS=$?
+    if [ "$STATUS" -eq 0 ]; then
+        _pass "build and tests passed"
+    else
+        _fail "build or tests failed (exit $STATUS)"
+    fi
+fi
+
+# ── summary ──────────────────────────────────────────────────────────────────
+printf "\n${B}%d passed  %d failed  %d skipped${X}  ${D}(%ds)${X}\n" \
+    "$NPASS" "$NFAIL" "$NSKIP" "$(( $(date +%s) - T0 ))"
+[ "$NFAIL" -eq 0 ]

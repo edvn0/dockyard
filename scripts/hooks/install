@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Wire this repository's committed hooks into git.
+set -euo pipefail
+ROOT=$(git rev-parse --show-toplevel)
+chmod +x "$ROOT/scripts/hooks/pre-commit"
+git config core.hooksPath scripts/hooks
+printf "Hooks installed. Bypass with 'git commit --no-verify'.\n"

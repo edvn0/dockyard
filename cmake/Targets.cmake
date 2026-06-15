@@ -225,3 +225,12 @@ if (DOCKYARD_BUILD_TESTING)
   set_solution_folder("tests"
           dockyard-testing test-dll-valid test-dll-no-symbol test-dll-null-factory)
 endif ()
+
+# ---- Developer tooling -------------------------------------------------------
+
+add_custom_target(install-hooks
+    COMMAND git config core.hooksPath scripts/hooks
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Installing git hooks"
+)
+set_solution_folder("tools" install-hooks)
