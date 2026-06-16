@@ -1,8 +1,8 @@
 #include <dockyard/canvas_renderer.hpp>
 #include <dockyard/scene_renderer.hpp>
 
-#include <tracy/Tracy.hpp>
 #include <dockyard/vk_check.hpp>
+#include <tracy/Tracy.hpp>
 
 #include <glm/ext/matrix_transform.hpp>
 #include <imgui.h>
@@ -222,8 +222,8 @@ auto CanvasRenderer::LineCanvas3D::render(
     const usize actual_size = next_power_of_two(required_size);
     info("(Canvas) Reallocating line buffer to {} bytes", actual_size);
     line_buffers[frame_cursor] =
-        Buffer::create(renderer.ctx.allocator, "canvas_line_renderer_buffer", actual_size,
-                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        Buffer::create(renderer.ctx.allocator, "canvas_line_renderer_buffer",
+                       actual_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     buffer_sizes[frame_cursor] = actual_size;
   }
   line_buffers[frame_cursor]->upload(lines);

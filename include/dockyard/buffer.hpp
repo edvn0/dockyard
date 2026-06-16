@@ -20,8 +20,8 @@ class Buffer {
   VkBufferUsageFlags usage_flags{};
   void *mapped_data = nullptr;
 
-  Buffer(VmaAllocator , VkDeviceSize , VkBufferUsageFlags );
-  auto set_name(std::string_view ) const -> void;
+  Buffer(VmaAllocator, VkDeviceSize, VkBufferUsageFlags);
+  auto set_name(std::string_view) const -> void;
 
 public:
   ~Buffer();
@@ -114,8 +114,8 @@ public:
     return usage_flags;
   }
 
-
-  static auto create(VmaAllocator allocator, std::string_view, VkDeviceSize size,
-                     VkBufferUsageFlags usage) -> std::unique_ptr<Buffer>;
+  static auto create(VmaAllocator allocator, std::string_view,
+                     VkDeviceSize size, VkBufferUsageFlags usage)
+      -> std::unique_ptr<Buffer>;
 };
 } // namespace dy

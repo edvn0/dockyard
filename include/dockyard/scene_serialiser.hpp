@@ -1,10 +1,10 @@
 #pragma once
+#include <BS_thread_pool.hpp>
 #include <cassert>
 #include <dockyard/binary_stream.hpp>
 #include <dockyard/component_traits.hpp>
 #include <dockyard/scene.hpp>
 #include <entt/entt.hpp>
-#include <BS_thread_pool.hpp>
 #include <future>
 #include <thread>
 #include <vector>

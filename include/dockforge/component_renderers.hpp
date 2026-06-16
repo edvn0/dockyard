@@ -296,8 +296,8 @@ struct ComponentRenderer<dy::Components::DebugFrustum>
         ImGui::SliderFloat("FOV", &f.projection_config.fov_degrees, 1.F, 179.F);
     changed |=
         ImGui::SliderFloat("Aspect", &f.projection_config.aspect, 0.1F, 10.F);
-    changed |=
-        ImGui::SliderFloat("Near", &f.projection_config.near_plane, 0.01F, 100.F);
+    changed |= ImGui::SliderFloat("Near", &f.projection_config.near_plane,
+                                  0.01F, 100.F);
     changed |=
         ImGui::SliderFloat("Far", &f.projection_config.far_plane, 0.1F, 1000.F);
     changed |= ImGui::ColorEdit4("Color", glm::value_ptr(f.color));

@@ -7,9 +7,9 @@
 namespace dy {
 
 struct IAssetLoader {
-    virtual auto load_mesh(const VFSPath &path)
-        -> std::expected<MeshAssetHandle, std::string> = 0;
-    virtual ~IAssetLoader() = default;
+  virtual auto load_mesh(const VFSPath &path)
+      -> std::expected<MeshAssetHandle, std::string> = 0;
+  virtual ~IAssetLoader() = default;
 };
 
 } // namespace dy

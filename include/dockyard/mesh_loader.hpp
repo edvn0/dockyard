@@ -46,4 +46,4 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
                       std::span<const u32> indices)
     -> std::expected<MeshAssetHandle, std::string>;
 
-} // namespace dy
+} // namespace dy::mesh

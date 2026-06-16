@@ -70,13 +70,11 @@ public:
     buffer.insert(buffer.end(), bytes, bytes + size);
   }
 
-  [[nodiscard]] auto take() noexcept -> std::vector<std::uint8_t> &&{
+  [[nodiscard]] auto take() noexcept -> std::vector<std::uint8_t> && {
     return std::move(buffer);
   }
 
-  [[nodiscard]] auto data() const noexcept ->const auto& {
-    return buffer;
-  }
+  [[nodiscard]] auto data() const noexcept -> const auto & { return buffer; }
 
   [[nodiscard]] std::size_t size() const noexcept { return buffer.size(); }
 

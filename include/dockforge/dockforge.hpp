@@ -72,11 +72,11 @@ struct Dockforge : App {
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
 
-  std::unique_ptr<dy::GameDll>       game_dll;
-  std::unique_ptr<dy::IAssetLoader>  asset_loader;
-  dy::GameMemory                     game_memory;
-  sim::Machine                       sim_state{sim::Editing{}};
-  std::filesystem::path              game_dll_path;
+  std::unique_ptr<dy::GameDll> game_dll;
+  std::unique_ptr<dy::IAssetLoader> asset_loader;
+  dy::GameMemory game_memory;
+  sim::Machine sim_state{sim::Editing{}};
+  std::filesystem::path game_dll_path;
 
   TextureHandle icon_play;
   TextureHandle icon_pause;
@@ -91,8 +91,8 @@ struct Dockforge : App {
   auto on_changed_tag(entt::registry &, entt::entity) -> void {}
   auto init(const InitialisationContext &ctx) -> void override;
   auto on_mouse_moved(const events::MouseMoved &e) -> void override;
-  auto on_key_released(const events::KeyReleased& e) -> void override;
-  auto on_mouse_scrolled(const events::MouseScrolled&) -> void override;
+  auto on_key_released(const events::KeyReleased &e) -> void override;
+  auto on_mouse_scrolled(const events::MouseScrolled &) -> void override;
   [[nodiscard]] auto resolve_camera() const -> std::pair<glm::mat4, glm::mat4>;
   [[nodiscard]] auto resolve_camera_with_position() const
       -> std::tuple<glm::mat4, glm::mat4, glm::vec3>;
@@ -116,7 +116,7 @@ private:
   auto resume() -> void;
   auto stop() -> void;
   auto step() -> void;
-  auto load_game_dll(const std::filesystem::path&) -> void;
+  auto load_game_dll(const std::filesystem::path &) -> void;
   auto load_toolbar_icons() -> void;
   auto draw_toolbar() -> void;
   auto draw_titlebar() -> void;

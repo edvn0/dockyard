@@ -113,11 +113,9 @@ struct PipelineTag {};
 using PipelineHandle = dy::Handle<PipelineTag>;
 
 struct PipelineRegistry {
-  VulkanContext& context;
+  VulkanContext &context;
 
-  [[nodiscard]] auto device() const& {
-    return context.device;
-  }
+  [[nodiscard]] auto device() const & { return context.device; }
 
   struct Entry {
     VkPipeline pipeline = VK_NULL_HANDLE;
@@ -128,7 +126,7 @@ struct PipelineRegistry {
 
   dy::Pool<PipelineTag, Entry> pool{};
 
-  explicit PipelineRegistry(VulkanContext& ctx) : context(ctx) {}
+  explicit PipelineRegistry(VulkanContext &ctx) : context(ctx) {}
   PipelineRegistry(const PipelineRegistry &) = delete;
   PipelineRegistry &operator=(const PipelineRegistry &) = delete;
 

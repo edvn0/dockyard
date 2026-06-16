@@ -227,7 +227,8 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
       vkWaitForPresentKHR(ctx.device, sc.swapchain.swapchain,
                           frame.past_presentation_id, UINT64_MAX);
     } else {
-      vkWaitForFences(ctx.device, 1, &frame.in_flight_fence, VK_TRUE, UINT64_MAX);
+      vkWaitForFences(ctx.device, 1, &frame.in_flight_fence, VK_TRUE,
+                      UINT64_MAX);
     }
     {
       ZoneScopedNC("poll_events", 0xAAAAAA);
@@ -297,36 +298,35 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
       if (!submit_to_queue(ctx, cb.command_buffer, frame, image, end_val))
         return -1;
 
-    VkPresentInfoKHR present_info{};
-    present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-    present_info.waitSemaphoreCount = 1;
-    present_info.pWaitSemaphores    = &image.render_finished_semaphore;
-    present_info.swapchainCount     = 1;
-    present_info.pSwapchains        = &sc.swapchain.swapchain;
-    present_info.pImageIndices      = &index;
+      VkPresentInfoKHR present_info{};
+      present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+      present_info.waitSemaphoreCount = 1;
+      present_info.pWaitSemaphores = &image.render_finished_semaphore;
+      present_info.swapchainCount = 1;
+      present_info.pSwapchains = &sc.swapchain.swapchain;
+      present_info.pImageIndices = &index;
 
-    VkPresentIdKHR present_id_info{};
-    if (ctx.caps.present_wait) {
-      present_id_info.sType          = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
-      present_id_info.swapchainCount = 1;
-      present_id_info.pPresentIds    = &frame_id;
-      present_info.pNext             = &present_id_info;
-    }
+      VkPresentIdKHR present_id_info{};
+      if (ctx.caps.present_wait) {
+        present_id_info.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
+        present_id_info.swapchainCount = 1;
+        present_id_info.pPresentIds = &frame_id;
+        present_info.pNext = &present_id_info;
+      }
 
-    frame.past_presentation_id = ctx.caps.present_wait ? frame_id : 0;
+      frame.past_presentation_id = ctx.caps.present_wait ? frame_id : 0;
 
+      const auto present_result =
+          vkQueuePresentKHR(ctx.present_queue(), &present_info);
+      if (present_result == VK_ERROR_OUT_OF_DATE_KHR ||
+          present_result == VK_SUBOPTIMAL_KHR) {
+        App::recreate_swapchain_manually(window, render_listener);
+      } else if (present_result != VK_SUCCESS) {
+        return -1;
+      }
 
-    const auto present_result =
-        vkQueuePresentKHR(ctx.present_queue(), &present_info);
-    if (present_result == VK_ERROR_OUT_OF_DATE_KHR ||
-        present_result == VK_SUBOPTIMAL_KHR) {
-      App::recreate_swapchain_manually(window, render_listener);
-    } else if (present_result != VK_SUCCESS) {
-      return -1;
-    }
-
-    image_last_frame_id[index] = frame_id;
-    frame_id++;
+      image_last_frame_id[index] = frame_id;
+      frame_id++;
     } // submit_and_present
     last_frame_index = frame_index;
     frame_index = (frame_index + 1) % frames_in_flight;

@@ -100,7 +100,8 @@ public:
                 .depth = static_cast<u32>(~0),
             }) -> std::vector<std::filesystem::path>;
 
-  auto last_write_time(const VFSPath &) -> std::expected<std::filesystem::file_time_type, std::error_code>;
+  auto last_write_time(const VFSPath &)
+      -> std::expected<std::filesystem::file_time_type, std::error_code>;
 
   auto initialised() const -> bool;
 

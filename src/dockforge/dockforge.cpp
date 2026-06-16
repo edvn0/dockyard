@@ -822,7 +822,7 @@ auto Dockforge::draw_toolbar() -> void {
 
   const bool editing = sim_state.in<sim::S::Editing>();
   const bool playing = sim_state.in<sim::S::Playing>();
-  const bool paused  = sim_state.in<sim::S::Paused>();
+  const bool paused = sim_state.in<sim::S::Paused>();
   const bool has_dll = game_dll && game_dll->game();
 
   auto icon_button = [](const char *id, TextureHandle handle,
@@ -859,17 +859,21 @@ auto Dockforge::draw_toolbar() -> void {
     const auto dll_label = game_dll_path.empty()
                                ? std::string{"No DLL loaded"}
                                : game_dll_path.filename().string();
-    const float button_h = k_icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F;
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (button_h - ImGui::GetTextLineHeight()) * 0.5F);
+    const float button_h =
+        k_icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F;
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
+                         (button_h - ImGui::GetTextLineHeight()) * 0.5F);
     ImGui::TextDisabled("%s", dll_label.c_str());
     if (!game_dll_path.empty() && ImGui::IsItemHovered())
       ImGui::SetTooltip("%s", game_dll_path.string().c_str());
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - (button_h - ImGui::GetTextLineHeight()) * 0.5F);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() -
+                         (button_h - ImGui::GetTextLineHeight()) * 0.5F);
 
     ImGui::SameLine();
-    const ImVec2 browse_sz{0.0F, k_icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F};
+    const ImVec2 browse_sz{0.0F, k_icon_size.y +
+                                     ImGui::GetStyle().FramePadding.y * 2.0F};
     if (ImGui::Button("...##browse", browse_sz)) {
-      nfdnchar_t* out = nullptr;
+      nfdnchar_t *out = nullptr;
       const nfdnfilteritem_t filter{
           .name = "Shared Library",
           .spec = "dll,so,dylib",
@@ -1132,7 +1136,7 @@ auto update_local_to_world_matrices(entt::registry &registry) -> void {
   }
 }
 
-auto Dockforge::load_game_dll(const std::filesystem::path& path) -> void {
+auto Dockforge::load_game_dll(const std::filesystem::path &path) -> void {
   if (game_dll) {
     game_dll->stop_watching();
     game_dll.reset();

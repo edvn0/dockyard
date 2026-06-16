@@ -222,9 +222,9 @@ struct FrameUBO {
 };
 static_assert(sizeof(FrameUBO) % 16 == 0);
 
-static_assert(sizeof(CascadeData)   == 80);
+static_assert(sizeof(CascadeData) == 80);
 static_assert(sizeof(GPUPointLight) == 32);
-static_assert(sizeof(FrameUBO)      % 16 == 0);
+static_assert(sizeof(FrameUBO) % 16 == 0);
 static_assert(offsetof(FrameUBO, point_lights) == 1040);
 
 struct CsmResources {
@@ -239,12 +239,14 @@ struct CsmResources {
   void destroy(VkDevice device, VmaAllocator allocator);
 };
 
-  struct ProfilingContext;
+struct ProfilingContext;
 
 struct SceneRenderer {
   VulkanContext &ctx;
   SwapchainResources &swapchain;
-  std::unique_ptr<ProfilingContext, decltype(+[](ProfilingContext*) -> void{})> tracy_vk_ctx;
+  std::unique_ptr<ProfilingContext,
+                  decltype(+[](ProfilingContext *) -> void {})>
+      tracy_vk_ctx;
 
   BS::priority_thread_pool thread_pool;
 
@@ -355,9 +357,8 @@ struct SceneRenderer {
     glm::vec2 camera_near_far;
     glm::vec2 shadow_near_far;
     std::span<const GPUPointLight> point_lights;
-};
-  auto prepare(const FrameRenderInfo&)
-      -> PrepareResult;
+  };
+  auto prepare(const FrameRenderInfo &) -> PrepareResult;
 
   void submit(MeshAssetHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
               u32 material_id = 0U);
@@ -394,24 +395,25 @@ struct SceneRenderer {
   auto remove_override(Entity) -> void;
 
   auto set_hdr_map(VFSPath) -> void;
-auto process_pending_hdr_map() -> void;
-static auto create_ibl_probe_from_hdr(SceneRenderer &renderer,
-                                      const VFSPath &path)
-    -> std::expected<IblProbe, std::string>;
+  auto process_pending_hdr_map() -> void;
+  static auto create_ibl_probe_from_hdr(SceneRenderer &renderer,
+                                        const VFSPath &path)
+      -> std::expected<IblProbe, std::string>;
 
-template <typename Handle> auto resolve(Handle handle) const -> decltype(auto) {
-  if constexpr (std::is_same_v<Handle, TextureHandle>) {
-    return textures.get(handle)->texture;
-  } else if constexpr (std::is_same_v<Handle, SamplerHandle>) {
-    return samplers.get(handle)->sampler;
-  } else if constexpr (std::is_same_v<Handle, ComparisonSamplerHandle>) {
-    return comparison_samplers.get(handle)->sampler;
-  } else if constexpr (std::is_same_v<Handle, MeshAssetHandle>) {
-    return mesh_registry.get(handle);
-  } else {
-    static_assert(false, "Unsupported handle type");
+  template <typename Handle>
+  auto resolve(Handle handle) const -> decltype(auto) {
+    if constexpr (std::is_same_v<Handle, TextureHandle>) {
+      return textures.get(handle)->texture;
+    } else if constexpr (std::is_same_v<Handle, SamplerHandle>) {
+      return samplers.get(handle)->sampler;
+    } else if constexpr (std::is_same_v<Handle, ComparisonSamplerHandle>) {
+      return comparison_samplers.get(handle)->sampler;
+    } else if constexpr (std::is_same_v<Handle, MeshAssetHandle>) {
+      return mesh_registry.get(handle);
+    } else {
+      static_assert(false, "Unsupported handle type");
+    }
   }
-}
 
   template <typename Handle> auto resolve_mut(Handle handle) -> decltype(auto) {
     if constexpr (std::is_same_v<Handle, TextureHandle>) {

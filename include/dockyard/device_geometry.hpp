@@ -94,7 +94,8 @@ static_assert(std::is_trivially_copyable_v<GPUMaterial>);
 static_assert(sizeof(GPUMaterial) % 16 == 0,
               "GPUMaterial must be 16-byte aligned");
 
-// CPU-side mirror of GPUMaterial; used for editor workflows and per-instance variants.
+// CPU-side mirror of GPUMaterial; used for editor workflows and per-instance
+// variants.
 struct MaterialAsset {
   std::string name;
 

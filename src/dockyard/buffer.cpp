@@ -16,25 +16,25 @@ Buffer::Buffer(VmaAllocator alloc, VkDeviceSize size, VkBufferUsageFlags u)
   alloc_ci.usage = VMA_MEMORY_USAGE_AUTO;
 
   vk::check(vmaCreateBuffer(allocator, &buffer_ci, &alloc_ci, &buffer,
-                                &allocation, &allocation_info));
+                            &allocation, &allocation_info));
 
   VmaAllocatorInfo info{};
   vmaGetAllocatorInfo(allocator, &info);
 
   const auto address_info = VkBufferDeviceAddressInfo{
-    .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
-    .pNext = nullptr,
-    .buffer = buffer,
-};
-  address =
-      DeviceAddress {vkGetBufferDeviceAddress(info.device, &address_info)};
+      .sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
+      .pNext = nullptr,
+      .buffer = buffer,
+  };
+  address = DeviceAddress{vkGetBufferDeviceAddress(info.device, &address_info)};
   mapped_data = allocation_info.pMappedData;
   usage_flags = u;
 }
 
-auto Buffer::create(VmaAllocator allocator, std::string_view name, VkDeviceSize size,
-                    VkBufferUsageFlags usage) -> std::unique_ptr<Buffer> {
-  auto buffer = std::unique_ptr<Buffer>{new Buffer {allocator, size, usage}};
+auto Buffer::create(VmaAllocator allocator, std::string_view name,
+                    VkDeviceSize size, VkBufferUsageFlags usage)
+    -> std::unique_ptr<Buffer> {
+  auto buffer = std::unique_ptr<Buffer>{new Buffer{allocator, size, usage}};
   buffer->set_name(name);
   return buffer;
 }
@@ -56,4 +56,4 @@ auto Buffer::set_name(const std::string_view name) const -> void {
   vk::check(vkSetDebugUtilsObjectNameEXT(info.device, &name_info));
   vmaSetAllocationName(allocator, allocation, name.data());
 }
-}
+} // namespace dy

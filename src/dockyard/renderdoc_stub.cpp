@@ -9,13 +9,9 @@ RenderDocContext::RenderDocContext(RenderDocContext &&) noexcept = default;
 auto RenderDocContext::operator=(RenderDocContext &&) noexcept
     -> RenderDocContext & = default;
 
-auto renderdoc_init() -> RenderDocContext {
-  return {};
-}
+auto renderdoc_init() -> RenderDocContext { return {}; }
 
-auto RenderDocContext::is_capturing() const -> bool {
-  return false;
-}
+auto RenderDocContext::is_capturing() const -> bool { return false; }
 
 auto RenderDocContext::begin_frame_capture(void *, void *) const -> void {}
 

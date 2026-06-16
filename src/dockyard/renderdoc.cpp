@@ -9,17 +9,17 @@
 #include <string_view>
 
 #if defined(_WIN32)
-  #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-  #endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 
-  #ifndef NOMINMAX
-    #define NOMINMAX
-  #endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 
-  #include <windows.h>
+#include <windows.h>
 #else
-  #include <dlfcn.h>
+#include <dlfcn.h>
 #endif
 
 struct RenderDocApi {
@@ -41,8 +41,7 @@ namespace {
   return reinterpret_cast<pRENDERDOC_GetAPI>(
       GetProcAddress(static_cast<HMODULE>(module), "RENDERDOC_GetAPI"));
 #else
-  return reinterpret_cast<pRENDERDOC_GetAPI>(
-      dlsym(module, "RENDERDOC_GetAPI"));
+  return reinterpret_cast<pRENDERDOC_GetAPI>(dlsym(module, "RENDERDOC_GetAPI"));
 #endif
 }
 

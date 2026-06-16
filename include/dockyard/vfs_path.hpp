@@ -102,9 +102,9 @@ struct NullableVFSPath {
     };
   }
 
-  auto operator=(const VFSPath& other) -> auto& {
-      path = other;
-      return *this;
+  auto operator=(const VFSPath &other) -> auto & {
+    path = other;
+    return *this;
   }
 
   [[nodiscard]] auto valid() const -> bool { return path.has_value(); }

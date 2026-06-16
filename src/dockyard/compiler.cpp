@@ -8,10 +8,10 @@
 #include <slang-com-ptr.h>
 #include <slang.h>
 
-#include <span>
 #include <atomic>
 #include <format>
 #include <shared_mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -568,16 +568,15 @@ auto Compiler::clear_cache() -> void {
   impl->cache.clear();
 }
 
-  auto Compiler::precache_shaders(Badge<App>) -> std::future<void> {
+auto Compiler::precache_shaders(Badge<App>) -> std::future<void> {
   using namespace std::literals;
 
   return std::async(std::launch::async, [this] {
     auto shader_paths = VFS::get().list(
-        "shaders://",
-        {
-            .ignored_dirs = {"include"sv, "includes"sv},
-            .included_extensions = {".slang"sv},
-        });
+        "shaders://", {
+                          .ignored_dirs = {"include"sv, "includes"sv},
+                          .included_extensions = {".slang"sv},
+                      });
 
     std::vector<std::future<void>> futures;
     futures.reserve(shader_paths.size());

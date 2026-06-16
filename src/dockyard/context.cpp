@@ -9,7 +9,6 @@
 #include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/vk_check.hpp>
-#include <vulkan/vulkan_core.h>
 
 namespace dy {
 
@@ -121,16 +120,16 @@ auto SwapchainResources::create(const VulkanContext &ctx, VkSurfaceKHR surface,
 auto ViewportResources::resize(const VulkanContext &ctx,
                                SceneRenderer &renderer, u32 w, u32 h) -> void {
   depth_msaa.destroy(ctx);
-  depth_msaa =
-      Texture::create(ctx, "depth_msaa", w, h, VK_FORMAT_D32_SFLOAT,
-                      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                      VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_4_BIT, 1U, true);
+  depth_msaa = Texture::create(ctx, "depth_msaa", w, h, VK_FORMAT_D32_SFLOAT,
+                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                               VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_4_BIT,
+                               1U, true);
 
   forward_target_msaa.destroy(ctx);
-  forward_target_msaa =
-      Texture::create(ctx, "forward_msaa", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
-                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-                      VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_4_BIT, 1U, true);
+  forward_target_msaa = Texture::create(
+      ctx, "forward_msaa", w, h, VK_FORMAT_R16G16B16A16_SFLOAT,
+      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT,
+      VK_SAMPLE_COUNT_4_BIT, 1U, true);
 
   auto resize_or_create = [&](auto &handle, auto make_tex) {
     if (handle.valid()) {
@@ -167,7 +166,8 @@ auto ViewportResources::resize(const VulkanContext &ctx,
   u32 hiz_mips = static_cast<u32>(std::bit_width(std::max(hiz_w, hiz_h)));
 
   if (hierarchical_depth_pyramid_target.valid()) {
-    renderer.textures.get(hierarchical_depth_pyramid_target)->texture.destroy(ctx, &renderer.textures);
+    renderer.textures.get(hierarchical_depth_pyramid_target)
+        ->texture.destroy(ctx, &renderer.textures);
 
     // Build the new pyramid outside the pool: register_sub_views calls
     // texture_pool.create() which can reallocate pool_slots, invalidating any
@@ -179,7 +179,8 @@ auto ViewportResources::resize(const VulkanContext &ctx,
     new_pyramid.register_sub_views(ctx, renderer.textures, renderer.bindless);
 
     // Re-fetch: pool_slots may have been reallocated during register_sub_views.
-    renderer.textures.get(hierarchical_depth_pyramid_target)->texture = std::move(new_pyramid);
+    renderer.textures.get(hierarchical_depth_pyramid_target)->texture =
+        std::move(new_pyramid);
   } else {
     auto tex = Texture::create(
         ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
@@ -245,9 +246,9 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   volkLoadInstance(ctx.instance.instance);
 
   auto bare_ret = vkb::PhysicalDeviceSelector{ctx.instance}
-      .set_surface(ctx.surface)
-      .set_minimum_version(1, 4)
-      .select();
+                      .set_surface(ctx.surface)
+                      .set_minimum_version(1, 4)
+                      .select();
   if (!bare_ret) {
     error("Failed to find a Vulkan 1.4 GPU: {}", bare_ret.error().message());
     std::abort();
@@ -266,7 +267,8 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
       .pNext = &avail_present_wait,
   };
   VkPhysicalDeviceUnifiedImageLayoutsFeaturesKHR avail_unified{
-      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR,
+      .sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFIED_IMAGE_LAYOUTS_FEATURES_KHR,
       .pNext = &avail_present_id,
   };
   VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR avail_pipeline_exec{
@@ -280,12 +282,12 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   };
   vkGetPhysicalDeviceFeatures2(phys_handle, &avail2);
 
-  ctx.caps.maintenance5          = avail_14.maintenance5             == VK_TRUE;
-  ctx.caps.maintenance6          = avail_14.maintenance6             == VK_TRUE;
-  ctx.caps.smooth_lines          = avail_14.smoothLines              == VK_TRUE;
-  ctx.caps.stippled_smooth_lines = avail_14.stippledSmoothLines      == VK_TRUE;
-  ctx.caps.push_descriptor       = avail_14.pushDescriptor           == VK_TRUE;
-  ctx.caps.present_wait          = avail_present_wait.presentWait    == VK_TRUE;
+  ctx.caps.maintenance5 = avail_14.maintenance5 == VK_TRUE;
+  ctx.caps.maintenance6 = avail_14.maintenance6 == VK_TRUE;
+  ctx.caps.smooth_lines = avail_14.smoothLines == VK_TRUE;
+  ctx.caps.stippled_smooth_lines = avail_14.stippledSmoothLines == VK_TRUE;
+  ctx.caps.push_descriptor = avail_14.pushDescriptor == VK_TRUE;
+  ctx.caps.present_wait = avail_present_wait.presentWait == VK_TRUE;
   ctx.caps.unified_image_layouts = avail_unified.unifiedImageLayouts == VK_TRUE;
   ctx.caps.executable_properties =
       avail_pipeline_exec.pipelineExecutableInfo == VK_TRUE;
@@ -294,77 +296,81 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
     VkPhysicalDeviceMemoryProperties mem_props{};
     vkGetPhysicalDeviceMemoryProperties(phys_handle, &mem_props);
     for (u32 i = 0; i < mem_props.memoryTypeCount; ++i) {
-      if (mem_props.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) {
+      if (mem_props.memoryTypes[i].propertyFlags &
+          VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT) {
         ctx.caps.transient_attachments = true;
         break;
       }
     }
   }
 
-  info("Caps: maintenance5={} maintenance6={} smooth_lines={} stippled_smooth_lines={} push_descriptor={} present_wait={} unified_image_layouts={} transient_attachments={}",
+  info("Caps: maintenance5={} maintenance6={} smooth_lines={} "
+       "stippled_smooth_lines={} push_descriptor={} present_wait={} "
+       "unified_image_layouts={} transient_attachments={}",
        ctx.caps.maintenance5, ctx.caps.maintenance6, ctx.caps.smooth_lines,
        ctx.caps.stippled_smooth_lines, ctx.caps.push_descriptor,
        ctx.caps.present_wait, ctx.caps.unified_image_layouts,
        ctx.caps.transient_attachments);
 
   VkPhysicalDeviceFeatures features{};
-  features.multiDrawIndirect    = VK_TRUE;
-  features.samplerAnisotropy    = VK_TRUE;
+  features.multiDrawIndirect = VK_TRUE;
+  features.samplerAnisotropy = VK_TRUE;
   features.textureCompressionBC = VK_TRUE;
-  features.wideLines            = VK_TRUE;
+  features.wideLines = VK_TRUE;
   features.drawIndirectFirstInstance = VK_TRUE;
 
   VkPhysicalDeviceVulkan11Features features_11{};
   features_11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
-  features_11.storageBuffer16BitAccess        = VK_TRUE;
-  features_11.variablePointersStorageBuffer   = VK_TRUE;
-  features_11.variablePointers                = VK_TRUE;
-  features_11.shaderDrawParameters            = VK_TRUE;
-  features_11.multiview                       = VK_TRUE;
+  features_11.storageBuffer16BitAccess = VK_TRUE;
+  features_11.variablePointersStorageBuffer = VK_TRUE;
+  features_11.variablePointers = VK_TRUE;
+  features_11.shaderDrawParameters = VK_TRUE;
+  features_11.multiview = VK_TRUE;
 
   VkPhysicalDeviceVulkan12Features features_12{};
   features_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-  features_12.drawIndirectCount                                = VK_TRUE;
-  features_12.shaderSampledImageArrayNonUniformIndexing        = VK_TRUE;
-  features_12.shaderStorageBufferArrayNonUniformIndexing       = VK_TRUE;
-  features_12.shaderStorageImageArrayNonUniformIndexing        = VK_TRUE;
-  features_12.descriptorBindingSampledImageUpdateAfterBind     = VK_TRUE;
-  features_12.descriptorBindingUpdateUnusedWhilePending        = VK_TRUE;
-  features_12.descriptorBindingPartiallyBound                  = VK_TRUE;
-  features_12.descriptorBindingStorageImageUpdateAfterBind     = VK_TRUE;
-  features_12.descriptorBindingVariableDescriptorCount         = VK_TRUE;
-  features_12.runtimeDescriptorArray                           = VK_TRUE;
-  features_12.scalarBlockLayout                                = VK_TRUE;
-  features_12.timelineSemaphore                                = VK_TRUE;
-  features_12.bufferDeviceAddress                              = VK_TRUE;
+  features_12.drawIndirectCount = VK_TRUE;
+  features_12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+  features_12.shaderStorageBufferArrayNonUniformIndexing = VK_TRUE;
+  features_12.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
+  features_12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+  features_12.descriptorBindingUpdateUnusedWhilePending = VK_TRUE;
+  features_12.descriptorBindingPartiallyBound = VK_TRUE;
+  features_12.descriptorBindingStorageImageUpdateAfterBind = VK_TRUE;
+  features_12.descriptorBindingVariableDescriptorCount = VK_TRUE;
+  features_12.runtimeDescriptorArray = VK_TRUE;
+  features_12.scalarBlockLayout = VK_TRUE;
+  features_12.timelineSemaphore = VK_TRUE;
+  features_12.bufferDeviceAddress = VK_TRUE;
   features_12.samplerFilterMinmax = VK_TRUE;
   features_12.hostQueryReset = VK_TRUE;
 
   VkPhysicalDeviceVulkan13Features features_13{};
   features_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
   features_13.shaderDemoteToHelperInvocation = VK_TRUE;
-  features_13.synchronization2               = VK_TRUE;
-  features_13.dynamicRendering               = VK_TRUE;
-  features_13.maintenance4                   = VK_TRUE;
+  features_13.synchronization2 = VK_TRUE;
+  features_13.dynamicRendering = VK_TRUE;
+  features_13.maintenance4 = VK_TRUE;
 
   VkPhysicalDeviceVulkan14Features features_14{
-      .sType                     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
-      .smoothLines               = ctx.caps.smooth_lines          ? VK_TRUE : VK_FALSE,
-      .stippledSmoothLines       = ctx.caps.stippled_smooth_lines ? VK_TRUE : VK_FALSE,
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES,
+      .smoothLines = ctx.caps.smooth_lines ? VK_TRUE : VK_FALSE,
+      .stippledSmoothLines =
+          ctx.caps.stippled_smooth_lines ? VK_TRUE : VK_FALSE,
       .dynamicRenderingLocalRead = VK_TRUE,
-      .maintenance5              = ctx.caps.maintenance5          ? VK_TRUE : VK_FALSE,
-      .maintenance6              = ctx.caps.maintenance6          ? VK_TRUE : VK_FALSE,
-      .pushDescriptor            = ctx.caps.push_descriptor       ? VK_TRUE : VK_FALSE,
+      .maintenance5 = ctx.caps.maintenance5 ? VK_TRUE : VK_FALSE,
+      .maintenance6 = ctx.caps.maintenance6 ? VK_TRUE : VK_FALSE,
+      .pushDescriptor = ctx.caps.push_descriptor ? VK_TRUE : VK_FALSE,
   };
 
   VkPhysicalDevicePresentIdFeaturesKHR present_id_features{
-      .sType     = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
-      .pNext     = nullptr,
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR,
+      .pNext = nullptr,
       .presentId = VK_TRUE,
   };
   VkPhysicalDevicePresentWaitFeaturesKHR present_wait_features{
-      .sType       = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
-      .pNext       = nullptr,
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR,
+      .pNext = nullptr,
       .presentWait = VK_TRUE,
   };
   VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR
@@ -376,26 +382,25 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
       };
 
   auto selector = vkb::PhysicalDeviceSelector{ctx.instance}
-      .set_surface(ctx.surface)
-      .set_minimum_version(1, 4)
-      .set_required_features(features)
-      .set_required_features_11(features_11)
-      .set_required_features_12(features_12)
-      .set_required_features_13(features_13)
-      .set_required_features_14(features_14);
+                      .set_surface(ctx.surface)
+                      .set_minimum_version(1, 4)
+                      .set_required_features(features)
+                      .set_required_features_11(features_11)
+                      .set_required_features_12(features_12)
+                      .set_required_features_13(features_13)
+                      .set_required_features_14(features_14);
 
   selector = selector.add_required_extensions({
       VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME,
   });
 
   if (ctx.caps.present_wait) {
-    selector = selector
-        .add_required_extension_features(present_id_features)
-        .add_required_extension_features(present_wait_features)
-        .add_required_extensions({
-            VK_KHR_PRESENT_ID_EXTENSION_NAME,
-            VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
-        });
+    selector = selector.add_required_extension_features(present_id_features)
+                   .add_required_extension_features(present_wait_features)
+                   .add_required_extensions({
+                       VK_KHR_PRESENT_ID_EXTENSION_NAME,
+                       VK_KHR_PRESENT_WAIT_EXTENSION_NAME,
+                   });
   }
   if (ctx.caps.unified_image_layouts) {
     selector = selector.add_required_extensions({
@@ -430,16 +435,16 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
       ctx.device.get_queue_index(vkb::QueueType::graphics).value();
   ctx.present_queue_index =
       ctx.device.get_queue_index(vkb::QueueType::present).value();
-  info("Graphics queue: {}, Present queue: {}",
-       ctx.graphics_queue_index, ctx.present_queue_index);
+  info("Graphics queue: {}, Present queue: {}", ctx.graphics_queue_index,
+       ctx.present_queue_index);
 
   VmaVulkanFunctions vma_fns{};
   VmaAllocatorCreateInfo alloc_info{};
-  alloc_info.flags            = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
-  alloc_info.physicalDevice   = ctx.physical_device;
-  alloc_info.device           = ctx.device;
+  alloc_info.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+  alloc_info.physicalDevice = ctx.physical_device;
+  alloc_info.device = ctx.device;
   alloc_info.pVulkanFunctions = &vma_fns;
-  alloc_info.instance         = ctx.instance;
+  alloc_info.instance = ctx.instance;
   alloc_info.vulkanApiVersion = VK_API_VERSION_1_4;
   vmaImportVulkanFunctionsFromVolk(&alloc_info, &vma_fns);
 

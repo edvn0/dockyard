@@ -123,7 +123,8 @@ void GeometryPool::reserve_materials(usize additional_mats) {
       (material_offset + additional_mats) * sizeof(GPUMaterial);
 
   if (required_bytes > material_buffer->size())
-    resize_buffer(allocator, "material_buffer", material_buffer, required_bytes);
+    resize_buffer(allocator, "material_buffer", material_buffer,
+                  required_bytes);
 }
 
 void GeometryPool::reserve(usize additional_vertices,
@@ -133,14 +134,16 @@ void GeometryPool::reserve(usize additional_vertices,
   const usize i_bytes = additional_indices * sizeof(u32);
 
   if (vertex_offset + v_bytes > vertex_buffer->size()) {
-    resize_buffer(allocator, "vertex_buffer", vertex_buffer, vertex_offset + v_bytes);
+    resize_buffer(allocator, "vertex_buffer", vertex_buffer,
+                  vertex_offset + v_bytes);
   }
   if (index_offset + i_bytes > index_buffer->size()) {
-    resize_buffer(allocator, "index_buffer", index_buffer, index_offset + i_bytes);
+    resize_buffer(allocator, "index_buffer", index_buffer,
+                  index_offset + i_bytes);
   }
   if (shadow_vertex_offset + sv_bytes > position_only_vertex_buffer->size()) {
-    resize_buffer(allocator, "position_only_vertex_buffer", position_only_vertex_buffer,
-                  shadow_vertex_offset + sv_bytes);
+    resize_buffer(allocator, "position_only_vertex_buffer",
+                  position_only_vertex_buffer, shadow_vertex_offset + sv_bytes);
   }
 }
 
@@ -150,7 +153,8 @@ auto GeometryPool::allocate_materials(std::span<const GPUMaterial> mats)
   const usize required_bytes =
       (material_offset + mats.size()) * sizeof(GPUMaterial);
   if (required_bytes > material_buffer->size()) {
-    resize_buffer(allocator, "material_buffer", material_buffer, required_bytes);
+    resize_buffer(allocator, "material_buffer", material_buffer,
+                  required_bytes);
   }
 
   const u32 start_index = static_cast<u32>(material_offset);

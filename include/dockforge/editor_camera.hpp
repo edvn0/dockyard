@@ -25,7 +25,7 @@ struct EditorCamera {
   auto on_mouse_delta(float dx, float dy) -> void;
   auto set_aspect(u32 w, u32 h) -> void;
   auto set_pose(glm::vec3 position, glm::vec3 look_at) -> void;
-  auto on_mouse_scrolled(const events::MouseScrolled&) -> void;
+  auto on_mouse_scrolled(const events::MouseScrolled &) -> void;
   [[nodiscard]] auto view() const -> glm::mat4;
   [[nodiscard]] auto projection() const -> glm::mat4;
   [[nodiscard]] auto position() const -> glm::vec3;

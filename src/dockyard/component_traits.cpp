@@ -87,11 +87,11 @@ auto read_safe_string(auto &archive) -> std::string {
     archive.reader.read(str.data(), size);
   }
 
-  #ifndef NDEBUG
-      if (!is_valid_utf8(str)) {
-          std::abort();
-      }
-  #endif
+#ifndef NDEBUG
+  if (!is_valid_utf8(str)) {
+    std::abort();
+  }
+#endif
 
   return str;
 }
@@ -141,15 +141,15 @@ void ComponentSerializer<Components::Mesh>::load(auto &archive,
 */
 void ComponentSerializer<Components::Mesh>::save(auto &archive,
                                                  const Components::Mesh &mesh) {
-    const u32 index = mesh.handle.index();
-    archive.writer.write(&index, sizeof(u32));
+  const u32 index = mesh.handle.index();
+  archive.writer.write(&index, sizeof(u32));
 }
 
 void ComponentSerializer<Components::Mesh>::load(auto &archive,
                                                  Components::Mesh &m) {
-    u32 index = 0;
-    archive.reader.read(&index, sizeof(u32));
-    m.handle = MeshAssetHandle{index, 1};
+  u32 index = 0;
+  archive.reader.read(&index, sizeof(u32));
+  m.handle = MeshAssetHandle{index, 1};
 }
 
 void ComponentSerializer<Components::Camera>::save(

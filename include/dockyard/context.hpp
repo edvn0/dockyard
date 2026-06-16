@@ -27,15 +27,16 @@ struct VulkanContext {
   u32 present_queue_index{};
 
   struct Caps {
-    bool unified_image_layouts  = false;
-    bool present_wait           = false;
-    bool maintenance5           = false;
-    bool maintenance6           = false;
-    bool smooth_lines           = false;
-    bool stippled_smooth_lines  = false;
-    bool executable_properties  = false;
-    bool push_descriptor        = false;  // promoted in 1.4, but guard anyway
-    bool transient_attachments  = false;  // lazily-allocated memory exists (mobile/tiled GPUs)
+    bool unified_image_layouts = false;
+    bool present_wait = false;
+    bool maintenance5 = false;
+    bool maintenance6 = false;
+    bool smooth_lines = false;
+    bool stippled_smooth_lines = false;
+    bool executable_properties = false;
+    bool push_descriptor = false; // promoted in 1.4, but guard anyway
+    bool transient_attachments =
+        false; // lazily-allocated memory exists (mobile/tiled GPUs)
   } caps;
 
   auto graphics_queue() const -> VkQueue;
@@ -46,10 +47,9 @@ struct VulkanContext {
   one_time_submit(std::function<void(VkCommandBuffer)> &&func,
                   std::source_location = std::source_location::current()) const
       -> void;
-  auto
-one_time_submit_without_being_end(std::function<void(VkCommandBuffer)> &&func,
-                std::source_location = std::source_location::current()) const
-    -> void;
+  auto one_time_submit_without_being_end(
+      std::function<void(VkCommandBuffer)> &&func,
+      std::source_location = std::source_location::current()) const -> void;
   auto transition_to_general(
       VkImage, VkImageAspectFlags aspect, u32 mip_count, u32 layer_count,
       std::source_location = std::source_location::current()) const -> void;

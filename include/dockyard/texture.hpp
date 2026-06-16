@@ -1,15 +1,15 @@
 #pragma once
 
-#include <dockyard/vfs_path.hpp>
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/types.hpp>
+#include <dockyard/vfs_path.hpp>
 
 #include <cstddef>
 #include <span>
 #include <volk.h>
 
-#include <vk_mem_alloc.h>
 #include <expected>
+#include <vk_mem_alloc.h>
 
 namespace dy {
 template <typename Tag, typename Impl> class Pool;
@@ -68,8 +68,8 @@ struct Texture {
                      u32 height, VkFormat format, VkImageUsageFlags usage,
                      VkImageAspectFlags aspect,
                      VkSampleCountFlagBits = VK_SAMPLE_COUNT_1_BIT,
-                     u32 mip_levels = 1U,
-                     bool dedicated_memory = false) -> Texture;
+                     u32 mip_levels = 1U, bool dedicated_memory = false)
+      -> Texture;
   static auto load_ktx2_hdr_texture(const VulkanContext &, const VFSPath &)
       -> std::expected<Texture, std::string>;
 
@@ -127,6 +127,8 @@ struct Texture {
   auto destroy(const VulkanContext &) -> void;
 };
 
-auto convert_hdr_to_ktx2(const VFSPath &input, const VFSPath &output, bool force = false) -> std::expected<void, std::string>;
+auto convert_hdr_to_ktx2(const VFSPath &input, const VFSPath &output,
+                         bool force = false)
+    -> std::expected<void, std::string>;
 
 } // namespace dy

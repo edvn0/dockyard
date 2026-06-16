@@ -63,16 +63,15 @@ void ShaderWatcher::handleFileAction(efsw::WatchID, const std::string &dir,
   debounce_cv.notify_all();
 }
 
-  void ShaderWatcher::debounce_loop() {
+void ShaderWatcher::debounce_loop() {
   while (true) {
     std::unordered_set<std::string> changes_to_fire;
 
     {
       std::unique_lock lock(debounce_mutex);
 
-      debounce_cv.wait(lock, [this] {
-        return !is_running || !pending_changes.empty();
-      });
+      debounce_cv.wait(
+          lock, [this] { return !is_running || !pending_changes.empty(); });
 
       if (!is_running)
         return;
@@ -88,7 +87,6 @@ void ShaderWatcher::handleFileAction(efsw::WatchID, const std::string &dir,
 
         if (status == std::cv_status::timeout)
           break;
-
       }
 
       changes_to_fire = std::move(pending_changes);

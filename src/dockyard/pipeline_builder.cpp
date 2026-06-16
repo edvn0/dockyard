@@ -37,7 +37,7 @@ auto sorted_copy(R range, Compare comp = {})
   return result;
 }
 
-  struct TransientStage {
+struct TransientStage {
   std::vector<u32> code{};
   VkShaderModuleCreateInfo module_ci{};
   VkPipelineShaderStageCreateInfo stage_ci{};
@@ -47,16 +47,16 @@ auto sorted_copy(R range, Compare comp = {})
   TransientStage() = default;
 
   TransientStage(TransientStage &&o) noexcept {
-    code             = std::move(o.code);
-    entry_name       = std::move(o.entry_name);
-    owned_module     = o.owned_module;
-    o.owned_module   = VK_NULL_HANDLE;
+    code = std::move(o.code);
+    entry_name = std::move(o.entry_name);
+    owned_module = o.owned_module;
+    o.owned_module = VK_NULL_HANDLE;
 
-    module_ci        = o.module_ci;
-    module_ci.pCode  = code.data();
+    module_ci = o.module_ci;
+    module_ci.pCode = code.data();
 
-    stage_ci         = o.stage_ci;
-    stage_ci.pName   = entry_name.c_str();
+    stage_ci = o.stage_ci;
+    stage_ci.pName = entry_name.c_str();
 
     // Re-seat pNext only if we're using the inline maintenance5 path
     if (o.stage_ci.pNext == &o.module_ci)
@@ -64,37 +64,43 @@ auto sorted_copy(R range, Compare comp = {})
   }
 
   TransientStage &operator=(TransientStage &&) = delete;
-  TransientStage(const TransientStage &)       = delete;
+  TransientStage(const TransientStage &) = delete;
 
   static constexpr auto to_vk_stage(shader::Stage stage)
       -> VkShaderStageFlagBits {
     switch (stage) {
-    case shader::Stage::Vertex:   return VK_SHADER_STAGE_VERTEX_BIT;
-    case shader::Stage::Fragment: return VK_SHADER_STAGE_FRAGMENT_BIT;
-    case shader::Stage::Mesh:     return VK_SHADER_STAGE_MESH_BIT_EXT;
-    case shader::Stage::Task:     return VK_SHADER_STAGE_TASK_BIT_EXT;
-    case shader::Stage::Compute:  return VK_SHADER_STAGE_COMPUTE_BIT;
-    case shader::Stage::None:     std::abort();
+    case shader::Stage::Vertex:
+      return VK_SHADER_STAGE_VERTEX_BIT;
+    case shader::Stage::Fragment:
+      return VK_SHADER_STAGE_FRAGMENT_BIT;
+    case shader::Stage::Mesh:
+      return VK_SHADER_STAGE_MESH_BIT_EXT;
+    case shader::Stage::Task:
+      return VK_SHADER_STAGE_TASK_BIT_EXT;
+    case shader::Stage::Compute:
+      return VK_SHADER_STAGE_COMPUTE_BIT;
+    case shader::Stage::None:
+      std::abort();
     }
     std::unreachable();
   }
 
-  static auto from_entry_point(shader::CompiledEntryPoint ep,
-                                bool maintenance5) -> TransientStage {
+  static auto from_entry_point(shader::CompiledEntryPoint ep, bool maintenance5)
+      -> TransientStage {
     TransientStage ts{};
-    ts.code       = std::move(ep.spirv);
+    ts.code = std::move(ep.spirv);
     ts.entry_name = std::move(ep.entry_point.name);
-    ts.module_ci  = {
-        .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+    ts.module_ci = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
         .codeSize = ts.code.size() * sizeof(u32),
-        .pCode    = ts.code.data(),
+        .pCode = ts.code.data(),
     };
     ts.stage_ci = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .pNext = maintenance5 ? &ts.module_ci : nullptr,
         .stage = to_vk_stage(ep.entry_point.stage),
         .module = VK_NULL_HANDLE,
-        .pName  = ts.entry_name.c_str(),
+        .pName = ts.entry_name.c_str(),
     };
     return ts;
   }
@@ -103,12 +109,12 @@ auto sorted_copy(R range, Compare comp = {})
     if (owned_module != VK_NULL_HANDLE)
       return true;
 
-    if (vkCreateShaderModule(device, &module_ci, nullptr, &owned_module)
-        != VK_SUCCESS)
+    if (vkCreateShaderModule(device, &module_ci, nullptr, &owned_module) !=
+        VK_SUCCESS)
       return false;
 
     stage_ci.module = owned_module;
-    stage_ci.pNext  = nullptr;
+    stage_ci.pNext = nullptr;
     return true;
   }
 
@@ -119,7 +125,8 @@ auto sorted_copy(R range, Compare comp = {})
     }
   }
 
-  static auto compile_all(shader::CompiledShader shader, bool has_maintenance5 = true)
+  static auto compile_all(shader::CompiledShader shader,
+                          bool has_maintenance5 = true)
       -> std::vector<TransientStage> {
     std::vector<TransientStage> stages;
     stages.reserve(shader.entry_points.size());
@@ -171,7 +178,7 @@ auto create_layout_from_reflection(
   return pipeline_layout;
 }
 
-auto build_graphics_pipeline(VulkanContext& ctx,
+auto build_graphics_pipeline(VulkanContext &ctx,
                              const GraphicsPipelineDescription &desc,
                              VkPipelineLayout active_layout)
     -> std::expected<VkPipeline, std::string> {
@@ -207,7 +214,8 @@ auto build_graphics_pipeline(VulkanContext& ctx,
       static_cast<VkBool32>(desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
                             desc.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP);
   line_smoothness.lineRasterizationMode =
-      !ctx.caps.smooth_lines ? VK_LINE_RASTERIZATION_MODE_DEFAULT : VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH;
+      !ctx.caps.smooth_lines ? VK_LINE_RASTERIZATION_MODE_DEFAULT
+                             : VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH;
   line_smoothness.stippledLineEnable = VK_FALSE;
   line_smoothness.lineStipplePattern = 0xCC;
   line_smoothness.lineStippleFactor = 1;
@@ -310,7 +318,7 @@ auto build_graphics_pipeline(VulkanContext& ctx,
   return pipeline;
 }
 
-auto build_compute_pipeline(VulkanContext& ctx,
+auto build_compute_pipeline(VulkanContext &ctx,
                             const ComputePipelineDescription &desc,
                             VkPipelineLayout active_layout)
     -> std::expected<VkPipeline, std::string> {
@@ -337,8 +345,8 @@ auto build_compute_pipeline(VulkanContext& ctx,
   };
 
   VkPipeline pipeline = VK_NULL_HANDLE;
-  const VkResult vr = vkCreateComputePipelines(ctx.device, VK_NULL_HANDLE, 1u, &ci,
-                                               nullptr, &pipeline);
+  const VkResult vr = vkCreateComputePipelines(ctx.device, VK_NULL_HANDLE, 1u,
+                                               &ci, nullptr, &pipeline);
   if (vr != VK_SUCCESS)
     return std::unexpected(std::format("vkCreateComputePipelines failed ({})",
                                        static_cast<i32>(vr)));

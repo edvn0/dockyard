@@ -31,7 +31,6 @@ public:
   auto stop() -> void;
 
 private:
-
   void debounce_loop();
 
   std::filesystem::path real_path;
