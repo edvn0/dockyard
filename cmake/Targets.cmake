@@ -206,6 +206,7 @@ if(DOCKYARD_BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/test_scene_serialisation.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_game_dll.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_sim_state.cpp
+                ${CMAKE_SOURCE_DIR}/tests/test_state_machine.cpp
         )
         add_dependencies(dockyard-testing
                 test-dll-valid test-dll-no-symbol test-dll-null-factory)

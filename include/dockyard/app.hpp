@@ -67,6 +67,9 @@ public:
   virtual auto render(RenderContext &) -> u64 = 0;
   virtual auto destroy() -> void = 0;
 
+  // Called immediately before glfwCreateWindow — override to set extra hints.
+  virtual auto configure_window_hints() -> void {}
+
   virtual auto on_key_pressed(const events::KeyPressed &) -> void {}
   virtual auto on_key_released(const events::KeyReleased &) -> void {}
   virtual auto on_mouse_button_pressed(const events::MouseButtonPressed &)
@@ -78,6 +81,7 @@ public:
 
 protected:
   [[nodiscard]] auto get_window() const { return window; }
+  [[nodiscard]] auto get_window() { return window; }
   [[nodiscard]] auto get_frame_index() const -> const auto & {
     return frame_index;
   }

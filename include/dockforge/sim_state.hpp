@@ -2,60 +2,29 @@
 #include <array>
 #include <cstdint>
 #include <variant>
+#include <dockyard/state_machine.hpp>
 
 namespace sim {
 
 enum class S : uint8_t { Editing, Playing, Paused };
 
-template <S V>
-struct State {
-    static constexpr S value = V;
-};
-
-using Editing  = State<S::Editing>;
-using Playing  = State<S::Playing>;
-using Paused   = State<S::Paused>;
+using Editing  = fsm::State<S::Editing>;
+using Playing  = fsm::State<S::Playing>;
+using Paused   = fsm::State<S::Paused>;
 using AnyState = std::variant<Editing, Playing, Paused>;
-
-struct Edge { S from; S to; };
-
-static constexpr std::array state_transitions = {
-    Edge{.from = S::Editing, .to = S::Playing},  // play
-    Edge{.from = S::Playing, .to = S::Paused},   // pause
-    Edge{.from = S::Paused,  .to = S::Playing},  // resume
-    Edge{.from = S::Playing, .to = S::Editing},  // stop
-    Edge{.from = S::Paused,  .to = S::Editing},  // stop
-};
-
-consteval auto is_valid(S from_state, S to_state) -> bool {
-    for (const auto &edge : state_transitions)
-        if (edge.from == from_state && edge.to == to_state)
-            return true;
-    return false;
-}
-
-template <S To, S From>
-    requires (is_valid(From, To))
-[[nodiscard]] constexpr auto transition(State<From> /*from*/) noexcept -> State<To> {
-    return {};
-}
-
-template <S To, typename Fn>
-auto try_transition(AnyState &state, Fn &&action) -> bool {
-    return std::visit([&](auto current) -> bool {
-        constexpr S from_state = decltype(current)::value;
-        if constexpr (is_valid(from_state, To)) {
-            std::forward<Fn>(action)(current);
-            state = State<To>{};
-            return true;
-        }
-        return false;
-    }, state);
-}
-
-template <S V>
-[[nodiscard]] constexpr auto in(const AnyState &state) noexcept -> bool {
-    return std::holds_alternative<State<V>>(state);
-}
+using Machine  = fsm::Machine<S, AnyState>;
 
 } // namespace sim
+
+namespace fsm {
+template <> struct machine_traits<sim::S> {
+    using edge_t = Edge<sim::S::Editing>;
+    static constexpr std::array<edge_t, 5> transitions = {{
+        {.from = sim::S::Editing, .to = sim::S::Playing},
+        {.from = sim::S::Playing, .to = sim::S::Paused},
+        {.from = sim::S::Paused,  .to = sim::S::Playing},
+        {.from = sim::S::Playing, .to = sim::S::Editing},
+        {.from = sim::S::Paused,  .to = sim::S::Editing},
+    }};
+};
+} // namespace fsm

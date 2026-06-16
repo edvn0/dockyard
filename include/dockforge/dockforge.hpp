@@ -3,6 +3,7 @@
 #include <dockforge/editor_actions.hpp>
 #include <dockforge/editor_state.hpp>
 #include <dockforge/ipanel.hpp>
+#include <dockforge/sim_state.hpp>
 #include <dockyard/app.hpp>
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/canvas_renderer.hpp>
@@ -70,12 +71,10 @@ struct Dockforge : App {
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
 
-  enum class SimState : u8 { Editing, Playing, Paused };
-
   std::unique_ptr<dy::GameDll>       game_dll;
   std::unique_ptr<dy::IAssetLoader>  asset_loader;
   dy::GameMemory                     game_memory;
-  SimState                           sim_state    = SimState::Editing;
+  sim::Machine                       sim_state{sim::Editing{}};
   std::string                        game_dll_stem = "sandbox";
 
   TextureHandle icon_play;
@@ -105,6 +104,7 @@ struct Dockforge : App {
   auto flush_material_overrides() -> void;
   auto draw_hdr_selector() -> void;
 
+  auto configure_window_hints() -> void override;
   auto destroy() -> void override;
   auto update(float ts) -> void override;
   auto render(RenderContext &ctx) -> u64 override;
@@ -117,6 +117,7 @@ private:
   auto step() -> void;
   auto load_toolbar_icons() -> void;
   auto draw_toolbar() -> void;
+  auto draw_titlebar() -> void;
 };
 
 auto make_app() -> std::unique_ptr<Dockforge>;

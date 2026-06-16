@@ -1,13 +1,14 @@
 #include <algorithm>
-#include <unordered_map>
 #include <dockforge/dockforge.hpp>
 #include <dockforge/inspector_panel.hpp>
 #include <dockforge/scene_outliner_panel.hpp>
+#include <unordered_map>
 
 #include <dockforge/editor_camera.hpp>
 #include <dockforge/editor_utils.hpp>
 #include <dockforge/matrix_cache.hpp>
 
+#include <dockyard/asset_loader.hpp>
 #include <dockyard/binary_stream.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/components.hpp>
@@ -15,7 +16,6 @@
 #include <dockyard/game_dll.hpp>
 #include <dockyard/game_memory.hpp>
 #include <dockyard/imgui_renderer.hpp>
-#include <dockyard/asset_loader.hpp>
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/scene_renderer.hpp>
@@ -35,44 +35,100 @@
 
 #include <implot.h>
 
+#include <tracy/Tracy.hpp>
+
 #include <dockyard/image_decoder.hpp>
 #include <nfd.hpp>
-#include <thread>
+
+#ifdef _WIN32
+#include <windowsx.h>
+#define GLFW_EXPOSE_NATIVE_WIN32
+#include <GLFW/glfw3native.h>
+#endif
 
 static constexpr float k_step_dt = 1.0F / 60.0F;
 static constexpr ImVec2 k_icon_size{20.0F, 20.0F};
+static constexpr float k_titlebar_height = 32.0F;
+static constexpr float k_titlebar_btn_w = 46.0F;
+static constexpr int k_titlebar_btn_count = 3;
 
-#include <tracy/Tracy.hpp>
+#ifdef _WIN32
+static constexpr LONG k_titlebar_height_px = 32;
+static constexpr LONG k_titlebar_btns_px =
+    static_cast<LONG>(k_titlebar_btn_w * k_titlebar_btn_count);
+
+static WNDPROC g_original_wndproc =
+    nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+
+static LRESULT CALLBACK dockforge_wndproc(HWND hwnd, UINT msg, WPARAM wparam,
+                                          LPARAM lparam) {
+  if (msg == WM_NCHITTEST) {
+    const LRESULT hit =
+        CallWindowProcW(g_original_wndproc, hwnd, msg, wparam, lparam);
+    if (hit == HTCLIENT) {
+      POINT cursor{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      ScreenToClient(hwnd, &cursor);
+      if (cursor.y >= 0 && cursor.y < k_titlebar_height_px) {
+        RECT rect{};
+        GetClientRect(hwnd, &rect);
+        // Right-side button area stays HTCLIENT so ImGui receives clicks.
+        if (cursor.x < rect.right - k_titlebar_btns_px)
+          return HTCAPTION;
+      }
+    }
+    return hit;
+  }
+  if (msg == WM_GETMINMAXINFO) {
+    // Prevent a borderless-maximised window from covering the taskbar.
+    auto *mmi = reinterpret_cast<LPMINMAXINFO>(lparam);
+    const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(MONITORINFO);
+    GetMonitorInfoW(monitor, &mi);
+    mmi->ptMaxPosition = {mi.rcWork.left, mi.rcWork.top};
+    mmi->ptMaxSize = {mi.rcWork.right - mi.rcWork.left,
+                      mi.rcWork.bottom - mi.rcWork.top};
+    return 0;
+  }
+  return CallWindowProcW(g_original_wndproc, hwnd, msg, wparam, lparam);
+}
+
+static auto install_titlebar_hit_test(GLFWwindow *window) -> void {
+  HWND hwnd = glfwGetWin32Window(window);
+  g_original_wndproc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+      hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(dockforge_wndproc)));
+}
+#endif
 
 namespace {
 
 struct AssetLoader : dy::IAssetLoader {
-    dy::SceneRenderer &renderer;
-    std::unordered_map<std::string, dy::MeshAssetHandle> mesh_cache;
+  dy::SceneRenderer &renderer;
+  std::unordered_map<std::string, dy::MeshAssetHandle> mesh_cache;
 
-    explicit AssetLoader(dy::SceneRenderer &r) : renderer(r) {}
+  explicit AssetLoader(dy::SceneRenderer &r) : renderer(r) {}
 
-    auto load_mesh(const dy::VFSPath &path)
-        -> std::expected<dy::MeshAssetHandle, std::string> override {
-        auto key = std::string{path.view()};
-        if (auto it = mesh_cache.find(key); it != mesh_cache.end())
-            return it->second;
-        auto result = dy::mesh::load_from_path(path, renderer);
-        if (result)
-            mesh_cache.emplace(std::move(key), *result);
-        return result;
-    }
+  auto load_mesh(const dy::VFSPath &path)
+      -> std::expected<dy::MeshAssetHandle, std::string> override {
+    auto key = std::string{path.view()};
+    if (auto it = mesh_cache.find(key); it != mesh_cache.end())
+      return it->second;
+    auto result = dy::mesh::load_from_path(path, renderer);
+    if (result)
+      mesh_cache.emplace(std::move(key), *result);
+    return result;
+  }
 };
 
-    inline auto pack_normal(glm::vec3 n) {
-      return glm::packSnorm4x8(glm::vec4(n, 0.0f));
-    }
-    inline auto pack_uv(glm::vec2 uv) { return glm::packHalf2x16(uv); }
+inline auto pack_normal(glm::vec3 n) {
+  return glm::packSnorm4x8(glm::vec4(n, 0.0f));
+}
+inline auto pack_uv(glm::vec2 uv) { return glm::packHalf2x16(uv); }
 
-    #include "./cube_vertices.inl"
-    #include "./capsule_vertices.inl"
+#include "./capsule_vertices.inl"
+#include "./cube_vertices.inl"
 
-    auto resize_viewport(Dockforge &app) -> void {
+auto resize_viewport(Dockforge &app) -> void {
   double current_time = glfwGetTime();
   double time_since_last_move = current_time - app.last_resize_change_time;
   if (time_since_last_move > Dockforge::resize_debounce_delay) {
@@ -145,7 +201,9 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   {
     cube_mesh_handle =
         mesh::load_from_memory(*renderer, cube_verts, cube_indices).value();
-    auto capsule_mesh_handle= mesh::load_from_memory(*renderer, capsule_verts, capsule_indices).value();
+    auto capsule_mesh_handle =
+        mesh::load_from_memory(*renderer, capsule_verts, capsule_indices)
+            .value();
 
     auto &scene = *active_scene;
     constexpr int grid_side = 10;
@@ -160,9 +218,9 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
     auto human_like = scene.make("Human");
     auto xt = human_like.get<Components::Transform>().mut();
-    xt.position = glm::vec3(0.0f, 0.875f, 0.0f); // centred vertically
+    xt.position = glm::vec3(0.0f, 0.875f, 0.0f);
     human_like.emplace<Components::Mesh>(capsule_mesh_handle);
-    xt.scale = glm::vec3(0.2f, 1.75f, 0.2f); // thin 1.75m pillar
+    xt.scale = glm::vec3(0.2f, 1.75f, 0.2f);
 
     auto floor = scene.make("Floor");
     floor.emplace<Components::Mesh>(cube_mesh_handle);
@@ -170,7 +228,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     floor.get<Components::Transform>().mut().position = {0, -10, 0};
 
     auto light_parent = scene.make("Light parent");
-    // Create some random point lights on top of the floor
     const auto floor_pos = glm::vec3{0, -10, 0};
     for (int i = 0; i < 128; i++) {
       auto light = scene.make("Light", light_parent);
@@ -235,8 +292,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       renderer->textures, renderer->samplers, renderer->comparison_samplers,
       renderer->subimages);
 
-
-
   if (auto loaded_sponza = mesh::load_from_path(
           VFSPath::create("meshes://Sponza/MISSING_main_sponza.glb"),
           *renderer)) {
@@ -246,18 +301,18 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   }
 
   editor_state.active_scene = active_scene;
-  editor_state.renderer     = renderer.get();
+  editor_state.renderer = renderer.get();
 
   editor_actions.duplicate_entity = [this](Entity ent) {
-      return duplicate_entity(ent);
+    return duplicate_entity(ent);
   };
   editor_actions.create_entity = [this](std::string_view name) {
-      editor_state.cache_dirty = true;
-      return active_scene->make(name);
+    editor_state.cache_dirty = true;
+    return active_scene->make(name);
   };
   editor_actions.destroy_entity = [this](Entity ent) {
-      active_scene->destroy_and_all_children(ent.handle(), *renderer);
-      editor_state.cache_dirty = true;
+    active_scene->destroy_and_all_children(ent.handle(), *renderer);
+    editor_state.cache_dirty = true;
   };
 
   panels.push_back(std::make_unique<SceneOutlinerPanel>());
@@ -276,10 +331,117 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       .far_plane = 30.0F,
   };
   df.color = glm::vec4{1.F, 1.F, 0.F, 1.F};
+
+#ifdef _WIN32
+  install_titlebar_hit_test(get_window());
+#endif
+}
+
+auto Dockforge::configure_window_hints() -> void {
+  glfwWindowHint(GLFW_DECORATED, GLFW_FALSE);
+}
+
+auto Dockforge::draw_titlebar() -> void {
+  auto window = App::get_window();
+  const ImGuiViewport *vp = ImGui::GetMainViewport();
+
+  ImGui::SetNextWindowPos(vp->Pos);
+  ImGui::SetNextWindowSize({vp->Size.x, k_titlebar_height});
+  ImGui::SetNextWindowViewport(vp->ID);
+
+  constexpr ImGuiWindowFlags flags =
+      ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse |
+      ImGuiWindowFlags_NoSavedSettings |
+      ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMove |
+      ImGuiWindowFlags_NoDocking;
+
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0F);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0F);
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.0F, 0.0F});
+  ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4{0.08F, 0.08F, 0.09F, 1.0F});
+  ImGui::Begin("##Titlebar", nullptr, flags);
+  ImGui::PopStyleVar(3);
+  ImGui::PopStyleColor();
+
+  const float right = ImGui::GetContentRegionMax().x;
+  const float center_y =
+      (k_titlebar_height - ImGui::GetTextLineHeight()) * 0.5F;
+  const float drag_w =
+      right - k_titlebar_btn_w * static_cast<float>(k_titlebar_btn_count);
+
+  // ── Invisible drag region (input layer) ───────────────────────────────────
+  // On Win32 the HTCAPTION wndproc intercepts these events at the OS level,
+  // so this code only fires on X11 / Wayland.
+  ImGui::SetCursorPos({0.0F, 0.0F});
+  ImGui::InvisibleButton("##drag", {drag_w, k_titlebar_height});
+
+  if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+    const ImVec2 delta = ImGui::GetIO().MouseDelta;
+    int win_x = 0;
+    int win_y = 0;
+    glfwGetWindowPos(window, &win_x, &win_y);
+    glfwSetWindowPos(window, win_x + static_cast<int>(delta.x),
+                     win_y + static_cast<int>(delta.y));
+  }
+
+  if (ImGui::IsItemHovered() &&
+      ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+    const bool maximised = glfwGetWindowAttrib(window, GLFW_MAXIMIZED) != 0;
+    maximised ? glfwRestoreWindow(window) : glfwMaximizeWindow(window);
+  }
+
+  // ── Visual content drawn over the drag region ─────────────────────────────
+  ImGui::SetCursorPos({8.0F, center_y});
+  ImGui::TextColored({0.55F, 0.55F, 0.60F, 1.0F}, "Dockforge");
+
+  ImGui::SameLine();
+  ImGui::SetCursorPosY(center_y);
+  ImGui::TextDisabled("|");
+  ImGui::SameLine();
+  ImGui::SetCursorPosY(center_y);
+  if (sim_state.in<sim::S::Playing>())
+    ImGui::TextColored({0.35F, 0.85F, 0.35F, 1.0F}, "Playing");
+  else if (sim_state.in<sim::S::Paused>())
+    ImGui::TextColored({0.90F, 0.70F, 0.25F, 1.0F}, "Paused");
+  else
+    ImGui::TextDisabled("Editor");
+
+  // ── Window control buttons ────────────────────────────────────────────────
+  constexpr float btn_w = k_titlebar_btn_w;
+  constexpr float btn_h = k_titlebar_height;
+
+  ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0F);
+  ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {0.0F, 0.0F});
+  ImGui::PushStyleColor(ImGuiCol_Button, {0.0F, 0.0F, 0.0F, 0.0F});
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {1.0F, 1.0F, 1.0F, 0.08F});
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, {1.0F, 1.0F, 1.0F, 0.16F});
+
+  ImGui::SetCursorPos({right - btn_w * 3.0F, 0.0F});
+  if (ImGui::Button("_##min", {btn_w, btn_h}))
+    glfwIconifyWindow(window);
+
+  ImGui::SetCursorPos({right - btn_w * 2.0F, 0.0F});
+  const bool maximised = glfwGetWindowAttrib(window, GLFW_MAXIMIZED) != 0;
+  if (ImGui::Button(maximised ? "#r##max" : "#m##max", {btn_w, btn_h}))
+    maximised ? glfwRestoreWindow(window) : glfwMaximizeWindow(window);
+
+  ImGui::SetCursorPos({right - btn_w, 0.0F});
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.85F, 0.18F, 0.18F, 1.0F});
+  ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.70F, 0.10F, 0.10F, 1.0F});
+  if (ImGui::Button("x##close", {btn_w, btn_h}))
+    glfwSetWindowShouldClose(window, GLFW_TRUE);
+  ImGui::PopStyleColor(2);
+
+  ImGui::PopStyleColor(3);
+  ImGui::PopStyleVar(2);
+
+  ImGui::End();
 }
 
 auto Dockforge::on_mouse_moved(const events::MouseMoved &e) -> void {
-  if (glfwGetMouseButton(get_window(), GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS)
+  if (glfwGetMouseButton(App::get_window(), GLFW_MOUSE_BUTTON_RIGHT) ==
+      GLFW_PRESS)
     editor_camera->on_mouse_delta(e.dx, e.dy);
 }
 
@@ -357,7 +519,6 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
 
   editor_state.selected = best;
 }
-
 
 [[nodiscard]] auto draw_material_editor(GPUMaterial &mat) -> bool {
   bool changed = false;
@@ -608,10 +769,10 @@ auto Dockforge::draw_hdr_selector() -> void {
 }
 auto Dockforge::load_toolbar_icons() -> void {
   const std::array<std::pair<std::string_view, TextureHandle *>, 5> icons{{
-      {"editor://icons/play_32.png",   &icon_play},
-      {"editor://icons/pause_32.png",  &icon_pause},
-      {"editor://icons/stop_32.png",   &icon_stop},
-      {"editor://icons/step_32.png",   &icon_step},
+      {"editor://icons/play_32.png", &icon_play},
+      {"editor://icons/pause_32.png", &icon_pause},
+      {"editor://icons/stop_32.png", &icon_stop},
+      {"editor://icons/step_32.png", &icon_step},
       {"editor://icons/reload_32.png", &icon_reload},
   }};
 
@@ -629,12 +790,12 @@ auto Dockforge::load_toolbar_icons() -> void {
           dy::pool::CpuTextureData data;
           auto &mip = data.mips.emplace_back(dy::pool::MipData{
               .pixels = std::move(decoded->pixels),
-              .width  = decoded->width,
+              .width = decoded->width,
               .height = decoded->height,
           });
           data.pixels = mip.pixels;
-          data.name   = std::string(path.stem());
-          data.width  = decoded->width;
+          data.name = std::string(path.stem());
+          data.width = decoded->width;
           data.height = decoded->height;
           data.format = VK_FORMAT_R8G8B8A8_UNORM;
           return data;
@@ -652,21 +813,26 @@ auto Dockforge::draw_toolbar() -> void {
     return;
   }
 
-  const bool editing = sim_state == SimState::Editing;
-  const bool playing = sim_state == SimState::Playing;
-  const bool paused  = sim_state == SimState::Paused;
+  const bool editing = sim_state.in<sim::S::Editing>();
+  const bool playing = sim_state.in<sim::S::Playing>();
+  const bool paused  = sim_state.in<sim::S::Paused>();
   const bool has_dll = game_dll && game_dll->game();
 
-  auto icon_button = [](const char *id, TextureHandle handle, bool enabled) -> bool {
+  auto icon_button = [](const char *id, TextureHandle handle,
+                        bool enabled) -> bool {
     ImGui::BeginDisabled(!enabled || !handle.valid());
-    const bool pressed = ImGui::ImageButton(id, ImTextureRef{ImTextureID{handle.index()}}, k_icon_size);
+    const bool pressed = ImGui::ImageButton(
+        id, ImTextureRef{ImTextureID{handle.index()}}, k_icon_size);
     ImGui::EndDisabled();
     return pressed && enabled;
   };
 
   // Play / Resume
   if (icon_button("##play", icon_play, (editing && has_dll) || paused)) {
-    if (paused) resume(); else play();
+    if (paused)
+      resume();
+    else
+      play();
   }
   ImGui::SameLine();
 
@@ -697,7 +863,8 @@ auto Dockforge::draw_toolbar() -> void {
     if (icon_button("##reload", icon_reload, true)) {
       PROFILE_SCOPE("Reload dll");
       game_dll.reset();
-      auto path = VFSPath::create("binary://{}.{}", game_dll_stem, shared_extension);
+      auto path =
+          VFSPath::create("binary://{}.{}", game_dll_stem, shared_extension);
       if (auto result = dy::GameDll::load(path)) {
         game_dll = std::move(*result);
         game_dll->start_watching(renderer->thread_pool);
@@ -713,9 +880,12 @@ auto Dockforge::draw_toolbar() -> void {
 
 auto Dockforge::build_ui() -> void {
   ZoneScopedNC("Dockforge::build_ui", 0xFFD700);
+  draw_titlebar();
+
   const ImGuiViewport *vp = ImGui::GetMainViewport();
-  ImGui::SetNextWindowPos(vp->WorkPos);
-  ImGui::SetNextWindowSize(vp->WorkSize);
+  ImGui::SetNextWindowPos({vp->WorkPos.x, vp->WorkPos.y + k_titlebar_height});
+  ImGui::SetNextWindowSize(
+      {vp->WorkSize.x, vp->WorkSize.y - k_titlebar_height});
   ImGui::SetNextWindowViewport(vp->ID);
 
   ImGuiWindowFlags host_flags =
@@ -847,11 +1017,20 @@ auto Dockforge::build_ui() -> void {
   }
   ImGui::End();
 
-  { ZoneScopedNC("draw_toolbar", 0x888888);             draw_toolbar(); }
-  for (auto& panel : panels)
+  {
+    ZoneScopedNC("draw_toolbar", 0x888888);
+    draw_toolbar();
+  }
+  for (auto &panel : panels)
     panel->draw(editor_state, editor_actions);
-  { ZoneScopedNC("draw_performance_overlay", 0x888888); draw_performance_overlay(); }
-  { ZoneScopedNC("draw_hdr_selector", 0x888888);        draw_hdr_selector(); }
+  {
+    ZoneScopedNC("draw_performance_overlay", 0x888888);
+    draw_performance_overlay();
+  }
+  {
+    ZoneScopedNC("draw_hdr_selector", 0x888888);
+    draw_hdr_selector();
+  }
 
   auto draw_csm = [](CsmResources &resources) {
     if (ImGui::Begin("Cascaded Shadow Map Debug")) {
@@ -893,8 +1072,7 @@ auto Dockforge::build_ui() -> void {
 
 auto Dockforge::destroy() -> void {
 
-
-  if (sim_state != SimState::Editing)
+  if (!sim_state.in<sim::S::Editing>())
     stop();
 
   if (game_dll) {
@@ -939,71 +1117,66 @@ auto update_local_to_world_matrices(entt::registry &registry) -> void {
 }
 
 auto Dockforge::pause() -> void {
-  if (sim_state != SimState::Playing)
-    return;
-  sim_state = SimState::Paused;
-  TracyMessage("Game paused", 11);
+  sim_state.try_transition<sim::S::Paused>(
+      [&](auto) { TracyMessage("Game paused", 11); });
 }
 
 auto Dockforge::resume() -> void {
-  if (sim_state != SimState::Paused)
-    return;
-  sim_state = SimState::Playing;
-  TracyMessage("Game resumed", 12);
+  sim_state.try_transition<sim::S::Playing>(
+      [&](auto) { TracyMessage("Game resumed", 12); });
 }
 
 auto Dockforge::step() -> void {
-  if (sim_state != SimState::Paused || !game_dll || !game_dll->game())
+  if (!sim_state.in<sim::S::Paused>() || !game_dll || !game_dll->game())
     return;
   game_dll->game()->update(&game_memory, active_scene, k_step_dt);
 }
 
 auto Dockforge::play() -> void {
-  if (sim_state != SimState::Editing || !game_dll || (game_dll->game() == nullptr))
+  if (!game_dll || !game_dll->game())
     return;
 
-  runtime_scene = std::make_shared<Scene>();
+  sim_state.try_transition<sim::S::Playing>([&](auto) {
+    runtime_scene = std::make_shared<Scene>();
 
-  std::vector<u8> snapshot_buf;
-  MemoryWriter writer{snapshot_buf};
-  SceneSerializer::serialize(*editor_scene, writer);
-  MemoryReader reader{snapshot_buf};
-  SceneSerializer::deserialize(*runtime_scene, reader);
+    std::vector<u8> snapshot_buf;
+    MemoryWriter writer{snapshot_buf};
+    SceneSerializer::serialize(*editor_scene, writer);
+    MemoryReader reader{snapshot_buf};
+    SceneSerializer::deserialize(*runtime_scene, reader);
 
-  runtime_scene->group<Components::Transform, Components::LocalToWorld,
-                       Components::Mesh>();
+    runtime_scene->group<Components::Transform, Components::LocalToWorld,
+                         Components::Mesh>();
 
-  active_scene = runtime_scene.get();
-  editor_state.active_scene = active_scene;
-  game_memory.reset();
-  game_dll->game()->init(&game_memory, active_scene, *asset_loader);
-  TracyMessage("Game started", 12);
-  sim_state = SimState::Playing;
-  editor_state.cache_dirty = true;
+    active_scene = runtime_scene.get();
+    editor_state.active_scene = active_scene;
+    game_memory.reset();
+    game_dll->game()->init(&game_memory, active_scene, *asset_loader);
+    TracyMessage("Game started", 12);
+    editor_state.cache_dirty = true;
+  });
 }
 
 auto Dockforge::stop() -> void {
-  if (sim_state == SimState::Editing)
-    return;
+  sim_state.try_transition<sim::S::Editing>([&](auto) {
+    if (game_dll && game_dll->game())
+      game_dll->game()->destroy(&game_memory, active_scene);
 
-  if (game_dll && game_dll->game())
-    game_dll->game()->destroy(&game_memory, active_scene);
-
-  game_memory.reset();
-  TracyMessage("Game stopped", 12);
-  active_scene = editor_scene.get();
-  editor_state.active_scene = active_scene;
-  runtime_scene.reset();
-  sim_state = SimState::Editing;
-  editor_state.selected = entt::null;
-  editor_state.cache_dirty = true;
-  for (auto &panel : panels)
-    panel->on_stop();
+    game_memory.reset();
+    TracyMessage("Game stopped", 12);
+    active_scene = editor_scene.get();
+    editor_state.active_scene = active_scene;
+    runtime_scene.reset();
+    editor_state.selected = entt::null;
+    editor_state.cache_dirty = true;
+    for (auto &panel : panels)
+      panel->on_stop();
+  });
 }
 
 auto Dockforge::update(float ts) -> void {
   ZoneScopedNC("Dockforge::update", 0x00BFFF);
-  if (sim_state != SimState::Editing && game_dll && game_dll->game()) {
+  if (!sim_state.in<sim::S::Editing>() && game_dll && game_dll->game()) {
     if (game_dll->poll_reload()) {
       game_dll->game()->destroy(&game_memory, active_scene);
       game_memory.reset();
@@ -1012,7 +1185,7 @@ auto Dockforge::update(float ts) -> void {
       info("Game DLL hot reloaded");
       TracyMessage("GameDLL hot reloaded", 20);
     }
-    if (sim_state == SimState::Playing)
+    if (sim_state.in<sim::S::Playing>())
       game_dll->game()->update(&game_memory, active_scene, ts);
   }
   if (active_scene->primary_camera() == nullptr)
@@ -1176,7 +1349,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     };
   }
 
-  TracyPlot("point_lights",  static_cast<int64_t>(light_count));
+  TracyPlot("point_lights", static_cast<int64_t>(light_count));
   TracyPlot("mesh_entities", static_cast<int64_t>(render_group.size()));
 
   auto prepare_result = renderer->prepare({

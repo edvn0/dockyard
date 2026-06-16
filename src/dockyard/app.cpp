@@ -97,6 +97,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   DEFER(glfwTerminate());
 
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+  configure_window_hints();
 
   int width = find_or_default("--width=", 1280);
   int height = find_or_default("--height=", 720);

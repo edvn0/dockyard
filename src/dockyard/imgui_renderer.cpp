@@ -39,12 +39,100 @@ struct PC {
 auto create_pipeline(SceneRenderer &, VkFormat)
     -> std::expected<PipelineHandle, shader::CompilationError>;
 
+namespace {
+auto apply_dark_theme() -> void {
+    ImGui::StyleColorsDark();
+    ImGuiStyle &style = ImGui::GetStyle();
+
+    style.WindowPadding      = {8.f, 8.f};
+    style.FramePadding       = {6.f, 4.f};
+    style.CellPadding        = {6.f, 4.f};
+    style.ItemSpacing        = {8.f, 4.f};
+    style.ItemInnerSpacing   = {4.f, 4.f};
+    style.IndentSpacing      = 16.f;
+    style.ScrollbarSize      = 12.f;
+    style.GrabMinSize        = 8.f;
+
+    style.WindowRounding     = 4.f;
+    style.ChildRounding      = 4.f;
+    style.FrameRounding      = 3.f;
+    style.PopupRounding      = 4.f;
+    style.ScrollbarRounding  = 6.f;
+    style.GrabRounding       = 3.f;
+    style.TabRounding        = 4.f;
+
+    style.WindowBorderSize   = 1.f;
+    style.ChildBorderSize    = 1.f;
+    style.PopupBorderSize    = 1.f;
+    style.FrameBorderSize    = 0.f;
+    style.TabBorderSize      = 0.f;
+
+    auto *c = style.Colors;
+    c[ImGuiCol_Text]                  = {0.82f, 0.82f, 0.82f, 1.00f};
+    c[ImGuiCol_TextDisabled]          = {0.42f, 0.42f, 0.44f, 1.00f};
+    c[ImGuiCol_WindowBg]              = {0.13f, 0.13f, 0.14f, 1.00f};
+    c[ImGuiCol_ChildBg]               = {0.10f, 0.10f, 0.11f, 1.00f};
+    c[ImGuiCol_PopupBg]               = {0.11f, 0.11f, 0.12f, 0.96f};
+    c[ImGuiCol_Border]                = {0.25f, 0.25f, 0.27f, 0.60f};
+    c[ImGuiCol_BorderShadow]          = {0.00f, 0.00f, 0.00f, 0.00f};
+    c[ImGuiCol_FrameBg]               = {0.18f, 0.18f, 0.20f, 1.00f};
+    c[ImGuiCol_FrameBgHovered]        = {0.24f, 0.24f, 0.26f, 1.00f};
+    c[ImGuiCol_FrameBgActive]         = {0.28f, 0.28f, 0.31f, 1.00f};
+    c[ImGuiCol_TitleBg]               = {0.09f, 0.09f, 0.10f, 1.00f};
+    c[ImGuiCol_TitleBgActive]         = {0.09f, 0.09f, 0.10f, 1.00f};
+    c[ImGuiCol_TitleBgCollapsed]      = {0.09f, 0.09f, 0.10f, 0.75f};
+    c[ImGuiCol_MenuBarBg]             = {0.11f, 0.11f, 0.12f, 1.00f};
+    c[ImGuiCol_ScrollbarBg]           = {0.00f, 0.00f, 0.00f, 0.00f};
+    c[ImGuiCol_ScrollbarGrab]         = {0.28f, 0.28f, 0.30f, 1.00f};
+    c[ImGuiCol_ScrollbarGrabHovered]  = {0.34f, 0.34f, 0.37f, 1.00f};
+    c[ImGuiCol_ScrollbarGrabActive]   = {0.40f, 0.40f, 0.44f, 1.00f};
+    c[ImGuiCol_CheckMark]             = {0.26f, 0.59f, 0.98f, 1.00f};
+    c[ImGuiCol_SliderGrab]            = {0.26f, 0.59f, 0.98f, 0.90f};
+    c[ImGuiCol_SliderGrabActive]      = {0.46f, 0.54f, 0.80f, 1.00f};
+    c[ImGuiCol_Button]                = {0.24f, 0.24f, 0.27f, 1.00f};
+    c[ImGuiCol_ButtonHovered]         = {0.26f, 0.59f, 0.98f, 0.55f};
+    c[ImGuiCol_ButtonActive]          = {0.26f, 0.59f, 0.98f, 1.00f};
+    c[ImGuiCol_Header]                = {0.26f, 0.59f, 0.98f, 0.25f};
+    c[ImGuiCol_HeaderHovered]         = {0.26f, 0.59f, 0.98f, 0.50f};
+    c[ImGuiCol_HeaderActive]          = {0.26f, 0.59f, 0.98f, 0.90f};
+    c[ImGuiCol_Separator]             = {0.25f, 0.25f, 0.27f, 0.60f};
+    c[ImGuiCol_SeparatorHovered]      = {0.26f, 0.59f, 0.98f, 0.60f};
+    c[ImGuiCol_SeparatorActive]       = {0.26f, 0.59f, 0.98f, 1.00f};
+    c[ImGuiCol_ResizeGrip]            = {0.26f, 0.59f, 0.98f, 0.20f};
+    c[ImGuiCol_ResizeGripHovered]     = {0.26f, 0.59f, 0.98f, 0.67f};
+    c[ImGuiCol_ResizeGripActive]      = {0.26f, 0.59f, 0.98f, 0.95f};
+    c[ImGuiCol_Tab]                   = {0.09f, 0.09f, 0.10f, 1.00f};
+    c[ImGuiCol_TabHovered]            = {0.30f, 0.30f, 0.34f, 1.00f};
+    c[ImGuiCol_TabActive]             = {0.20f, 0.20f, 0.23f, 1.00f};
+    c[ImGuiCol_TabUnfocused]          = {0.09f, 0.09f, 0.10f, 1.00f};
+    c[ImGuiCol_TabUnfocusedActive]    = {0.14f, 0.14f, 0.16f, 1.00f};
+    c[ImGuiCol_DockingPreview]        = {0.26f, 0.59f, 0.98f, 0.60f};
+    c[ImGuiCol_DockingEmptyBg]        = {0.10f, 0.10f, 0.11f, 1.00f};
+    c[ImGuiCol_PlotLines]             = {0.61f, 0.61f, 0.61f, 1.00f};
+    c[ImGuiCol_PlotLinesHovered]      = {1.00f, 0.43f, 0.35f, 1.00f};
+    c[ImGuiCol_PlotHistogram]         = {0.26f, 0.59f, 0.98f, 1.00f};
+    c[ImGuiCol_PlotHistogramHovered]  = {1.00f, 0.43f, 0.35f, 1.00f};
+    c[ImGuiCol_TableHeaderBg]         = {0.13f, 0.13f, 0.15f, 1.00f};
+    c[ImGuiCol_TableBorderStrong]     = {0.25f, 0.25f, 0.27f, 1.00f};
+    c[ImGuiCol_TableBorderLight]      = {0.20f, 0.20f, 0.22f, 1.00f};
+    c[ImGuiCol_TableRowBg]            = {0.00f, 0.00f, 0.00f, 0.00f};
+    c[ImGuiCol_TableRowBgAlt]         = {1.00f, 1.00f, 1.00f, 0.03f};
+    c[ImGuiCol_TextSelectedBg]        = {0.26f, 0.59f, 0.98f, 0.35f};
+    c[ImGuiCol_DragDropTarget]        = {0.26f, 0.59f, 0.98f, 0.90f};
+    c[ImGuiCol_NavHighlight]          = {0.26f, 0.59f, 0.98f, 1.00f};
+    c[ImGuiCol_NavWindowingHighlight]  = {1.00f, 1.00f, 1.00f, 0.70f};
+    c[ImGuiCol_NavWindowingDimBg]     = {0.80f, 0.80f, 0.80f, 0.20f};
+    c[ImGuiCol_ModalWindowDimBg]      = {0.10f, 0.10f, 0.10f, 0.45f};
+}
+} // namespace
+
 ImGuiRenderer::ImGuiRenderer(GLFWwindow *w, u32 initial_slot_count,
                              SceneRenderer &r, FontChoice font)
     : renderer(r) {
 
   std::ignore = ImGui::CreateContext();
   std::ignore = ImPlot::CreateContext();
+  apply_dark_theme();
 
   ImGuiIO &io = ImGui::GetIO();
   io.BackendRendererName = "imgui-custom-vulkan";
