@@ -167,13 +167,19 @@ auto ViewportResources::resize(const VulkanContext &ctx,
   u32 hiz_mips = static_cast<u32>(std::bit_width(std::max(hiz_w, hiz_h)));
 
   if (hierarchical_depth_pyramid_target.valid()) {
-    auto *entry = renderer.textures.get(hierarchical_depth_pyramid_target);
-    entry->texture.destroy(ctx, &renderer.textures);
-    entry->texture = Texture::create(
+    renderer.textures.get(hierarchical_depth_pyramid_target)->texture.destroy(ctx, &renderer.textures);
+
+    // Build the new pyramid outside the pool: register_sub_views calls
+    // texture_pool.create() which can reallocate pool_slots, invalidating any
+    // pointer into the pool obtained before the call.
+    auto new_pyramid = Texture::create(
         ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
         VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips, true);
-    entry->texture.register_sub_views(ctx, renderer.textures, renderer.bindless);
+    new_pyramid.register_sub_views(ctx, renderer.textures, renderer.bindless);
+
+    // Re-fetch: pool_slots may have been reallocated during register_sub_views.
+    renderer.textures.get(hierarchical_depth_pyramid_target)->texture = std::move(new_pyramid);
   } else {
     auto tex = Texture::create(
         ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
