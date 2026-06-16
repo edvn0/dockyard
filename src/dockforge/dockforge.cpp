@@ -35,8 +35,12 @@
 
 #include <implot.h>
 
+#include <dockyard/image_decoder.hpp>
 #include <nfd.hpp>
 #include <thread>
+
+static constexpr float k_step_dt = 1.0F / 60.0F;
+static constexpr ImVec2 k_icon_size{20.0F, 20.0F};
 
 #include <tracy/Tracy.hpp>
 
@@ -258,6 +262,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
   panels.push_back(std::make_unique<SceneOutlinerPanel>());
   panels.push_back(std::make_unique<InspectorPanel>());
+
+  load_toolbar_icons();
 
   auto frustum_entity = active_scene->make("DebugFrustum");
   auto &df_transform = frustum_entity.get<Components::Transform>();
@@ -600,26 +606,87 @@ auto Dockforge::draw_hdr_selector() -> void {
 
   ImGui::End();
 }
+auto Dockforge::load_toolbar_icons() -> void {
+  const std::array<std::pair<std::string_view, TextureHandle *>, 5> icons{{
+      {"editor://icons/play_32.png",   &icon_play},
+      {"editor://icons/pause_32.png",  &icon_pause},
+      {"editor://icons/stop_32.png",   &icon_stop},
+      {"editor://icons/step_32.png",   &icon_step},
+      {"editor://icons/reload_32.png", &icon_reload},
+  }};
+
+  for (auto &&[path_str, handle] : icons) {
+    std::stop_source stop_src;
+    auto fut = std::async(
+        std::launch::async,
+        [path = VFSPath::create(path_str)]() -> dy::pool::CpuTextureData {
+          auto decoded = dy::ImageDecoder::from_path(path);
+          if (!decoded) {
+            warn("Toolbar icon: {}", decoded.error());
+            return {};
+          }
+
+          dy::pool::CpuTextureData data;
+          auto &mip = data.mips.emplace_back(dy::pool::MipData{
+              .pixels = std::move(decoded->pixels),
+              .width  = decoded->width,
+              .height = decoded->height,
+          });
+          data.pixels = mip.pixels;
+          data.name   = std::string(path.stem());
+          data.width  = decoded->width;
+          data.height = decoded->height;
+          data.format = VK_FORMAT_R8G8B8A8_UNORM;
+          return data;
+        });
+
+    renderer->texture_upload_pool->submit(
+        std::move(fut), std::move(stop_src),
+        [handle](TextureHandle h) { *handle = h; });
+  }
+}
+
 auto Dockforge::draw_toolbar() -> void {
   if (!ImGui::Begin("Toolbar")) {
     ImGui::End();
     return;
   }
 
-  if (is_playing) {
-    if (ImGui::Button("Stop"))
-      stop();
-  } else {
-    const bool has_dll = game_dll && game_dll->game();
-    ImGui::BeginDisabled(!has_dll);
-    if (ImGui::Button("Play"))
-      play();
-    ImGui::EndDisabled();
-  }
+  const bool editing = sim_state == SimState::Editing;
+  const bool playing = sim_state == SimState::Playing;
+  const bool paused  = sim_state == SimState::Paused;
+  const bool has_dll = game_dll && game_dll->game();
 
-  if (!is_playing) {
+  auto icon_button = [](const char *id, TextureHandle handle, bool enabled) -> bool {
+    ImGui::BeginDisabled(!enabled || !handle.valid());
+    const bool pressed = ImGui::ImageButton(id, ImTextureRef{ImTextureID{handle.index()}}, k_icon_size);
+    ImGui::EndDisabled();
+    return pressed && enabled;
+  };
+
+  // Play / Resume
+  if (icon_button("##play", icon_play, (editing && has_dll) || paused)) {
+    if (paused) resume(); else play();
+  }
+  ImGui::SameLine();
+
+  // Pause
+  if (icon_button("##pause", icon_pause, playing))
+    pause();
+  ImGui::SameLine();
+
+  // Stop
+  if (icon_button("##stop", icon_stop, playing || paused))
+    stop();
+  ImGui::SameLine();
+
+  // Step (one fixed timestep while paused)
+  if (icon_button("##step", icon_step, paused && has_dll))
+    step();
+
+  if (editing) {
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(300.0f);
+    ImGui::SetNextItemWidth(300.0F);
 
     std::array<char, 256> buf{};
     std::ranges::copy(game_dll_stem, buf.begin());
@@ -627,11 +694,10 @@ auto Dockforge::draw_toolbar() -> void {
       game_dll_stem = buf.data();
 
     ImGui::SameLine();
-    if (ImGui::Button("Reload DLL")) {
+    if (icon_button("##reload", icon_reload, true)) {
       PROFILE_SCOPE("Reload dll");
       game_dll.reset();
-      auto path =
-          VFSPath::create("binary://{}.{}", game_dll_stem, shared_extension);
+      auto path = VFSPath::create("binary://{}.{}", game_dll_stem, shared_extension);
       if (auto result = dy::GameDll::load(path)) {
         game_dll = std::move(*result);
         game_dll->start_watching(renderer->thread_pool);
@@ -828,7 +894,7 @@ auto Dockforge::build_ui() -> void {
 auto Dockforge::destroy() -> void {
 
 
-  if (is_playing)
+  if (sim_state != SimState::Editing)
     stop();
 
   if (game_dll) {
@@ -872,8 +938,28 @@ auto update_local_to_world_matrices(entt::registry &registry) -> void {
   }
 }
 
+auto Dockforge::pause() -> void {
+  if (sim_state != SimState::Playing)
+    return;
+  sim_state = SimState::Paused;
+  TracyMessage("Game paused", 11);
+}
+
+auto Dockforge::resume() -> void {
+  if (sim_state != SimState::Paused)
+    return;
+  sim_state = SimState::Playing;
+  TracyMessage("Game resumed", 12);
+}
+
+auto Dockforge::step() -> void {
+  if (sim_state != SimState::Paused || !game_dll || !game_dll->game())
+    return;
+  game_dll->game()->update(&game_memory, active_scene, k_step_dt);
+}
+
 auto Dockforge::play() -> void {
-  if (is_playing || !game_dll || (game_dll->game() == nullptr))
+  if (sim_state != SimState::Editing || !game_dll || (game_dll->game() == nullptr))
     return;
 
   runtime_scene = std::make_shared<Scene>();
@@ -892,12 +978,12 @@ auto Dockforge::play() -> void {
   game_memory.reset();
   game_dll->game()->init(&game_memory, active_scene, *asset_loader);
   TracyMessage("Game started", 12);
-  is_playing = true;
+  sim_state = SimState::Playing;
   editor_state.cache_dirty = true;
 }
 
 auto Dockforge::stop() -> void {
-  if (!is_playing)
+  if (sim_state == SimState::Editing)
     return;
 
   if (game_dll && game_dll->game())
@@ -908,13 +994,16 @@ auto Dockforge::stop() -> void {
   active_scene = editor_scene.get();
   editor_state.active_scene = active_scene;
   runtime_scene.reset();
-  is_playing = false;
+  sim_state = SimState::Editing;
+  editor_state.selected = entt::null;
   editor_state.cache_dirty = true;
+  for (auto &panel : panels)
+    panel->on_stop();
 }
 
 auto Dockforge::update(float ts) -> void {
   ZoneScopedNC("Dockforge::update", 0x00BFFF);
-  if (is_playing && game_dll && game_dll->game()) {
+  if (sim_state != SimState::Editing && game_dll && game_dll->game()) {
     if (game_dll->poll_reload()) {
       game_dll->game()->destroy(&game_memory, active_scene);
       game_memory.reset();
@@ -923,7 +1012,8 @@ auto Dockforge::update(float ts) -> void {
       info("Game DLL hot reloaded");
       TracyMessage("GameDLL hot reloaded", 20);
     }
-    game_dll->game()->update(&game_memory, active_scene, ts);
+    if (sim_state == SimState::Playing)
+      game_dll->game()->update(&game_memory, active_scene, ts);
   }
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);

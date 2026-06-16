@@ -54,6 +54,7 @@ struct Sandbox : IGame {
       auto parent = scene->make("Helmet parent");
       for (auto i = 0; i < 300; i++) {
         auto child = scene->make("Helmet", parent);
+
         child.emplace<Components::Mesh>(helmet_mesh);
         child.get<Components::Transform>().mut().position =
             glm::linearRand(glm::vec3{-size}, glm::vec3{size});

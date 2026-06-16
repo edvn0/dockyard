@@ -10,6 +10,15 @@
 
 using namespace dy;
 
+auto SceneOutlinerPanel::on_stop() -> void {
+    cache.entity_cache.clear();
+    cache.expanded_entities.clear();
+    cache.cache_dirty = true;
+    pending_duplicate = entt::null;
+    pending_delete    = entt::null;
+    delete_candidate  = entt::null;
+}
+
 auto SceneOutlinerPanel::refresh_cache(EditorState& state) -> void {
     ZoneScopedNC("SceneOutlinerPanel::refresh_cache", 0x808080);
     cache.entity_cache.clear();

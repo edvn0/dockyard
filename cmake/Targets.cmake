@@ -54,6 +54,7 @@ add_library(dockyard STATIC
         src/dockyard/texture_upload_pool.cpp
         src/dockyard/game_memory.cpp
         src/dockyard/game_dll.cpp
+        src/dockyard/image_decoder.cpp
 )
 
 dockyard_configure_renderdoc(dockyard

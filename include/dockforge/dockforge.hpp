@@ -4,6 +4,7 @@
 #include <dockforge/editor_state.hpp>
 #include <dockforge/ipanel.hpp>
 #include <dockyard/app.hpp>
+#include <dockyard/bindless_handle.hpp>
 #include <dockyard/canvas_renderer.hpp>
 #include <dockyard/freelist_pool.hpp>
 #include <dockyard/game_dll.hpp>
@@ -69,11 +70,19 @@ struct Dockforge : App {
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
 
+  enum class SimState : u8 { Editing, Playing, Paused };
+
   std::unique_ptr<dy::GameDll>       game_dll;
   std::unique_ptr<dy::IAssetLoader>  asset_loader;
   dy::GameMemory                     game_memory;
-  bool                               is_playing   = false;
-  std::string                  game_dll_stem = "sandbox";
+  SimState                           sim_state    = SimState::Editing;
+  std::string                        game_dll_stem = "sandbox";
+
+  TextureHandle icon_play;
+  TextureHandle icon_pause;
+  TextureHandle icon_stop;
+  TextureHandle icon_step;
+  TextureHandle icon_reload;
 
   std::vector<std::unique_ptr<IPanel>> panels;
 
@@ -102,7 +111,11 @@ struct Dockforge : App {
 
 private:
   auto play() -> void;
+  auto pause() -> void;
+  auto resume() -> void;
   auto stop() -> void;
+  auto step() -> void;
+  auto load_toolbar_icons() -> void;
   auto draw_toolbar() -> void;
 };
 

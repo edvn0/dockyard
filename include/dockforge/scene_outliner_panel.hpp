@@ -9,6 +9,8 @@ struct SceneOutlinerPanel final : IPanel {
     auto draw(EditorState& state, const EditorActions& actions) -> void override;
     [[nodiscard]] auto name() const -> std::string_view override { return "Entities"; }
 
+    auto on_stop() -> void override;
+
 private:
     auto refresh_cache(EditorState& state) -> void;
 
