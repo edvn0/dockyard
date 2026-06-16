@@ -12,6 +12,7 @@
 #include <dockyard/game_memory.hpp>
 #include <dockyard/scene.hpp>
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -75,7 +76,7 @@ struct Dockforge : App {
   std::unique_ptr<dy::IAssetLoader>  asset_loader;
   dy::GameMemory                     game_memory;
   sim::Machine                       sim_state{sim::Editing{}};
-  std::string                        game_dll_stem = "sandbox";
+  std::filesystem::path              game_dll_path;
 
   TextureHandle icon_play;
   TextureHandle icon_pause;
@@ -115,6 +116,7 @@ private:
   auto resume() -> void;
   auto stop() -> void;
   auto step() -> void;
+  auto load_game_dll(const std::filesystem::path&) -> void;
   auto load_toolbar_icons() -> void;
   auto draw_toolbar() -> void;
   auto draw_titlebar() -> void;

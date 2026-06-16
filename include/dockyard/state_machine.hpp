@@ -1,9 +1,8 @@
 #pragma once
+#include <ranges>
 #include <variant>
 
 namespace fsm {
-
-// ─── core types ──────────────────────────────────────────────────────────────
 
 template <auto V>
 struct State {
@@ -14,27 +13,25 @@ struct State {
 template <auto V>
 struct Edge { decltype(V) from; decltype(V) to; };
 
-// ─── machine trait — specialise this ─────────────────────────────────────────
-//
-//  template <> struct machine_traits<MyEnum> {
-//      static constexpr auto transitions = std::array{ ... };
-//  };
-
 template <typename Enum>
-struct machine_traits; // undefined by default — linker error if missing
+struct machine_traits;
 
-// ─── validation ──────────────────────────────────────────────────────────────
-
+// Satisfied when machine_traits<Enum> is specialised with a constexpr
+// iterable `transitions` member.
 template <typename Enum>
+concept EnumWithTransitions = requires {
+    { machine_traits<Enum>::transitions } -> std::ranges::range;
+};
+
+template <EnumWithTransitions Enum>
 consteval auto is_valid(Enum from, Enum to_state) -> bool {
     for (const auto& edge : machine_traits<Enum>::transitions)
         if (edge.from == from && edge.to == to_state) return true;
     return false;
 }
 
-// ─── typed state machine wrapper ─────────────────────────────────────────────
-
 template <typename Enum, typename Variant>
+    requires EnumWithTransitions<Enum>
 class Machine {
 public:
     using enum_type    = Enum;
@@ -43,7 +40,6 @@ public:
     Machine() = default;
     explicit Machine(Variant initial) : state(std::move(initial)) {}
 
-    // checked compile-time transition — only compiles if edge exists
     template <Enum To, Enum From>
         requires (is_valid(From, To))
     [[nodiscard]] constexpr auto transition(State<From> /*from*/) noexcept -> State<To> {
@@ -51,7 +47,6 @@ public:
         return {};
     }
 
-    // runtime transition attempt — returns false if no edge
     template <Enum To, typename Fn>
     auto try_transition(Fn&& action) -> bool {
         return std::visit([&](auto current) -> bool {

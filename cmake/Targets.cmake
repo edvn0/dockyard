@@ -163,6 +163,15 @@ set_target_properties(sandbox PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY_DEBUG "${ASSETS_ROOT_ABS}/binary"
         LIBRARY_OUTPUT_DIRECTORY_RELEASE "${ASSETS_ROOT_ABS}/binary"
         LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${ASSETS_ROOT_ABS}/binary"
+        # PDB stays in the build tree so assets/binary never holds one.
+        # The hot-copy DLL keeps the embedded absolute path, which GameDll
+        # uses to locate and copy the PDB with a versioned name — meaning
+        # the debugger locks sandbox_hot_N.pdb, not sandbox.pdb, and the
+        # linker can always write a fresh sandbox.pdb.
+        PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
+        PDB_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_BINARY_DIR}"
+        PDB_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}"
+        PDB_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_BINARY_DIR}"
 )
 
 # ---- Tools -------------------------------------------------------------------

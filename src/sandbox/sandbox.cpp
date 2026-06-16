@@ -1,11 +1,11 @@
 #include <cmath>
 #include <dockyard/asset_loader.hpp>
-#include <glm/gtc/random.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/game_memory.hpp>
 #include <dockyard/igame.hpp>
 #include <dockyard/log.hpp>
 #include <dockyard/scene.hpp>
+#include <glm/gtc/random.hpp>
 #include <numbers>
 #include <vector>
 
@@ -36,7 +36,8 @@ struct Sandbox : IGame {
         VFSPath::create("meshes://damaged_helmet/DamagedHelmet.glb"));
     if (result) {
       helmet_mesh = *result;
-      dy::info("Sandbox: helmet mesh ready (handle index {})", helmet_mesh.index());
+      dy::info("Sandbox: helmet mesh ready (handle index {})",
+               helmet_mesh.index());
     } else {
       dy::warn("Sandbox: failed to preload helmet mesh: {}", result.error());
     }
@@ -90,7 +91,7 @@ struct Sandbox : IGame {
     using namespace Components;
 
     const float radius = 5.0f;
-    const float speed = 20.F;
+    const float speed = 1.F;
 
     for (const auto &hd : state->helmets) {
       auto &transform = scene->registry().get<Transform>(hd.entity);

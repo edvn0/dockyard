@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <fstream>
 #include <dockforge/dockforge.hpp>
 #include <dockforge/inspector_panel.hpp>
 #include <dockforge/scene_outliner_panel.hpp>
@@ -152,21 +153,32 @@ auto make_app() -> std::unique_ptr<Dockforge> {
 
 Dockforge::~Dockforge() = default;
 
+static constexpr std::string_view k_gamedll_scheme = "gamedll";
+static const std::filesystem::path k_dll_settings_path =
+    std::filesystem::path(ASSETS_ROOT_PATH) / "editor" / "game_dll_path.txt";
+
 auto Dockforge::init(const InitialisationContext &ctx) -> void {
+  NFD::Init();
+
   renderer =
       std::make_unique<SceneRenderer>(ctx.context, ctx.swapchain_resources);
   asset_loader = std::make_unique<AssetLoader>(*renderer);
   context = &ctx.context;
 
   game_memory = GameMemory::create();
-  if (auto result = GameDll::load(
-          VFSPath::create("binary://sandbox.{}", shared_extension))) {
-    game_dll = std::move(*result);
-    game_dll->start_watching(renderer->thread_pool);
-    game_dll->game()->pre_init(*asset_loader);
-  } else {
-    warn("GameDll: {}", result.error());
+
+  // Try the last-used DLL path; fall back to the built-in sandbox.
+  std::filesystem::path dll_to_load;
+  if (std::ifstream ifs{k_dll_settings_path}; ifs) {
+    std::string line;
+    if (std::getline(ifs, line) && !line.empty())
+      dll_to_load = line;
   }
+  if (dll_to_load.empty() || !std::filesystem::exists(dll_to_load)) {
+    dll_to_load = std::filesystem::path(ASSETS_ROOT_PATH) / "binary" /
+                  std::format("sandbox.{}", shared_extension);
+  }
+  load_game_dll(dll_to_load);
 
   editor_scene = std::make_shared<Scene>();
   active_scene = editor_scene.get();
@@ -852,26 +864,35 @@ auto Dockforge::draw_toolbar() -> void {
 
   if (editing) {
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(300.0F);
 
-    std::array<char, 256> buf{};
-    std::ranges::copy(game_dll_stem, buf.begin());
-    if (ImGui::InputText("Game DLL", buf.data(), buf.size()))
-      game_dll_stem = buf.data();
+    const auto dll_label = game_dll_path.empty()
+                               ? std::string{"No DLL loaded"}
+                               : game_dll_path.filename().string();
+    const float button_h = k_icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F;
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (button_h - ImGui::GetTextLineHeight()) * 0.5F);
+    ImGui::TextDisabled("%s", dll_label.c_str());
+    if (!game_dll_path.empty() && ImGui::IsItemHovered())
+      ImGui::SetTooltip("%s", game_dll_path.string().c_str());
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - (button_h - ImGui::GetTextLineHeight()) * 0.5F);
 
     ImGui::SameLine();
-    if (icon_button("##reload", icon_reload, true)) {
-      PROFILE_SCOPE("Reload dll");
-      game_dll.reset();
-      auto path =
-          VFSPath::create("binary://{}.{}", game_dll_stem, shared_extension);
-      if (auto result = dy::GameDll::load(path)) {
-        game_dll = std::move(*result);
-        game_dll->start_watching(renderer->thread_pool);
-        game_dll->game()->pre_init(*asset_loader);
-      } else {
-        warn("GameDll: {}", result.error());
+    const ImVec2 browse_sz{0.0F, k_icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F};
+    if (ImGui::Button("...##browse", browse_sz)) {
+      nfdnchar_t* out = nullptr;
+      const nfdnfilteritem_t filter{L"Shared Library", L"dll,so,dylib"};
+      if (NFD::OpenDialog(out, &filter, 1) == NFD_OKAY) {
+        const std::filesystem::path chosen{out};
+        NFD::FreePath(out);
+        load_game_dll(chosen);
+        if (std::ofstream ofs{k_dll_settings_path}; ofs)
+          ofs << chosen.string();
       }
+    }
+
+    ImGui::SameLine();
+    if (icon_button("##reload", icon_reload, has_dll)) {
+      PROFILE_SCOPE("Reload dll");
+      load_game_dll(game_dll_path);
     }
   }
 
@@ -1071,6 +1092,7 @@ auto Dockforge::build_ui() -> void {
 }
 
 auto Dockforge::destroy() -> void {
+  NFD::Quit();
 
   if (!sim_state.in<sim::S::Editing>())
     stop();
@@ -1113,6 +1135,22 @@ auto update_local_to_world_matrices(entt::registry &registry) -> void {
                  glm::mat4_cast(rotation) * glm::scale(glm::mat4{1.0F}, scale);
 
     transform.set_dirty(false);
+  }
+}
+
+auto Dockforge::load_game_dll(const std::filesystem::path& path) -> void {
+  if (game_dll) {
+    game_dll->stop_watching();
+    game_dll.reset();
+  }
+  const auto vfs_path = VFS::get().mount_file(k_gamedll_scheme, path);
+  if (auto result = GameDll::load(vfs_path)) {
+    game_dll_path = path;
+    game_dll = std::move(*result);
+    game_dll->start_watching(renderer->thread_pool);
+    game_dll->game()->pre_init(*asset_loader);
+  } else {
+    warn("GameDll: {}", result.error());
   }
 }
 

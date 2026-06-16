@@ -12,10 +12,10 @@ using Editing  = fsm::State<S::Editing>;
 using Playing  = fsm::State<S::Playing>;
 using Paused   = fsm::State<S::Paused>;
 using AnyState = std::variant<Editing, Playing, Paused>;
-using Machine  = fsm::Machine<S, AnyState>;
 
 } // namespace sim
 
+// machine_traits must be defined before Machine is instantiated below.
 namespace fsm {
 template <> struct machine_traits<sim::S> {
     using edge_t = Edge<sim::S::Editing>;
@@ -28,3 +28,7 @@ template <> struct machine_traits<sim::S> {
     }};
 };
 } // namespace fsm
+
+namespace sim {
+using Machine = fsm::Machine<S, AnyState>;
+} // namespace sim
