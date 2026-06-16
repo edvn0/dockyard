@@ -13,7 +13,7 @@ namespace {
 constexpr u32 max_string_length = 4096;
 
 // Validates that a string sequence conforms strictly to RFC 3629 UTF-8.
-auto is_valid_utf8(std::string_view str) -> bool {
+[[maybe_unused]] auto is_valid_utf8(std::string_view str) -> bool {
   const auto *bytes = reinterpret_cast<const std::uint8_t *>(str.data());
   std::size_t i = 0;
   std::size_t len = str.size();
@@ -161,6 +161,11 @@ void ComponentSerializer<Components::Camera>::save(
   archive.writer.write(&value.position, sizeof(glm::vec3));
   archive.writer.write(&value.yaw, sizeof(float));
   archive.writer.write(&value.pitch, sizeof(float));
+  archive.writer.write(&value.is_perspective, sizeof(bool));
+  archive.writer.write(&value.ortho_left, sizeof(f32));
+  archive.writer.write(&value.ortho_right, sizeof(f32));
+  archive.writer.write(&value.ortho_bottom, sizeof(f32));
+  archive.writer.write(&value.ortho_top, sizeof(f32));
 
   bool has_override = value.forward_override.has_value();
   archive.writer.write(&has_override, sizeof(bool));
@@ -178,6 +183,11 @@ void ComponentSerializer<Components::Camera>::load(auto &archive,
   archive.reader.read(&value.position, sizeof(glm::vec3));
   archive.reader.read(&value.yaw, sizeof(float));
   archive.reader.read(&value.pitch, sizeof(float));
+  archive.reader.read(&value.is_perspective, sizeof(bool));
+  archive.reader.read(&value.ortho_left, sizeof(f32));
+  archive.reader.read(&value.ortho_right, sizeof(f32));
+  archive.reader.read(&value.ortho_bottom, sizeof(f32));
+  archive.reader.read(&value.ortho_top, sizeof(f32));
 
   bool has_override = false;
   archive.reader.read(&has_override, sizeof(bool));

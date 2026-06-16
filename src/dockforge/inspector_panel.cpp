@@ -41,8 +41,8 @@ auto InspectorPanel::draw(EditorState& state, const EditorActions& /*actions*/) 
 
     ImGui::Separator();
     ImGui::Spacing();
-    if (ComponentInspector::draw(*state.renderer, entity))
-        state.hierarchy_dirty = true;
+    if (ComponentInspector::draw(*state.renderer, *state.active_scene, entity))
+      state.hierarchy_dirty = true;
 
     ImGui::End();
 }

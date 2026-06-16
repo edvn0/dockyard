@@ -8,8 +8,6 @@
 #include <dockyard/texture_upload_pool.hpp>
 #include <dockyard/vfs.hpp>
 
-
-
 #include <atomic>
 #include <execution>
 #include <limits>
@@ -24,9 +22,9 @@
 
 namespace dy {
 
-    struct ProfilingContext {
-        TracyVkCtx ctx{};
-    };
+struct ProfilingContext {
+  TracyVkCtx ctx{};
+};
 
 namespace {
 
@@ -343,7 +341,6 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
   texture_upload_pool = std::make_unique<pool::TextureUploadPool>();
 
   resize();
-
 
   tracy_vk_ctx->ctx = TracyVkContextHostCalibrated(
       ctx.instance.instance, ctx.physical_device, ctx.device,
@@ -749,10 +746,7 @@ void SceneRenderer::ensure_global_capacity(usize instance_count) {
   }
 }
 
-
-
-auto SceneRenderer::prepare(const FrameRenderInfo &info)
-    -> PrepareResult {
+auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
   TracyVkCollectHost(tracy_vk_ctx->ctx);
 
   ZoneScopedNC("SceneRenderer::prepare", 0xFF00FF);
@@ -1210,7 +1204,8 @@ void SceneRenderer::build_hierarchical_depth_pyramid_pass(
 void SceneRenderer::forward_occlusion_culling_pass(
     VkCommandBuffer cmd, const TextureHandle hiz_target) {
   ZoneScopedNC("SceneRenderer::forward_occlusion_culling_pass", 0xFF8C00);
-  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "forward_occlusion_culling_pass", 0xFF8C00);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "forward_occlusion_culling_pass",
+               0xFF8C00);
 
   auto geometry_count = global_instance_data.size();
   auto &forward_ws = forward_pass.frame_workspaces.at(current_frame_index);
@@ -1263,9 +1258,8 @@ void SceneRenderer::forward_occlusion_culling_pass(
   // The packing must mirror the shader's uint4[4] layout exactly.
   for (u32 m = 0; m < 15; ++m) {
     push.hiz_mip_indices[m / 4][m % 4] =
-        (m < mip_levels)
-            ? resolved_pyramid->texture.mip_layer_handle(m).index()
-            : 0U;
+        (m < mip_levels) ? resolved_pyramid->texture.mip_layer_handle(m).index()
+                         : 0U;
   }
   push.hiz_mip_indices[15 / 4][15 % 4] = mip_levels;
 
@@ -1477,26 +1471,13 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
   }
 
   {
-    u32 total_commands = static_cast<u32>(commands.size());
-    for (u32 idx = 0; idx < total_global_instances; ++idx) {
-        const u32 cmd = instance_to_commands[idx];
-        if (cmd == 0xFFFF'FFFFu) continue;
-        assert(cmd < total_commands && "instance_to_command out of range");
-        const auto &fp = renderer.flat_prim_table[
-            entries[sorted_order[idx]].mesh_prim_flat_index];
-        assert(cmd + fp.lod_group->lod_count - 1 < total_commands 
-               && "lod offset exceeds command range");
-    }
-}
-
-  {
     ZoneScopedNC("Ensure Allocation Capacity", 0x708090);
     ensure_capacity(commands.size(), remapped_indices.size(),
                     draw_counts.size(), total_global_instances);
   }
 
   TracyPlot("indirect_commands", static_cast<i64>(commands.size()));
-  TracyPlot("draw_batches",      static_cast<i64>(batches.size()));
+  TracyPlot("draw_batches", static_cast<i64>(batches.size()));
 
   {
     ZoneScopedNC("Upload GPU Workspaces", 0xADFF2F);

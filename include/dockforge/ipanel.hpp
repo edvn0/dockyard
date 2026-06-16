@@ -6,9 +6,9 @@ struct EditorState;
 struct EditorActions;
 
 struct IPanel {
-    virtual ~IPanel()                                                        = default;
-    virtual auto draw(EditorState&, const EditorActions&) -> void            = 0;
-    [[nodiscard]] virtual auto name() const -> std::string_view              = 0;
-    virtual auto on_stop() -> void                                           {}
-    bool open = true;
+  virtual ~IPanel() = default;
+  virtual auto draw(EditorState &, const EditorActions &) -> void = 0;
+  [[nodiscard]] virtual auto name() const -> std::string_view = 0;
+  virtual auto on_stop() -> void {}
+  bool open = true;
 };

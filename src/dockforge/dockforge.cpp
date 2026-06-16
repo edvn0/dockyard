@@ -1,8 +1,9 @@
+#include "dockyard/bindless_handle.hpp"
 #include <algorithm>
-#include <fstream>
 #include <dockforge/dockforge.hpp>
 #include <dockforge/inspector_panel.hpp>
 #include <dockforge/scene_outliner_panel.hpp>
+#include <fstream>
 #include <unordered_map>
 
 #include <dockforge/editor_camera.hpp>
@@ -105,24 +106,23 @@ namespace {
 
 struct AssetLoader : dy::IAssetLoader {
   dy::SceneRenderer &renderer;
-  std::unordered_map<std::string, dy::MeshAssetHandle> mesh_cache;
+  StringMap<dy::MeshAssetHandle> mesh_cache;
 
   explicit AssetLoader(dy::SceneRenderer &r) : renderer(r) {}
 
   auto load_mesh(const dy::VFSPath &path)
       -> std::expected<dy::MeshAssetHandle, std::string> override {
-    auto key = std::string{path.view()};
-    if (auto it = mesh_cache.find(key); it != mesh_cache.end())
+    if (auto it = mesh_cache.find(path.view()); it != mesh_cache.end())
       return it->second;
     auto result = dy::mesh::load_from_path(path, renderer);
     if (result)
-      mesh_cache.emplace(std::move(key), *result);
+      mesh_cache.emplace(std::string{path.view()}, *result);
     return result;
   }
 };
 
 inline auto pack_normal(glm::vec3 n) {
-  return glm::packSnorm4x8(glm::vec4(n, 0.0f));
+  return glm::packSnorm4x8(glm::vec4(n, 0.0F));
 }
 inline auto pack_uv(glm::vec2 uv) { return glm::packHalf2x16(uv); }
 
@@ -462,11 +462,6 @@ auto Dockforge::on_mouse_scrolled(const events::MouseScrolled &e) -> void {
 }
 
 auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
-  if (e.key == GLFW_KEY_ESCAPE) {
-    renderer->texture_upload_pool->drop();
-    glfwSetWindowShouldClose(get_window(), GLFW_TRUE);
-  }
-
   if (e.key == GLFW_KEY_F2 && e.mods == GLFW_MOD_SHIFT)
     editor_camera->save_keyframe(2.F);
 
@@ -839,7 +834,6 @@ auto Dockforge::draw_toolbar() -> void {
     return pressed && enabled;
   };
 
-  // Play / Resume
   if (icon_button("##play", icon_play, (editing && has_dll) || paused)) {
     if (paused)
       resume();
@@ -848,17 +842,14 @@ auto Dockforge::draw_toolbar() -> void {
   }
   ImGui::SameLine();
 
-  // Pause
   if (icon_button("##pause", icon_pause, playing))
     pause();
   ImGui::SameLine();
 
-  // Stop
   if (icon_button("##stop", icon_stop, playing || paused))
     stop();
   ImGui::SameLine();
 
-  // Step (one fixed timestep while paused)
   if (icon_button("##step", icon_step, paused && has_dll))
     step();
 
@@ -879,7 +870,10 @@ auto Dockforge::draw_toolbar() -> void {
     const ImVec2 browse_sz{0.0F, k_icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F};
     if (ImGui::Button("...##browse", browse_sz)) {
       nfdnchar_t* out = nullptr;
-      const nfdnfilteritem_t filter{L"Shared Library", L"dll,so,dylib"};
+      const nfdnfilteritem_t filter{
+          .name = "Shared Library",
+          .spec = "dll,so,dylib",
+      };
       if (NFD::OpenDialog(out, &filter, 1) == NFD_OKAY) {
         const std::filesystem::path chosen{out};
         NFD::FreePath(out);
@@ -1179,7 +1173,8 @@ auto Dockforge::play() -> void {
 
     std::vector<u8> snapshot_buf;
     MemoryWriter writer{snapshot_buf};
-    SceneSerializer::serialize(*editor_scene, writer);
+    SceneSerializer::serialize_parallel(renderer->thread_pool, *editor_scene,
+                                        writer);
     MemoryReader reader{snapshot_buf};
     SceneSerializer::deserialize(*runtime_scene, reader);
 

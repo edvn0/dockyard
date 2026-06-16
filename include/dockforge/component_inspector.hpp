@@ -33,8 +33,8 @@ template <typename T> struct ComponentRenderer {};
 
 template <typename T>
 concept has_valid_renderer =
-    requires(T &val, dy::SceneRenderer &r, dy::Entity &e) {
-      { ComponentRenderer<T>::draw(val, r, e) } -> std::same_as<bool>;
+    requires(T &val, dy::SceneRenderer &r, dy::Scene &s, dy::Entity &e) {
+      { ComponentRenderer<T>::draw(val, r, s, e) } -> std::same_as<bool>;
       { ComponentRenderer<T>::label } -> std::convertible_to<std::string_view>;
       { ComponentRenderer<T>::addable } -> std::convertible_to<bool>;
       { ComponentRenderer<T>::removable } -> std::convertible_to<bool>;
@@ -42,11 +42,11 @@ concept has_valid_renderer =
 
 class ComponentInspector {
 public:
-  static auto draw(dy::SceneRenderer &, dy::Entity &) -> bool;
+  static auto draw(dy::SceneRenderer &, dy::Scene &, dy::Entity &) -> bool;
 
 private:
   template <typename T>
-  static auto draw_one(dy::SceneRenderer &, dy::Entity &,
+  static auto draw_one(dy::SceneRenderer &, dy::Scene &, dy::Entity &,
                        std::optional<std::function<void()>> &pending_remove)
       -> bool;
 

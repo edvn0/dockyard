@@ -1,5 +1,6 @@
 #pragma once
 
+#include "glm/ext/matrix_clip_space.hpp"
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
@@ -33,6 +34,12 @@ struct Camera {
   f32 yaw = 0.0F;
   f32 pitch = 0.0F;
 
+  bool is_perspective{true};
+  f32 ortho_left;
+  f32 ortho_right;
+  f32 ortho_bottom;
+  f32 ortho_top;
+
   std::optional<glm::vec3> forward_override = std::nullopt;
 
   [[nodiscard]] auto forward() const -> glm::vec3 {
@@ -56,8 +63,12 @@ struct Camera {
   }
 
   [[nodiscard]] auto projection() const -> glm::mat4 {
-    return glm::perspectiveLH_ZO(glm::radians(fov_degrees), aspect, far_plane,
-                                 near_plane);
+    if (is_perspective) {
+      return glm::perspectiveLH_ZO(glm::radians(fov_degrees), aspect, far_plane,
+                                   near_plane);
+    }
+    return glm::orthoLH_NO(ortho_left, ortho_right, ortho_bottom, ortho_top,
+                           far_plane, near_plane);
   }
 
   auto set_aspect(u32 width, u32 height) -> void {

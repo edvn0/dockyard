@@ -20,7 +20,7 @@ struct ComponentRenderer<dy::Components::Transform>
   static constexpr bool addable = false;
 
   static auto draw(dy::Components::Transform &t, dy::SceneRenderer &,
-                   dy::Entity &) -> bool {
+                   dy::Scene &, dy::Entity &) -> bool {
     bool changed = false;
     auto &&[pos, rot, scale] = t.get();
 
@@ -110,7 +110,7 @@ struct ComponentRenderer<dy::Components::Mesh>
   }
 
   static auto draw(dy::Components::Mesh &m, dy::SceneRenderer &scene_renderer,
-                   dy::Entity &) -> bool {
+                   dy::Scene &, dy::Entity &) -> bool {
     bool modified = false;
     auto &registry = scene_renderer.mesh_registry;
 
@@ -178,7 +178,7 @@ struct ComponentRenderer<dy::Components::Mesh>
           ImGui::TreePop();
         }
       } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f),
+        ImGui::TextColored(ImVec4(1.F, 0.4f, 0.4f, 1.F),
                            "Warning: Stale or Invalid Handle!");
       }
     } else {
@@ -198,7 +198,7 @@ struct ComponentRenderer<dy::Components::MaterialOverride>
   static constexpr bool addable = true;
 
   static auto draw(dy::Components::MaterialOverride &ov, dy::SceneRenderer &,
-                   dy::Entity &) -> bool {
+                   dy::Scene &, dy::Entity &) -> bool {
     const bool changed = draw_material_editor(ov.material);
     if (changed)
       ov.dirty = true;
@@ -224,24 +224,59 @@ template <>
 struct ComponentRenderer<dy::Components::Camera>
     : public BaseComponentRenderer<ComponentRenderer<dy::Components::Camera>> {
   static constexpr std::string_view label = "Camera";
-  static constexpr bool removable = true;
-  static constexpr bool addable = true;
 
   static auto draw(dy::Components::Camera &cam, dy::SceneRenderer &,
-                   dy::Entity &) -> bool {
+                   dy::Scene &scene, dy::Entity &e) -> bool {
     bool changed = false;
-    float &fov = cam.fov_degrees;
-    float &near_plane = cam.near_plane;
-    float &far_plane = cam.far_plane;
-    if (ImGui::SliderFloat("FOV", &fov, 1.F, 170.F)) {
+
+    bool is_ortho = !cam.is_perspective;
+    if (ImGui::Checkbox("Orthographic", &is_ortho)) {
+      cam.is_perspective = !is_ortho;
       changed = true;
     }
-    if (ImGui::SliderFloat("Near", &near_plane, 0.001F, 10.F)) {
+
+    ImGui::Separator();
+
+    // Conditional Fields based on Projection Type
+    if (cam.is_perspective) {
+      // --- Perspective Settings ---
+      if (ImGui::SliderFloat("FOV", &cam.fov_degrees, 1.F, 170.F)) {
+        changed = true;
+      }
+    } else {
+      // --- Orthographic Settings ---
+      // Using DragFloat or SliderFloat depending on how flexible you want the
+      // bounds to be
+      if (ImGui::DragFloat("Left", &cam.ortho_left, 0.1F))
+        changed = true;
+      if (ImGui::DragFloat("Right", &cam.ortho_right, 0.1F))
+        changed = true;
+      if (ImGui::DragFloat("Top", &cam.ortho_top, 0.1F))
+        changed = true;
+      if (ImGui::DragFloat("Bottom", &cam.ortho_bottom, 0.1F))
+        changed = true;
+    }
+
+    ImGui::Separator();
+
+    if (ImGui::SliderFloat("Near", &cam.near_plane, 0.001F, 10.F)) {
       changed = true;
     }
-    if (ImGui::SliderFloat("Far", &far_plane, 1.F, 10'000.F)) {
+    if (ImGui::SliderFloat("Far", &cam.far_plane, 1.F, 10'000.F)) {
       changed = true;
     }
+
+    bool is_primary = (&cam == scene.primary_camera());
+
+    if (ImGui::Checkbox("Primary Camera", &is_primary)) {
+      if (is_primary) {
+        scene.set_primary_camera(e.handle());
+      } else {
+        scene.clear_primary_camera();
+      }
+      changed = true;
+    }
+
     return changed;
   }
 };
@@ -255,7 +290,7 @@ struct ComponentRenderer<dy::Components::DebugFrustum>
   static constexpr bool addable = true;
 
   static auto draw(dy::Components::DebugFrustum &f, dy::SceneRenderer &,
-                   dy::Entity &) -> bool {
+                   dy::Scene &, dy::Entity &) -> bool {
     bool changed = false;
     changed |=
         ImGui::SliderFloat("FOV", &f.projection_config.fov_degrees, 1.F, 179.F);
@@ -279,7 +314,7 @@ struct ComponentRenderer<dy::Components::ParentOf>
   static constexpr bool addable = false;
 
   static auto draw(dy::Components::ParentOf &rel, dy::SceneRenderer &,
-                   dy::Entity &e) -> bool {
+                   dy::Scene &, dy::Entity &e) -> bool {
     if (!e.parent_is_valid()) {
       ImGui::TextDisabled("(invalid parent)");
       return false;
@@ -301,7 +336,7 @@ struct ComponentRenderer<dy::Components::PointLight>
   static constexpr bool addable = true;
 
   static auto draw(dy::Components::PointLight &light, dy::SceneRenderer &,
-                   dy::Entity &) -> bool {
+                   dy::Scene &, dy::Entity &) -> bool {
     bool changed = false;
     changed |= ImGui::ColorEdit3("Color", glm::value_ptr(light.color));
     changed |= ImGui::SliderFloat("Intensity", &light.intensity, 0.F, 100.F);
@@ -319,7 +354,8 @@ struct ComponentRenderer<dy::Components::PointLight>
 };
 
 inline auto ComponentInspector::draw(dy::SceneRenderer &renderer,
-                                     dy::Entity &entity) -> bool {
+                                     dy::Scene &scene, dy::Entity &entity)
+    -> bool {
   std::optional<std::function<void()>> pending_remove;
   std::optional<std::function<void()>> pending_add;
 
@@ -331,7 +367,7 @@ inline auto ComponentInspector::draw(dy::SceneRenderer &renderer,
                     "Component is marked ui_inspectable but lacks a valid "
                     "ComponentRenderer specialization!");
 
-      any_change |= draw_one<T>(renderer, entity, pending_remove);
+      any_change |= draw_one<T>(renderer, scene, entity, pending_remove);
     }
   });
 
@@ -347,7 +383,7 @@ inline auto ComponentInspector::draw(dy::SceneRenderer &renderer,
 
 template <typename T>
 inline auto ComponentInspector::draw_one(
-    dy::SceneRenderer &renderer, dy::Entity &entity,
+    dy::SceneRenderer &renderer, dy::Scene &scene, dy::Entity &entity,
     std::optional<std::function<void()>> &pending_remove) -> bool {
   if constexpr (!dy::ComponentConfig<T>::ui_inspectable) {
     return false;
@@ -397,7 +433,7 @@ inline auto ComponentInspector::draw_one(
   if (open) {
     ImGui::PushItemWidth(-1.F);
     ImGui::Spacing();
-    changed = R::draw(*comp, renderer, entity);
+    changed = R::draw(*comp, renderer, scene, entity);
     ImGui::Spacing();
     ImGui::PopItemWidth();
     ImGui::TreePop();
@@ -415,7 +451,7 @@ inline auto ComponentInspector::draw_add_button(
   ImGui::Separator();
   ImGui::Spacing();
   ImGui::PushStyleColor(ImGuiCol_Button, {0.18F, 0.38F, 0.18F, 1.F});
-  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.22F, 0.50F, 0.22F, 1.F});
+  ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.22F, 0.5F, 0.22F, 1.F});
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.28F, 0.62F, 0.28F, 1.F});
   const bool clicked = ImGui::Button("  +  Add Component  ", {-1.F, 0.F});
   ImGui::PopStyleColor(3);

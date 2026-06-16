@@ -3,6 +3,7 @@
 namespace dy {
 
 class Entity;
+class Scene;
 
 struct SceneRenderer;
 

@@ -114,7 +114,7 @@ target_link_libraries(dockyard
         meshoptimizer
         efsw-static
         spdlog::spdlog
-        Vulkan::Headers
+        volk::volk_headers
         ktx
 )
 target_set_warnings(dockyard)
@@ -139,12 +139,14 @@ target_compile_options(dockforge PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MP>)
 target_set_warnings(dockforge)
 set_target_properties(dockforge PROPERTIES FOLDER apps)
 
-add_custom_command(TARGET dockforge POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_RUNTIME_DLLS:dockforge>
-        $<TARGET_FILE_DIR:dockforge>
-        COMMAND_EXPAND_LISTS
-)
+if(WIN32)
+        add_custom_command(TARGET dockforge POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_RUNTIME_DLLS:dockforge>
+                $<TARGET_FILE_DIR:dockforge>
+                COMMAND_EXPAND_LISTS
+        )
+endif()
 
 # ---- sandbox -----------------------------------------------------------------
 
@@ -163,11 +165,6 @@ set_target_properties(sandbox PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY_DEBUG "${ASSETS_ROOT_ABS}/binary"
         LIBRARY_OUTPUT_DIRECTORY_RELEASE "${ASSETS_ROOT_ABS}/binary"
         LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${ASSETS_ROOT_ABS}/binary"
-        # PDB stays in the build tree so assets/binary never holds one.
-        # The hot-copy DLL keeps the embedded absolute path, which GameDll
-        # uses to locate and copy the PDB with a versioned name — meaning
-        # the debugger locks sandbox_hot_N.pdb, not sandbox.pdb, and the
-        # linker can always write a fresh sandbox.pdb.
         PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
         PDB_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_BINARY_DIR}"
         PDB_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}"
