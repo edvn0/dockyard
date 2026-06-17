@@ -629,7 +629,7 @@ cube_sampler_handle = samplers.create(SamplerEntry{.sampler = cube_sampler_vk});
   {
     ZoneScopedNC("IBL Probe Init", 0xFFD700);
     pending_hdr_map =
-        VFSPath::create("textures://env/kloppenheim_06_puresky_4k.hdr");
+        VFSPath::create("textures://env/kloppenheim_06_puresky_4k.ktx2");
   }
 }
 
