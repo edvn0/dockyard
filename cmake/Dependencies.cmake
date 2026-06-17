@@ -143,7 +143,7 @@ endif ()
 CPMAddPackage(
         NAME nfd
         GITHUB_REPOSITORY btzy/nativefiledialog-extended
-        GIT_TAG v1.2.1
+        GIT_TAG 3cd252a8f7ca32419b1ca235c2990ba6a0ecba7c
 )
 
 CPMAddPackage(

@@ -376,11 +376,11 @@ enum class ImageColorSpace : u8 { linear, srgb };
   return cs;
 }
 
-constexpr u32 k_fb_albedo = 0u;
-constexpr u32 k_fb_normal = 1u;
-constexpr u32 k_fb_mr = 2u;
-constexpr u32 k_fb_occlusion = 3u;
-constexpr u32 k_fb_emissive = 4u;
+constexpr u32 fb_albedo = 0u;
+constexpr u32 fb_normal = 1u;
+constexpr u32 fb_mr = 2u;
+constexpr u32 fb_occlusion = 3u;
+constexpr u32 fb_emissive = 4u;
 
 [[nodiscard]] auto resolve_tex(const fastgltf::Asset &asset,
                                const std::vector<TextureHandle> &handles,
@@ -419,15 +419,15 @@ constexpr u32 k_fb_emissive = 4u;
   gpu.alpha_mode = static_cast<u32>(mat.alphaMode);
 
   gpu.albedo_index =
-      resolve_tex(asset, handles, pbr.baseColorTexture, k_fb_albedo);
+      resolve_tex(asset, handles, pbr.baseColorTexture, fb_albedo);
   gpu.normal_index =
-      resolve_tex(asset, handles, mat.normalTexture, k_fb_normal);
+      resolve_tex(asset, handles, mat.normalTexture, fb_normal);
   gpu.metallic_roughness_index =
-      resolve_tex(asset, handles, pbr.metallicRoughnessTexture, k_fb_mr);
+      resolve_tex(asset, handles, pbr.metallicRoughnessTexture, fb_mr);
   gpu.emissive_index =
-      resolve_tex(asset, handles, mat.emissiveTexture, k_fb_emissive);
+      resolve_tex(asset, handles, mat.emissiveTexture, fb_emissive);
   gpu.occlusion_index =
-      resolve_tex(asset, handles, mat.occlusionTexture, k_fb_occlusion);
+      resolve_tex(asset, handles, mat.occlusionTexture, fb_occlusion);
 
   gpu.flags = MaterialFlags::depth_prepass;
   if (mat.alphaMode == fastgltf::AlphaMode::Mask)
@@ -554,7 +554,7 @@ constexpr u32 k_fb_emissive = 4u;
     -> std::vector<std::vector<u32>> {
 
   // Progressively lower target ratios
-  static constexpr std::array<f32, 5> k_lod_targets = {0.50F, 0.25F, 0.125F,
+  static constexpr std::array<f32, 5> lod_targets = {0.50F, 0.25F, 0.125F,
                                                        0.0625F, 0.03125F};
 
   std::vector<std::vector<u32>> result;
@@ -566,8 +566,8 @@ constexpr u32 k_fb_emissive = 4u;
   const f32 *position_ptr = &lod0.vertices[0].position[0];
   const usize vertex_stride = sizeof(Vertex);
 
-  for (size_t i = 0; i < k_lod_targets.size(); ++i) {
-    const f32 target_ratio = k_lod_targets[i];
+  for (size_t i = 0; i < lod_targets.size(); ++i) {
+    const f32 target_ratio = lod_targets[i];
 
     const usize target_count =
         std::max(static_cast<usize>(3),
@@ -722,12 +722,12 @@ struct ExplicitLodGroup {
 // Returns (base_name, lod_index) or nullopt.
 [[nodiscard]] static auto parse_lod_suffix(std::string_view name)
     -> std::optional<std::pair<std::string, u32>> {
-  constexpr std::string_view k_suffix = "_lod";
-  const auto pos = name.rfind(k_suffix);
+  constexpr std::string_view suffix = "_lod";
+  const auto pos = name.rfind(suffix);
   if (pos == std::string_view::npos)
     return std::nullopt;
 
-  const auto level_str = name.substr(pos + k_suffix.size());
+  const auto level_str = name.substr(pos + suffix.size());
   if (level_str.empty() ||
       !std::ranges::all_of(level_str, [](char c) { return std::isdigit(c); }))
     return std::nullopt;
@@ -1057,16 +1057,16 @@ collect_image_sources(const fastgltf::Asset &asset,
   return sources;
 }
 
-static constexpr std::array<std::byte, 12> k_ktx2_magic = {
+static constexpr std::array<std::byte, 12> ktx2_magic = {
     std::byte{0xAB}, std::byte{0x4B}, std::byte{0x54}, std::byte{0x58},
     std::byte{0x20}, std::byte{0x32}, std::byte{0x30}, std::byte{0xBB},
     std::byte{0x0D}, std::byte{0x0A}, std::byte{0x1A}, std::byte{0x0A},
 };
 
 [[nodiscard]] static auto is_ktx2(std::span<const std::byte> bytes) -> bool {
-  if (bytes.size() < k_ktx2_magic.size())
+  if (bytes.size() < ktx2_magic.size())
     return false;
-  return std::equal(k_ktx2_magic.begin(), k_ktx2_magic.end(), bytes.begin());
+  return std::equal(ktx2_magic.begin(), ktx2_magic.end(), bytes.begin());
 }
 
 static auto launch_texture_futures(std::vector<ImageSource> &sources,

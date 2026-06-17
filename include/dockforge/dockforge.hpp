@@ -71,6 +71,7 @@ struct Dockforge : App {
 
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
+  bool viewport_hovered = false;
 
   std::unique_ptr<dy::GameDll> game_dll;
   std::unique_ptr<dy::IAssetLoader> asset_loader;

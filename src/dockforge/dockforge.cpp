@@ -45,19 +45,24 @@
 #ifdef _WIN32
 #include <windowsx.h>
 #define GLFW_EXPOSE_NATIVE_WIN32
-#include <GLFW/glfw3native.h>
+#elif defined(__linux__)
+#define GLFW_EXPOSE_NATIVE_WAYLAND
+#define GLFW_EXPOSE_NATIVE_X11
+#elif defined(__APPLE__)
+#define GLFW_EXPOSE_NATIVE_COCOA
 #endif
+#include <nfd_glfw3.h>
 
-static constexpr float k_step_dt = 1.0F / 60.0F;
-static constexpr ImVec2 k_icon_size{20.0F, 20.0F};
-static constexpr float k_titlebar_height = 32.0F;
-static constexpr float k_titlebar_btn_w = 46.0F;
-static constexpr int k_titlebar_btn_count = 3;
+static constexpr float step_dt = 1.0F / 60.0F;
+static constexpr ImVec2 icon_size{20.0F, 20.0F};
+static constexpr float titlebar_height = 32.0F;
+static constexpr float titlebar_btn_w = 46.0F;
+static constexpr int titlebar_btn_count = 3;
 
 #ifdef _WIN32
-static constexpr LONG k_titlebar_height_px = 32;
-static constexpr LONG k_titlebar_btns_px =
-    static_cast<LONG>(k_titlebar_btn_w * k_titlebar_btn_count);
+static constexpr LONG titlebar_height_px = 32;
+static constexpr LONG titlebar_btns_px =
+    static_cast<LONG>(titlebar_btn_w * titlebar_btn_count);
 
 static WNDPROC g_original_wndproc =
     nullptr; // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
@@ -70,11 +75,11 @@ static LRESULT CALLBACK dockforge_wndproc(HWND hwnd, UINT msg, WPARAM wparam,
     if (hit == HTCLIENT) {
       POINT cursor{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       ScreenToClient(hwnd, &cursor);
-      if (cursor.y >= 0 && cursor.y < k_titlebar_height_px) {
+      if (cursor.y >= 0 && cursor.y < titlebar_height_px) {
         RECT rect{};
         GetClientRect(hwnd, &rect);
         // Right-side button area stays HTCLIENT so ImGui receives clicks.
-        if (cursor.x < rect.right - k_titlebar_btns_px)
+        if (cursor.x < rect.right - titlebar_btns_px)
           return HTCAPTION;
       }
     }
@@ -153,23 +158,21 @@ auto make_app() -> std::unique_ptr<Dockforge> {
 
 Dockforge::~Dockforge() = default;
 
-static constexpr std::string_view k_gamedll_scheme = "gamedll";
-static const std::filesystem::path k_dll_settings_path =
+static constexpr std::string_view gamedll_scheme = "gamedll";
+static const std::filesystem::path dll_settings_path =
     std::filesystem::path(ASSETS_ROOT_PATH) / "editor" / "game_dll_path.txt";
 
 auto Dockforge::init(const InitialisationContext &ctx) -> void {
-  NFD::Init();
-
   renderer =
       std::make_unique<SceneRenderer>(ctx.context, ctx.swapchain_resources);
   asset_loader = std::make_unique<AssetLoader>(*renderer);
   context = &ctx.context;
+  NFD_SetDisplayPropertiesFromGLFW();
 
   game_memory = GameMemory::create();
 
-  // Try the last-used DLL path; fall back to the built-in sandbox.
   std::filesystem::path dll_to_load;
-  if (std::ifstream ifs{k_dll_settings_path}; ifs) {
+  if (std::ifstream ifs{dll_settings_path}; ifs) {
     std::string line;
     if (std::getline(ifs, line) && !line.empty())
       dll_to_load = line;
@@ -358,7 +361,7 @@ auto Dockforge::draw_titlebar() -> void {
   const ImGuiViewport *vp = ImGui::GetMainViewport();
 
   ImGui::SetNextWindowPos(vp->Pos);
-  ImGui::SetNextWindowSize({vp->Size.x, k_titlebar_height});
+  ImGui::SetNextWindowSize({vp->Size.x, titlebar_height});
   ImGui::SetNextWindowViewport(vp->ID);
 
   constexpr ImGuiWindowFlags flags =
@@ -378,15 +381,15 @@ auto Dockforge::draw_titlebar() -> void {
 
   const float right = ImGui::GetContentRegionMax().x;
   const float center_y =
-      (k_titlebar_height - ImGui::GetTextLineHeight()) * 0.5F;
+      (titlebar_height - ImGui::GetTextLineHeight()) * 0.5F;
   const float drag_w =
-      right - k_titlebar_btn_w * static_cast<float>(k_titlebar_btn_count);
+      right - titlebar_btn_w * static_cast<float>(titlebar_btn_count);
 
   // ── Invisible drag region (input layer) ───────────────────────────────────
   // On Win32 the HTCAPTION wndproc intercepts these events at the OS level,
   // so this code only fires on X11 / Wayland.
   ImGui::SetCursorPos({0.0F, 0.0F});
-  ImGui::InvisibleButton("##drag", {drag_w, k_titlebar_height});
+  ImGui::InvisibleButton("##drag", {drag_w, titlebar_height});
 
   if (ImGui::IsItemActive() && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
     const ImVec2 delta = ImGui::GetIO().MouseDelta;
@@ -420,8 +423,8 @@ auto Dockforge::draw_titlebar() -> void {
     ImGui::TextDisabled("Editor");
 
   // ── Window control buttons ────────────────────────────────────────────────
-  constexpr float btn_w = k_titlebar_btn_w;
-  constexpr float btn_h = k_titlebar_height;
+  constexpr float btn_w = titlebar_btn_w;
+  constexpr float btn_h = titlebar_height;
 
   ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0.0F);
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {0.0F, 0.0F});
@@ -458,6 +461,8 @@ auto Dockforge::on_mouse_moved(const events::MouseMoved &e) -> void {
 }
 
 auto Dockforge::on_mouse_scrolled(const events::MouseScrolled &e) -> void {
+  if (!viewport_hovered)
+    return;
   editor_camera->on_mouse_scrolled(e);
 }
 
@@ -507,7 +512,6 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
   entt::entity best = entt::null;
   float best_t = std::numeric_limits<float>::max();
 
-  // LocalToWorld gives absolute world-space positions; Transform is local only
   for (auto &&[e, ltw, m] :
        active_scene->view<Components::LocalToWorld, Components::Mesh>()
            .each()) {
@@ -529,34 +533,30 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
 
 [[nodiscard]] auto draw_material_editor(GPUMaterial &mat) -> bool {
   bool changed = false;
-  changed |= ImGui::ColorEdit4("Albedo Factor", mat.albedo_factor);
-  changed |= ImGui::ColorEdit3("Emissive Factor", mat.emissive_factor);
+
+  changed |= labelled_input("Albedo Factor",    [&](const char *id) { return ImGui::ColorEdit4(id, mat.albedo_factor); });
+  changed |= labelled_input("Metallic",         [&](const char *id) { return ImGui::SliderFloat(id, &mat.metallic_factor,     0.0F, 1.0F); });
+  changed |= labelled_input("Roughness",        [&](const char *id) { return ImGui::SliderFloat(id, &mat.roughness_factor,    0.0F, 1.0F); });
+  changed |= labelled_input("Normal Scale",     [&](const char *id) { return ImGui::SliderFloat(id, &mat.normal_scale,        0.0F, 2.0F); });
+  changed |= labelled_input("Occlusion",        [&](const char *id) { return ImGui::SliderFloat(id, &mat.occlusion_strength,  0.0F, 1.0F); });
+  changed |= labelled_input("Alpha Cutoff",     [&](const char *id) { return ImGui::SliderFloat(id, &mat.alpha_cutoff,        0.0F, 1.0F); });
+  changed |= labelled_input("Transmission",     [&](const char *id) { return ImGui::SliderFloat(id, &mat.transmission_factor, 0.0F, 1.0F); });
+  changed |= labelled_input("Anisotropy",       [&](const char *id) { return ImGui::SliderFloat(id, &mat.anisotropy_factor,   0.0F, 1.0F); });
+  changed |= labelled_input("Anisotropy Angle", [&](const char *id) { return ImGui::SliderFloat(id, &mat.anisotropy_rotation, 0.0F, 1.0F); });
+
+  // Emissive: colour (RGB) and intensity (W) share a row
+  ImGui::TextUnformatted("Emissive Factor");
+  const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5F;
+  ImGui::SetNextItemWidth(half);
+  changed |= ImGui::ColorEdit3("##EmissiveColor", mat.emissive_factor);
   ImGui::SameLine();
-  changed |= ImGui::SliderFloat("Emissive Factor", &mat.emissive_factor[3],
-                                0.0F, 10.0F);
-  ImGui::NewLine();
+  ImGui::SetNextItemWidth(half);
+  changed |= ImGui::SliderFloat("##EmissiveIntensity", &mat.emissive_factor[3], 0.0F, 10.0F);
 
-  changed |= ImGui::SliderFloat("Metallic", &mat.metallic_factor, 0.0F, 1.0F);
-  changed |= ImGui::SliderFloat("Roughness", &mat.roughness_factor, 0.0F, 1.0F);
-  changed |= ImGui::SliderFloat("Normal Scale", &mat.normal_scale, 0.0F, 2.0F);
-  changed |= ImGui::SliderFloat("Occlusion Strength", &mat.occlusion_strength,
-                                0.0F, 1.0F);
-  changed |= ImGui::SliderFloat("Alpha Cutoff", &mat.alpha_cutoff, 0.0F, 1.0F);
-  changed |=
-      ImGui::SliderFloat("Transmission", &mat.transmission_factor, 0.0F, 1.0F);
-  changed |=
-      ImGui::SliderFloat("Anisotropy", &mat.anisotropy_factor, 0.0F, 1.0F);
-  changed |= ImGui::SliderFloat("Anisotropy Rotation", &mat.anisotropy_rotation,
-                                0.0F, 1.0F);
-
-  static constexpr std::array<const char *, 3> alpha_modes = {
-      "Opaque",
-      "Mask",
-      "Blend",
-  };
+  static constexpr std::array<const char *, 3> alpha_modes = {"Opaque", "Mask", "Blend"};
   int alpha_mode = static_cast<int>(mat.alpha_mode);
-  if (ImGui::Combo("Alpha Mode", &alpha_mode, alpha_modes.data(),
-                   std::size(alpha_modes))) {
+  ImGui::TextUnformatted("Alpha Mode");
+  if (ImGui::Combo("##AlphaMode", &alpha_mode, alpha_modes.data(), std::size(alpha_modes))) {
     mat.alpha_mode = static_cast<u32>(alpha_mode);
     changed = true;
   }
@@ -565,13 +565,13 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
   ImGui::BeginDisabled();
 
   auto texture_row = [](const char *label, u32 index) {
-    static constexpr u32 k_none = ~0U;
+    static constexpr u32 none = ~0U;
     const float icon_size = ImGui::GetFrameHeight();
     const ImVec2 icon_dim{icon_size, icon_size};
     const ImVec2 p = ImGui::GetCursorScreenPos();
     auto *dl = ImGui::GetWindowDrawList();
 
-    if (index != k_none) {
+    if (index != none) {
       ImGui::Image(ImTextureRef{ImTextureID{index}}, icon_dim, {0, 0}, {1, 1},
                    {1, 1, 1, 1}, ImGui::GetStyleColorVec4(ImGuiCol_Border));
     } else {
@@ -736,14 +736,16 @@ auto Dockforge::draw_hdr_selector() -> void {
   if (ImGui::Button("Browse HDR...")) {
     NFD::Guard nfd_guard;
 
-    const nfdfilteritem_t filters[] = {
-        {"HDR images", "hdr,exr"},
-        {"All files", "*"},
+    constexpr std::array<nfdfilteritem_t, 2> filters = {
+        nfdfilteritem_t{"HDR images", "hdr,exr"},
+        nfdfilteritem_t{"All files", "*"},
     };
 
     NFD::UniquePath out_path;
+    nfdwindowhandle_t parent{};
+    NFD_GetNativeWindowFromGLFWWindow(get_window(), &parent);
     const nfdresult_t result =
-        NFD::OpenDialog(out_path, filters, std::size(filters));
+        NFD::OpenDialog(out_path, filters.data(), std::size(filters), nullptr, parent);
 
     if (result == NFD_OKAY) {
       const auto virtual_hdr_path = VFS::get().mount_file(
@@ -766,10 +768,23 @@ auto Dockforge::draw_hdr_selector() -> void {
 
   if (renderer->ibl_probe.valid()) {
     ImGui::SeparatorText("GPU handles");
-    ImGui::Text("Env map:     %u", renderer->ibl_probe.env_map.index());
-    ImGui::Text("Irradiance:  %u", renderer->ibl_probe.irradiance.index());
-    ImGui::Text("Prefiltered: %u", renderer->ibl_probe.prefiltered.index());
-    ImGui::Text("BRDF LUT:    %u", renderer->ibl_probe.brdf_lut.index());
+
+    auto probe_row = [](const char *label, u32 index) {
+      const float sz = ImGui::GetFrameHeight();
+      const ImVec2 dim{sz, sz};
+      ImGui::Image(ImTextureRef{ImTextureID{index}}, dim, {0, 0}, {1, 1},
+                   {1, 1, 1, 1}, ImGui::GetStyleColorVec4(ImGuiCol_Border));
+      ImGui::SameLine(0.0F, ImGui::GetStyle().ItemInnerSpacing.x);
+      ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
+                           ((sz - ImGui::GetFrameHeight()) * 0.5F));
+      int idx = static_cast<int>(index);
+      ImGui::InputInt(label, &idx, 0, 0, ImGuiInputTextFlags_ReadOnly);
+    };
+
+    probe_row("Env map",     renderer->ibl_probe.env_map.index());
+    probe_row("Irradiance",  renderer->ibl_probe.irradiance.index());
+    probe_row("Prefiltered", renderer->ibl_probe.prefiltered.index());
+    probe_row("BRDF LUT",    renderer->ibl_probe.brdf_lut.index());
   }
 
   ImGui::End();
@@ -829,7 +844,7 @@ auto Dockforge::draw_toolbar() -> void {
                         bool enabled) -> bool {
     ImGui::BeginDisabled(!enabled || !handle.valid());
     const bool pressed = ImGui::ImageButton(
-        id, ImTextureRef{ImTextureID{handle.index()}}, k_icon_size);
+        id, ImTextureRef{ImTextureID{handle.index()}}, icon_size);
     ImGui::EndDisabled();
     return pressed && enabled;
   };
@@ -860,7 +875,7 @@ auto Dockforge::draw_toolbar() -> void {
                                ? std::string{"No DLL loaded"}
                                : game_dll_path.filename().string();
     const float button_h =
-        k_icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F;
+        icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F;
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
                          (button_h - ImGui::GetTextLineHeight()) * 0.5F);
     ImGui::TextDisabled("%s", dll_label.c_str());
@@ -870,19 +885,28 @@ auto Dockforge::draw_toolbar() -> void {
                          (button_h - ImGui::GetTextLineHeight()) * 0.5F);
 
     ImGui::SameLine();
-    const ImVec2 browse_sz{0.0F, k_icon_size.y +
+    const ImVec2 browse_sz{0.0F, icon_size.y +
                                      ImGui::GetStyle().FramePadding.y * 2.0F};
     if (ImGui::Button("...##browse", browse_sz)) {
       nfdnchar_t *out = nullptr;
+#if _WIN32
+      const nfdnfilteritem_t filter{
+          .name = L"Shared Library",
+          .spec = L"dll,so,dylib",
+      };
+#else
       const nfdnfilteritem_t filter{
           .name = "Shared Library",
           .spec = "dll,so,dylib",
       };
-      if (NFD::OpenDialog(out, &filter, 1) == NFD_OKAY) {
+#endif
+      nfdwindowhandle_t parent{};
+      NFD_GetNativeWindowFromGLFWWindow(get_window(), &parent);
+      if (NFD::OpenDialog(out, &filter, 1, nullptr, parent) == NFD_OKAY) {
         const std::filesystem::path chosen{out};
         NFD::FreePath(out);
         load_game_dll(chosen);
-        if (std::ofstream ofs{k_dll_settings_path}; ofs)
+        if (std::ofstream ofs{dll_settings_path}; ofs)
           ofs << chosen.string();
       }
     }
@@ -902,9 +926,9 @@ auto Dockforge::build_ui() -> void {
   draw_titlebar();
 
   const ImGuiViewport *vp = ImGui::GetMainViewport();
-  ImGui::SetNextWindowPos({vp->WorkPos.x, vp->WorkPos.y + k_titlebar_height});
+  ImGui::SetNextWindowPos({vp->WorkPos.x, vp->WorkPos.y + titlebar_height});
   ImGui::SetNextWindowSize(
-      {vp->WorkSize.x, vp->WorkSize.y - k_titlebar_height});
+      {vp->WorkSize.x, vp->WorkSize.y - titlebar_height});
   ImGui::SetNextWindowViewport(vp->ID);
 
   ImGuiWindowFlags host_flags =
@@ -954,7 +978,7 @@ auto Dockforge::build_ui() -> void {
   ImGuizmo::SetOrthographic(false);
   ImGuizmo::SetRect(viewport_screen_pos.x, viewport_screen_pos.y, panel_size.x,
                     panel_size.y);
-  const bool viewport_hovered = ImGui::IsWindowHovered();
+  viewport_hovered = ImGui::IsWindowHovered();
   const bool viewport_focused = ImGui::IsWindowFocused();
   const bool hovered = ImGui::IsItemHovered();
   if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
@@ -1141,7 +1165,7 @@ auto Dockforge::load_game_dll(const std::filesystem::path &path) -> void {
     game_dll->stop_watching();
     game_dll.reset();
   }
-  const auto vfs_path = VFS::get().mount_file(k_gamedll_scheme, path);
+  const auto vfs_path = VFS::get().mount_file(gamedll_scheme, path);
   if (auto result = GameDll::load(vfs_path)) {
     game_dll_path = path;
     game_dll = std::move(*result);
@@ -1165,7 +1189,7 @@ auto Dockforge::resume() -> void {
 auto Dockforge::step() -> void {
   if (!sim_state.in<sim::S::Paused>() || !game_dll || !game_dll->game())
     return;
-  game_dll->game()->update(&game_memory, active_scene, k_step_dt);
+  game_dll->game()->update(&game_memory, active_scene, step_dt);
 }
 
 auto Dockforge::play() -> void {

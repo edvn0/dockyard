@@ -11,6 +11,14 @@
 
 [[nodiscard]] auto draw_material_editor(dy::GPUMaterial &mat) -> bool;
 
+namespace {
+auto labelled_input(std::string_view name, auto fn, auto &&...args) -> decltype(auto) {
+  ImGui::TextUnformatted(name.data());
+  const auto id = std::format("##{}", name);
+  return fn(id.c_str(), std::forward<decltype(args)>(args)...);
+}
+} // namespace
+
 template <>
 struct ComponentRenderer<dy::Components::Transform>
     : public BaseComponentRenderer<
@@ -28,15 +36,15 @@ struct ComponentRenderer<dy::Components::Transform>
     glm::vec3 e = glm::degrees(glm::eulerAngles(rot));
     glm::vec3 s = scale;
 
-    if (ImGui::DragFloat3("Position", glm::value_ptr(p), 0.01F)) {
+    if (labelled_input("Position", [&](const char *id) { return ImGui::DragFloat3(id, glm::value_ptr(p), 0.01F); })) {
       t.mut().position = p;
       changed = true;
     }
-    if (ImGui::DragFloat3("Rotation", glm::value_ptr(e), 0.25F)) {
+    if (labelled_input("Rotation", [&](const char *id) { return ImGui::DragFloat3(id, glm::value_ptr(e), 0.25F); })) {
       t.mut().rotation = glm::quat(glm::radians(e));
       changed = true;
     }
-    if (ImGui::DragFloat3("Scale", glm::value_ptr(s), 0.01F)) {
+    if (labelled_input("Scale", [&](const char *id) { return ImGui::DragFloat3(id, glm::value_ptr(s), 0.01F); })) {
       t.mut().scale = s;
       changed = true;
     }
@@ -121,7 +129,8 @@ struct ComponentRenderer<dy::Components::Mesh>
               ? "Mesh Asset #" + std::to_string(current_handle.index())
               : "None (Empty Handle)";
 
-      if (ImGui::BeginCombo("Bound Mesh", preview_name.c_str())) {
+      ImGui::TextUnformatted("Bound Mesh");
+      if (ImGui::BeginCombo("##BoundMesh", preview_name.c_str())) { // BeginCombo needs EndCombo pair — can't use labelled_input
         if (ImGui::Selectable("None (Empty)", current_handle.empty())) {
           m.handle = {};
           modified = true;
@@ -230,45 +239,30 @@ struct ComponentRenderer<dy::Components::Camera>
     bool changed = false;
 
     bool is_ortho = !cam.is_perspective;
-    if (ImGui::Checkbox("Orthographic", &is_ortho)) {
+    if (labelled_input("Orthographic", ImGui::Checkbox, &is_ortho)) {
       cam.is_perspective = !is_ortho;
       changed = true;
     }
 
     ImGui::Separator();
 
-    // Conditional Fields based on Projection Type
     if (cam.is_perspective) {
-      // --- Perspective Settings ---
-      if (ImGui::SliderFloat("FOV", &cam.fov_degrees, 1.F, 170.F)) {
-        changed = true;
-      }
+      changed |= labelled_input("FOV", [&](const char *id) { return ImGui::SliderFloat(id, &cam.fov_degrees, 1.F, 170.F); });
     } else {
-      // --- Orthographic Settings ---
-      // Using DragFloat or SliderFloat depending on how flexible you want the
-      // bounds to be
-      if (ImGui::DragFloat("Left", &cam.ortho_left, 0.1F))
-        changed = true;
-      if (ImGui::DragFloat("Right", &cam.ortho_right, 0.1F))
-        changed = true;
-      if (ImGui::DragFloat("Top", &cam.ortho_top, 0.1F))
-        changed = true;
-      if (ImGui::DragFloat("Bottom", &cam.ortho_bottom, 0.1F))
-        changed = true;
+      changed |= labelled_input("Left",   [&](const char *id) { return ImGui::DragFloat(id, &cam.ortho_left,   0.1F); });
+      changed |= labelled_input("Right",  [&](const char *id) { return ImGui::DragFloat(id, &cam.ortho_right,  0.1F); });
+      changed |= labelled_input("Top",    [&](const char *id) { return ImGui::DragFloat(id, &cam.ortho_top,    0.1F); });
+      changed |= labelled_input("Bottom", [&](const char *id) { return ImGui::DragFloat(id, &cam.ortho_bottom, 0.1F); });
     }
 
     ImGui::Separator();
 
-    if (ImGui::SliderFloat("Near", &cam.near_plane, 0.001F, 10.F)) {
-      changed = true;
-    }
-    if (ImGui::SliderFloat("Far", &cam.far_plane, 1.F, 10'000.F)) {
-      changed = true;
-    }
+    changed |= labelled_input("Near", [&](const char *id) { return ImGui::SliderFloat(id, &cam.near_plane, 0.001F, 10.F); });
+    changed |= labelled_input("Far",  [&](const char *id) { return ImGui::SliderFloat(id, &cam.far_plane,  1.F, 10'000.F); });
 
     bool is_primary = (&cam == scene.primary_camera());
 
-    if (ImGui::Checkbox("Primary Camera", &is_primary)) {
+    if (labelled_input("Primary Camera", ImGui::Checkbox, &is_primary)) {
       if (is_primary) {
         scene.set_primary_camera(e.handle());
       } else {
@@ -292,15 +286,11 @@ struct ComponentRenderer<dy::Components::DebugFrustum>
   static auto draw(dy::Components::DebugFrustum &f, dy::SceneRenderer &,
                    dy::Scene &, dy::Entity &) -> bool {
     bool changed = false;
-    changed |=
-        ImGui::SliderFloat("FOV", &f.projection_config.fov_degrees, 1.F, 179.F);
-    changed |=
-        ImGui::SliderFloat("Aspect", &f.projection_config.aspect, 0.1F, 10.F);
-    changed |= ImGui::SliderFloat("Near", &f.projection_config.near_plane,
-                                  0.01F, 100.F);
-    changed |=
-        ImGui::SliderFloat("Far", &f.projection_config.far_plane, 0.1F, 1000.F);
-    changed |= ImGui::ColorEdit4("Color", glm::value_ptr(f.color));
+    changed |= labelled_input("FOV",    [&](const char *id) { return ImGui::SliderFloat(id, &f.projection_config.fov_degrees, 1.F, 179.F); });
+    changed |= labelled_input("Aspect", [&](const char *id) { return ImGui::SliderFloat(id, &f.projection_config.aspect,      0.1F, 10.F); });
+    changed |= labelled_input("Near",   [&](const char *id) { return ImGui::SliderFloat(id, &f.projection_config.near_plane,  0.01F, 100.F); });
+    changed |= labelled_input("Far",    [&](const char *id) { return ImGui::SliderFloat(id, &f.projection_config.far_plane,   0.1F, 1000.F); });
+    changed |= labelled_input("Color",  [&](const char *id) { return ImGui::ColorEdit4(id, glm::value_ptr(f.color)); });
     return changed;
   }
 };
@@ -338,9 +328,9 @@ struct ComponentRenderer<dy::Components::PointLight>
   static auto draw(dy::Components::PointLight &light, dy::SceneRenderer &,
                    dy::Scene &, dy::Entity &) -> bool {
     bool changed = false;
-    changed |= ImGui::ColorEdit3("Color", glm::value_ptr(light.color));
-    changed |= ImGui::SliderFloat("Intensity", &light.intensity, 0.F, 100.F);
-    changed |= ImGui::SliderFloat("Radius", &light.radius, 0.1F, 100.F);
+    changed |= labelled_input("Color",     [&](const char *id) { return ImGui::ColorEdit3(id, glm::value_ptr(light.color)); });
+    changed |= labelled_input("Intensity", [&](const char *id) { return ImGui::SliderFloat(id, &light.intensity, 0.F, 100.F); });
+    changed |= labelled_input("Radius",    [&](const char *id) { return ImGui::SliderFloat(id, &light.radius, 0.1F, 100.F); });
     return changed;
   }
 

@@ -70,11 +70,11 @@ struct TempDllDir {
 };
 
 // Paths injected by CMake at compile time (see CMakeLists.txt).
-const std::filesystem::path k_dll_valid       {TEST_DLL_DIR "/" TEST_DLL_VALID_NAME};
-const std::filesystem::path k_dll_no_symbol   {TEST_DLL_DIR "/" TEST_DLL_NO_SYMBOL_NAME};
-const std::filesystem::path k_dll_null_factory{TEST_DLL_DIR "/" TEST_DLL_NULL_FACTORY_NAME};
+const std::filesystem::path dll_valid       {TEST_DLL_DIR "/" TEST_DLL_VALID_NAME};
+const std::filesystem::path dll_no_symbol   {TEST_DLL_DIR "/" TEST_DLL_NO_SYMBOL_NAME};
+const std::filesystem::path dll_null_factory{TEST_DLL_DIR "/" TEST_DLL_NULL_FACTORY_NAME};
 
-constexpr auto k_dll_name = "mygame" TEST_DLL_SUFFIX;
+constexpr auto dll_name = "mygame" TEST_DLL_SUFFIX;
 
 } // namespace
 
@@ -92,7 +92,7 @@ TEST_CASE("Given_NonexistentSourceFile_When_Load_Then_ReturnsError") {
 
 TEST_CASE("Given_DllWithNoSymbol_When_Load_Then_ReturnsError") {
     TempDllDir tmp{"load_no_symbol"};
-    auto path = tmp.stage(k_dll_no_symbol, k_dll_name);
+    auto path = tmp.stage(dll_no_symbol, dll_name);
 
     auto result = dy::GameDll::load(path);
 
@@ -102,7 +102,7 @@ TEST_CASE("Given_DllWithNoSymbol_When_Load_Then_ReturnsError") {
 
 TEST_CASE("Given_DllWithNullFactory_When_Load_Then_ReturnsError") {
     TempDllDir tmp{"load_null_factory"};
-    auto path = tmp.stage(k_dll_null_factory, k_dll_name);
+    auto path = tmp.stage(dll_null_factory, dll_name);
 
     auto result = dy::GameDll::load(path);
 
@@ -112,7 +112,7 @@ TEST_CASE("Given_DllWithNullFactory_When_Load_Then_ReturnsError") {
 
 TEST_CASE("Given_ValidDll_When_Load_Then_ReturnsGameDllWithNonNullGame") {
     TempDllDir tmp{"load_valid"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
 
@@ -123,7 +123,7 @@ TEST_CASE("Given_ValidDll_When_Load_Then_ReturnsGameDllWithNonNullGame") {
 
 TEST_CASE("Given_ValidDll_When_Load_Then_HotCopyExistsOnDisk") {
     TempDllDir tmp{"load_hotcopy"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
     REQUIRE(result.has_value());
@@ -135,7 +135,7 @@ TEST_CASE("Given_ValidDll_When_Load_Then_HotCopyExistsOnDisk") {
 
 TEST_CASE("Given_LoadedDll_When_Destroyed_Then_HotCopyIsRemoved") {
     TempDllDir tmp{"load_destructor"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto hot = tmp.dir / ("mygame_hot_0" TEST_DLL_SUFFIX);
 
@@ -150,7 +150,7 @@ TEST_CASE("Given_LoadedDll_When_Destroyed_Then_HotCopyIsRemoved") {
 
 TEST_CASE("Given_LoadedDllWithNoPendingReload_When_PollReload_Then_ReturnsFalse") {
     TempDllDir tmp{"poll_no_pending"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
     REQUIRE(result.has_value());
@@ -160,7 +160,7 @@ TEST_CASE("Given_LoadedDllWithNoPendingReload_When_PollReload_Then_ReturnsFalse"
 
 TEST_CASE("Given_LoadedDll_When_ForceReload_Then_ReturnsTrue") {
     TempDllDir tmp{"reload_happy"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
     REQUIRE(result.has_value());
@@ -171,7 +171,7 @@ TEST_CASE("Given_LoadedDll_When_ForceReload_Then_ReturnsTrue") {
 
 TEST_CASE("Given_LoadedDll_When_ForceReload_Then_GameInstanceIsNonNull") {
     TempDllDir tmp{"reload_game_ptr"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
     REQUIRE(result.has_value());
@@ -183,7 +183,7 @@ TEST_CASE("Given_LoadedDll_When_ForceReload_Then_GameInstanceIsNonNull") {
 
 TEST_CASE("Given_LoadedDll_When_ForceReload_Then_NewHotCopyExists_And_OldIsRemoved") {
     TempDllDir tmp{"reload_hotcopy_rotation"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
     REQUIRE(result.has_value());
@@ -201,14 +201,14 @@ TEST_CASE("Given_LoadedDll_When_ForceReload_Then_NewHotCopyExists_And_OldIsRemov
 
 TEST_CASE("Given_SourceFileDeleted_When_ForceReload_Then_ReturnsFalse_And_GamePreserved") {
     TempDllDir tmp{"reload_src_deleted"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
     REQUIRE(result.has_value());
     auto& dll = *result.value();
 
     auto* game_before = dll.game();
-    tmp.remove(k_dll_name);
+    tmp.remove(dll_name);
 
     CHECK_FALSE(dll.force_reload());
     CHECK(dll.game() == game_before);
@@ -216,14 +216,14 @@ TEST_CASE("Given_SourceFileDeleted_When_ForceReload_Then_ReturnsFalse_And_GamePr
 
 TEST_CASE("Given_SourceReplacedWithNoSymbolDll_When_ForceReload_Then_ReturnsFalse_And_GamePreserved") {
     TempDllDir tmp{"reload_no_symbol"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
     REQUIRE(result.has_value());
     auto& dll = *result.value();
 
     auto* game_before = dll.game();
-    tmp.overwrite(k_dll_no_symbol, k_dll_name);
+    tmp.overwrite(dll_no_symbol, dll_name);
 
     CHECK_FALSE(dll.force_reload());
     CHECK(dll.game() == game_before);
@@ -231,14 +231,14 @@ TEST_CASE("Given_SourceReplacedWithNoSymbolDll_When_ForceReload_Then_ReturnsFals
 
 TEST_CASE("Given_SourceReplacedWithNullFactoryDll_When_ForceReload_Then_ReturnsFalse_And_GamePreserved") {
     TempDllDir tmp{"reload_null_factory"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
     REQUIRE(result.has_value());
     auto& dll = *result.value();
 
     auto* game_before = dll.game();
-    tmp.overwrite(k_dll_null_factory, k_dll_name);
+    tmp.overwrite(dll_null_factory, dll_name);
 
     CHECK_FALSE(dll.force_reload());
     CHECK(dll.game() == game_before);
@@ -246,7 +246,7 @@ TEST_CASE("Given_SourceReplacedWithNullFactoryDll_When_ForceReload_Then_ReturnsF
 
 TEST_CASE("Given_SourceReplacedWithGarbage_When_ForceReload_Then_ReturnsFalse_And_GamePreserved") {
     TempDllDir tmp{"reload_garbage"};
-    auto path = tmp.stage(k_dll_valid, k_dll_name);
+    auto path = tmp.stage(dll_valid, dll_name);
 
     auto result = dy::GameDll::load(path);
     REQUIRE(result.has_value());
@@ -256,7 +256,7 @@ TEST_CASE("Given_SourceReplacedWithGarbage_When_ForceReload_Then_ReturnsFalse_An
 
     // Overwrite source with plaintext that is not a valid DLL.
     {
-        std::ofstream f{tmp.dir / k_dll_name, std::ios::binary | std::ios::trunc};
+        std::ofstream f{tmp.dir / dll_name, std::ios::binary | std::ios::trunc};
         f << "this is not a dll";
     }
 

@@ -214,6 +214,44 @@ auto VFS::read_binary_async(std::string_view virtual_path)
   return fut;
 }
 
+VFS::ScopedMount::ScopedMount(std::string s) : scheme(std::move(s)) {}
+
+VFS::ScopedMount::ScopedMount(ScopedMount &&o) noexcept
+    : scheme(std::move(o.scheme)) {}
+
+auto VFS::ScopedMount::operator=(ScopedMount &&o) noexcept -> ScopedMount & {
+  if (this != &o) {
+    if (!scheme.empty())
+      VFS::get().unmount(scheme);
+    scheme = std::move(o.scheme);
+  }
+  return *this;
+}
+
+VFS::ScopedMount::~ScopedMount() {
+  if (!scheme.empty())
+    VFS::get().unmount(scheme);
+}
+
+auto VFS::unmount(std::string_view scheme) -> void {
+  std::scoped_lock lock(mutex);
+  mounts.erase(std::string{scheme});
+}
+
+auto VFS::mount_scoped(std::string_view scheme,
+                       const std::filesystem::path &physical_root)
+    -> ScopedMount {
+  mount(scheme, physical_root);
+  return ScopedMount{std::string{scheme}};
+}
+
+auto VFS::mount_file_scoped(std::string_view scheme,
+                             const std::filesystem::path &file)
+    -> std::pair<ScopedMount, VFSPath> {
+  auto path = mount_file(scheme, file);
+  return {ScopedMount{std::string{scheme}}, path};
+}
+
 auto VFS::mount(std::string_view scheme,
                 const std::filesystem::path &physical_root) -> void {
   ensure_initialised();

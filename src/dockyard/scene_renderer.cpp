@@ -1698,10 +1698,13 @@ auto SceneRenderer::process_pending_hdr_map() -> void {
   }
 
   VFSPath source_path = hdr_map;
+  VFS::ScopedMount pending_mount;
 
   if (needs_conversion) {
     const auto physical = VFS::get().resolve(hdr_map);
-    source_path = VFS::get().mount_file("pending_hdr", physical);
+    auto [scope, path] = VFS::get().mount_file_scoped("pending_hdr", physical);
+    pending_mount = std::move(scope);
+    source_path = path;
   }
 
   const auto ktx2_path = source_path.with_extension(".ktx2");

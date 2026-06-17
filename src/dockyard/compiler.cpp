@@ -280,7 +280,7 @@ constexpr auto debug_level = SLANG_DEBUG_INFO_LEVEL_NONE;
 constexpr auto optimisation_level = SLANG_OPTIMIZATION_LEVEL_MAXIMAL;
 #endif
 
-constexpr u64 k_cache_config_seed = (static_cast<u64>(debug_level) << 32) |
+constexpr u64 cache_config_seed = (static_cast<u64>(debug_level) << 32) |
                                     static_cast<u64>(optimisation_level);
 
 static auto hash_source(std::span<const u8> bytes) -> u64 {
@@ -289,7 +289,7 @@ static auto hash_source(std::span<const u8> bytes) -> u64 {
     h ^= b;
     h *= 1099511628211ULL;
   }
-  return h ^ k_cache_config_seed;
+  return h ^ cache_config_seed;
 }
 
 struct Compiler::Impl {

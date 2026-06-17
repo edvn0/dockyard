@@ -7,24 +7,24 @@
 namespace dy {
 
 template <typename Tag> struct alignas(4) Handle {
-  static constexpr u32 k_index_bits = 20u;
-  static constexpr u32 k_gen_bits = 32u - k_index_bits;
-  static constexpr u32 k_index_mask = (1u << k_index_bits) - 1u;
-  static constexpr u32 k_gen_mask = (1u << k_gen_bits) - 1u;
+  static constexpr u32 index_bits = 20u;
+  static constexpr u32 gen_bits = 32u - index_bits;
+  static constexpr u32 index_mask = (1u << index_bits) - 1u;
+  static constexpr u32 gen_mask = (1u << gen_bits) - 1u;
 
   Handle() = default;
 
   Handle(u32 index, u32 gen)
-      : handle_value((gen & k_gen_mask) << k_index_bits |
-                     (index & k_index_mask)) {
+      : handle_value((gen & gen_mask) << index_bits |
+                     (index & index_mask)) {
     assert(gen != 0u && "generation 0 is reserved for the empty sentinel");
-    assert(index <= k_index_mask);
+    assert(index <= index_mask);
   }
 
   [[nodiscard]] auto index() const -> u32 {
-    return handle_value & k_index_mask;
+    return handle_value & index_mask;
   }
-  [[nodiscard]] auto gen() const -> u32 { return handle_value >> k_index_bits; }
+  [[nodiscard]] auto gen() const -> u32 { return handle_value >> index_bits; }
   [[nodiscard]] auto empty() const -> bool { return handle_value == 0u; }
   [[nodiscard]] auto valid() const -> bool { return !empty(); }
 
@@ -110,7 +110,7 @@ auto make_holder(TPool &pool, const VulkanContext &ctx,
 }
 
 template <typename Tag, typename Impl> class Pool {
-  static constexpr u32 k_sentinel = 0xffff'ffffU;
+  static constexpr u32 sentinel = 0xffff'ffffU;
 
 public:
   using handle_type = Handle<Tag>;
@@ -119,16 +119,16 @@ public:
   struct Slot {
     Impl object = {};
     u32 gen = 0u; // 0 = never used; 1 = first live
-    u32 next_free = k_sentinel;
+    u32 next_free = sentinel;
   };
 
   auto create(Impl obj) -> handle_type {
     u32 idx = 0u;
 
-    if (freelist_head != k_sentinel) {
+    if (freelist_head != sentinel) {
       idx = freelist_head;
       freelist_head = pool_slots[idx].next_free;
-      pool_slots[idx].next_free = k_sentinel;
+      pool_slots[idx].next_free = sentinel;
       pool_slots[idx].gen += 1u; // even → odd: mark live
       pool_slots[idx].object = std::move(obj);
     } else {
@@ -212,13 +212,13 @@ public:
 
   auto clear() -> void {
     pool_slots.clear();
-    freelist_head = k_sentinel;
+    freelist_head = sentinel;
     number_alive = 0u;
   }
 
 private:
   std::vector<Slot> pool_slots;
-  u32 freelist_head = k_sentinel;
+  u32 freelist_head = sentinel;
   u32 number_alive = 0u;
 };
 

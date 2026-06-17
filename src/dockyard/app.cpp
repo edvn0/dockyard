@@ -23,6 +23,7 @@
 #include <GLFW/glfw3.h>
 #include <VkBootstrap.h>
 #include <entt/entt.hpp>
+#include <nfd.hpp>
 #include <vk_mem_alloc.h>
 
 #include <tracy/Tracy.hpp>
@@ -96,11 +97,14 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   }
   DEFER(glfwTerminate());
 
+  NFD::Init();
+  DEFER(NFD::Quit());
+
   glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
   configure_window_hints();
 
-  int width = find_or_default("--width=", 1280);
-  int height = find_or_default("--height=", 720);
+  int width = find_or_default("--width=", 1600);
+  int height = find_or_default("--height=", 900);
   window = glfwCreateWindow(width, height, "Dockyard", nullptr, nullptr);
   if (window == nullptr) {
     glfw_error_logger();

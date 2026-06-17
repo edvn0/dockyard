@@ -64,18 +64,18 @@ dockyard_configure_renderdoc(dockyard
 )
 
 if(ktx_SOURCE_DIR)
-        target_include_directories(dockyard PRIVATE
+  target_include_directories(dockyard PRIVATE
                 "${ktx_SOURCE_DIR}/external/basis_universal/encoder"
                 "${ktx_SOURCE_DIR}/external/basis_universal/transcoder"
         )
-        # dfdutils is stripped from ktx's public interface (see Dependencies.cmake).
-        # ktx.h still needs <KHR/khr_df.h>, so expose it via a stub directory.
-        set(_khr_stub_dir "${CMAKE_CURRENT_BINARY_DIR}/khr_stub")
-        file(MAKE_DIRECTORY "${_khr_stub_dir}/KHR")
-        file(WRITE "${_khr_stub_dir}/KHR/khr_df.h"
+  # dfdutils is stripped from ktx's public interface (see Dependencies.cmake).
+  # ktx.h still needs <KHR/khr_df.h>, so expose it via a stub directory.
+  set(_khr_stub_dir "${CMAKE_CURRENT_BINARY_DIR}/khr_stub")
+  file(MAKE_DIRECTORY "${_khr_stub_dir}/KHR")
+  file(WRITE "${_khr_stub_dir}/KHR/khr_df.h"
                 "#pragma once\n#include \"${ktx_SOURCE_DIR}/external/dfdutils/KHR/khr_df.h\"\n"
         )
-        target_include_directories(dockyard PRIVATE "${_khr_stub_dir}")
+  target_include_directories(dockyard PRIVATE "${_khr_stub_dir}")
 endif()
 
 target_compile_options(dockyard PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MP>)
@@ -106,6 +106,7 @@ target_link_libraries(dockyard
         vk-bootstrap::vk-bootstrap
         EnTT::EnTT
         glm::glm
+        nfd
         ThirdPartySTB
         $<$<BOOL:${DOCKYARD_ENABLE_TRACY}>:TracyClient>
         ${CMAKE_DL_LIBS}
@@ -134,13 +135,13 @@ add_executable(dockforge
         src/dockforge/inspector_panel.cpp
 )
 target_enable_native_arch(dockforge)
-target_link_libraries(dockforge PRIVATE dockyard imgui nfd)
+target_link_libraries(dockforge PRIVATE dockyard imgui)
 target_compile_options(dockforge PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MP>)
 target_set_warnings(dockforge)
 set_target_properties(dockforge PROPERTIES FOLDER apps)
 
 if(WIN32)
-        add_custom_command(TARGET dockforge POST_BUILD
+  add_custom_command(TARGET dockforge POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 $<TARGET_RUNTIME_DLLS:dockforge>
                 $<TARGET_FILE_DIR:dockforge>
@@ -174,23 +175,23 @@ set_target_properties(sandbox PROPERTIES
 # ---- Tools -------------------------------------------------------------------
 
 if(DOCKYARD_BUILD_TOOLS)
-        add_executable(gltf-imagemap tools/gltf-imagemap.cpp)
-        target_compile_features(gltf-imagemap PRIVATE cxx_std_23)
-        target_include_directories(gltf-imagemap PRIVATE ${cgltf_SOURCE_DIR})
-        target_set_warnings(gltf-imagemap)
-        set_target_properties(gltf-imagemap PROPERTIES FOLDER tools)
+  add_executable(gltf-imagemap tools/gltf-imagemap.cpp)
+  target_compile_features(gltf-imagemap PRIVATE cxx_std_23)
+  target_include_directories(gltf-imagemap PRIVATE ${cgltf_SOURCE_DIR})
+  target_set_warnings(gltf-imagemap)
+  set_target_properties(gltf-imagemap PROPERTIES FOLDER tools)
 endif()
 
 # ---- Tests -------------------------------------------------------------------
 
 if(DOCKYARD_BUILD_TESTING)
-        set(TEST_DLL_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/test_dlls")
+  set(TEST_DLL_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/test_dlls")
 
-        foreach(_dll IN ITEMS test-dll-valid test-dll-no-symbol test-dll-null-factory)
-                string(REPLACE "test-dll-" "" _stem "${_dll}")
-                string(REPLACE "-" "_" _stem "${_stem}")
-                add_library(${_dll} SHARED "${CMAKE_SOURCE_DIR}/tests/helpers/dll_${_stem}.cpp")
-                set_target_properties(${_dll} PROPERTIES
+  foreach(_dll IN ITEMS test-dll-valid test-dll-no-symbol test-dll-null-factory)
+    string(REPLACE "test-dll-" "" _stem "${_dll}")
+    string(REPLACE "-" "_" _stem "${_stem}")
+    add_library(${_dll} SHARED "${CMAKE_SOURCE_DIR}/tests/helpers/dll_${_stem}.cpp")
+    set_target_properties(${_dll} PROPERTIES
                         PREFIX ""
                         RUNTIME_OUTPUT_DIRECTORY "${TEST_DLL_OUTPUT_DIR}"
                         RUNTIME_OUTPUT_DIRECTORY_DEBUG "${TEST_DLL_OUTPUT_DIR}"
@@ -202,47 +203,47 @@ if(DOCKYARD_BUILD_TESTING)
                         LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${TEST_DLL_OUTPUT_DIR}"
                         FOLDER tests/helpers
                 )
-        endforeach()
+  endforeach()
 
-        target_include_directories(test-dll-valid PRIVATE include)
-        target_include_directories(test-dll-null-factory PRIVATE include)
+  target_include_directories(test-dll-valid PRIVATE include)
+  target_include_directories(test-dll-null-factory PRIVATE include)
 
-        add_executable(dockyard-testing
+  add_executable(dockyard-testing
                 ${CMAKE_SOURCE_DIR}/tests/test_main.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_scene_serialisation.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_game_dll.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_sim_state.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_state_machine.cpp
         )
-        add_dependencies(dockyard-testing
+  add_dependencies(dockyard-testing
                 test-dll-valid test-dll-no-symbol test-dll-null-factory)
-        target_enable_native_arch(dockyard-testing)
-        target_set_warnings(dockyard-testing)
-        target_compile_definitions(dockyard-testing PRIVATE
+  target_enable_native_arch(dockyard-testing)
+  target_set_warnings(dockyard-testing)
+  target_compile_definitions(dockyard-testing PRIVATE
                 "TEST_DLL_DIR=\"${TEST_DLL_OUTPUT_DIR}\""
                 "TEST_DLL_VALID_NAME=\"$<TARGET_FILE_NAME:test-dll-valid>\""
                 "TEST_DLL_NO_SYMBOL_NAME=\"$<TARGET_FILE_NAME:test-dll-no-symbol>\""
                 "TEST_DLL_NULL_FACTORY_NAME=\"$<TARGET_FILE_NAME:test-dll-null-factory>\""
                 "TEST_DLL_SUFFIX=\"${CMAKE_SHARED_LIBRARY_SUFFIX}\""
         )
-        if(DOCKYARD_BUILD_SMOKE_TESTS)
-                target_compile_definitions(dockyard-testing PRIVATE RUN_SERIALISATION_SMOKE_TESTS)
-        endif()
-        target_link_libraries(dockyard-testing PRIVATE dockyard doctest::doctest)
+  if(DOCKYARD_BUILD_SMOKE_TESTS)
+    target_compile_definitions(dockyard-testing PRIVATE RUN_SERIALISATION_SMOKE_TESTS)
+  endif()
+  target_link_libraries(dockyard-testing PRIVATE dockyard doctest::doctest)
 
-        if(WIN32)
-                add_custom_command(TARGET dockyard-testing POST_BUILD
+  if(WIN32)
+    add_custom_command(TARGET dockyard-testing POST_BUILD
                         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                         $<TARGET_RUNTIME_DLLS:dockyard-testing>
                         $<TARGET_FILE_DIR:dockyard-testing>
                         COMMAND_EXPAND_LISTS
                 )
-        endif()
+  endif()
 
-        include(doctest)
-        doctest_discover_tests(dockyard-testing)
+  include(doctest)
+  doctest_discover_tests(dockyard-testing)
 
-        set_solution_folder("tests"
+  set_solution_folder("tests"
                 dockyard-testing test-dll-valid test-dll-no-symbol test-dll-null-factory)
 endif()
 

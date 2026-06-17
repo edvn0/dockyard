@@ -9,10 +9,10 @@
 namespace dy {
 
 class AABB {
-  static constexpr float k_inf = std::numeric_limits<float>::max();
+  static constexpr float inf = std::numeric_limits<float>::max();
 
-  glm::vec3 min{k_inf};
-  glm::vec3 max{-k_inf};
+  glm::vec3 min{inf};
+  glm::vec3 max{-inf};
 
   AABB(const glm::vec3 &in_min, const glm::vec3 &in_max)
       : min(in_min), max(in_max) {}

@@ -76,6 +76,24 @@ public:
       -> std::future<std::expected<std::vector<u32>, std::string>>;
 
   /**
+   * @brief RAII handle that unmounts a scheme when destroyed. Obtain via
+   * mount_scoped() or mount_file_scoped().
+   */
+  struct ScopedMount {
+    ScopedMount() = default;
+    ~ScopedMount();
+    ScopedMount(ScopedMount &&) noexcept;
+    auto operator=(ScopedMount &&) noexcept -> ScopedMount &;
+    ScopedMount(const ScopedMount &) = delete;
+    auto operator=(const ScopedMount &) -> ScopedMount & = delete;
+
+  private:
+    friend class VFS;
+    explicit ScopedMount(std::string scheme);
+    std::string scheme;
+  };
+
+  /**
    * @brief Adds or replaces a mount point.
    * Example: mount("external_hdr", "C:/assets/hdr") allows
    * "external_hdr://studio.hdr".
@@ -84,11 +102,31 @@ public:
              const std::filesystem::path &physical_root) -> void;
 
   /**
+   * @brief Like mount(), but returns a ScopedMount that removes the entry on
+   * destruction.
+   */
+  auto mount_scoped(std::string_view scheme,
+                    const std::filesystem::path &physical_root) -> ScopedMount;
+
+  /**
+   * @brief Removes a previously added mount point. No-op if not found.
+   */
+  auto unmount(std::string_view scheme) -> void;
+
+  /**
    * @brief Mounts the parent directory of a file and returns a VFS path to the
    * file. Example: C:/foo/studio.hdr -> external_hdr://studio.hdr
    */
   auto mount_file(std::string_view scheme, const std::filesystem::path &file)
       -> VFSPath;
+
+  /**
+   * @brief Like mount_file(), but returns {ScopedMount, VFSPath}; the mount is
+   * removed when ScopedMount is destroyed.
+   */
+  auto mount_file_scoped(std::string_view scheme,
+                         const std::filesystem::path &file)
+      -> std::pair<ScopedMount, VFSPath>;
 
   struct Filter {
     std::unordered_set<std::string_view> ignored_dirs;
