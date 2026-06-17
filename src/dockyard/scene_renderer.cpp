@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <dockyard/scene_renderer.hpp>
 
+#include <imgui.h>
+
 #include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
 #include <dockyard/shader_watcher.hpp>
@@ -348,6 +350,12 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
   TracyVkContextName(tracy_vk_ctx->ctx, "main_gfx", 8);
 }
 
+auto SceneRenderer::initialise_settings() -> void {
+  settings_registry.add("Skybox", [this] {
+    ImGui::SliderFloat("LOD", &skybox_lod, 0.0F, 8.0F);
+  });
+}
+
 auto SceneRenderer::initialise_bindless() -> void {
   ZoneScopedNC("SceneRenderer::initialise_bindless", 0x4169E1);
 
@@ -378,7 +386,7 @@ auto SceneRenderer::initialise_bindless() -> void {
         .maxAnisotropy = 16,
         .compareEnable = VK_FALSE,
         .minLod = 0.0F,
-        .maxLod = 1.0F,
+        .maxLod = VK_LOD_CLAMP_NONE,
         .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
         .unnormalizedCoordinates = VK_FALSE,
     };
@@ -387,10 +395,6 @@ auto SceneRenderer::initialise_bindless() -> void {
     dummy_sampler_handle =
         samplers.create(SamplerEntry{.sampler = dummy_sampler_vk});
 
-    // No reductionMode: GatherRed returns the four raw texels and the
-    // occlusion shader takes their min() itself, so a MIN-reduction sampler is
-    // redundant here. Reduction + gather is also not well-defined across
-    // drivers (faults on Intel Arc), so it must not be set on a gather sampler.
     const VkSamplerCreateInfo hiz_sampler_ci{
         .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .magFilter = VK_FILTER_LINEAR,
@@ -453,6 +457,27 @@ auto SceneRenderer::initialise_bindless() -> void {
         comparison_samplers
             .create(SamplerEntry{.sampler = shadow_comparison_sampler_vk})
             .index();
+
+      const VkSamplerCreateInfo cube_sampler_ci{
+    .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+    .magFilter = VK_FILTER_LINEAR,
+    .minFilter = VK_FILTER_LINEAR,
+    .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+    .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+    .mipLodBias = 0.0f,
+    .anisotropyEnable = VK_FALSE,
+    .compareEnable = VK_FALSE,
+    .minLod = 0.0f,
+    .maxLod = VK_LOD_CLAMP_NONE,
+    .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+    .unnormalizedCoordinates = VK_FALSE,
+};
+
+VkSampler cube_sampler_vk{};
+vk::check(vkCreateSampler(ctx.device, &cube_sampler_ci, nullptr, &cube_sampler_vk));
+cube_sampler_handle = samplers.create(SamplerEntry{.sampler = cube_sampler_vk});
   }
 
   {
@@ -1316,6 +1341,7 @@ void SceneRenderer::skybox_pass(VkCommandBuffer cmd) {
     u32 env_map_index;
     u32 sampler_index;
     glm::mat4 inv_view_proj;
+    f32 skybox_lod;
   };
 
   const auto frame_data =
@@ -1323,11 +1349,12 @@ void SceneRenderer::skybox_pass(VkCommandBuffer cmd) {
   const auto inv_view_projection_no_translation = glm::inverse(
       frame_data.projection * glm::mat4(glm::mat3(frame_data.view)));
 
-  const SkyboxPushConstants push{
-      .env_map_index = ibl_probe.env_map.index(),
-      .sampler_index = dummy_sampler_handle.index(),
-      .inv_view_proj = inv_view_projection_no_translation,
-  };
+const SkyboxPushConstants push{
+    .env_map_index = ibl_probe.prefiltered.index(),
+    .sampler_index = cube_sampler_handle.index(),
+    .inv_view_proj = inv_view_projection_no_translation,
+    .skybox_lod    = skybox_lod,
+};
 
   vkCmdPushConstants(cmd, entry.layout,
                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

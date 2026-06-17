@@ -1,10 +1,10 @@
 import bindless;
 
-struct PushConstants
-{
+struct PushConstants {
     uint env_map_index;
     uint sampler_index;
     float4x4 inv_view_proj_no_translation;
+    float skybox_lod; // add this
 };
 
 struct VSOutput
@@ -29,8 +29,7 @@ struct PSOut
 }
 
 [shader("fragment")]
-void main(in VSOutput input, uniform PushConstants pc, out PSOut o)
-{
+void main(in VSOutput input, uniform PushConstants pc, out PSOut o) {
     float3 dir = normalize(input.view_dir);
-    o.color = sample_cube(pc.env_map_index, pc.sampler_index, dir);
+    o.color = sample_cube_lod(pc.env_map_index, pc.sampler_index, dir, pc.skybox_lod);
 }

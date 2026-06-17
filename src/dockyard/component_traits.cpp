@@ -127,29 +127,20 @@ void ComponentSerializer<Components::MeshRequest>::load(
   }
 }
 
-/*
 void ComponentSerializer<Components::Mesh>::save(auto &archive,
                                                  const Components::Mesh &mesh) {
-  write_safe_string(archive, "{}", mesh.handle.index());
+  write_safe_string(archive, mesh.source_path.view());
 }
 
 void ComponentSerializer<Components::Mesh>::load(auto &archive,
                                                  Components::Mesh &m) {
-  std::string path_str = read_safe_string(archive);
-  m.handle = MeshAssetHandle{static_cast<u32>(std::stoi(path_str)), 1};
-}
-*/
-void ComponentSerializer<Components::Mesh>::save(auto &archive,
-                                                 const Components::Mesh &mesh) {
-  const u32 index = mesh.handle.index();
-  archive.writer.write(&index, sizeof(u32));
-}
-
-void ComponentSerializer<Components::Mesh>::load(auto &archive,
-                                                 Components::Mesh &m) {
-  u32 index = 0;
-  archive.reader.read(&index, sizeof(u32));
-  m.handle = MeshAssetHandle{index, 1};
+  const std::string path_str = read_safe_string(archive);
+  if (path_str.empty()) {
+    m.source_path = NullableVFSPath{};
+  } else {
+    m.source_path = NullableVFSPath::create("{}", path_str);
+  }
+  m.handle = {};
 }
 
 void ComponentSerializer<Components::Camera>::save(

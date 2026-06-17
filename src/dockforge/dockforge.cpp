@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <dockforge/dockforge.hpp>
 #include <dockforge/inspector_panel.hpp>
+#include <dockforge/renderer_settings_panel.hpp>
 #include <dockforge/scene_outliner_panel.hpp>
 #include <fstream>
 #include <unordered_map>
@@ -215,46 +216,129 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
   {
     cube_mesh_handle =
-        mesh::load_from_memory(*renderer, cube_verts, cube_indices).value();
+        mesh::load_from_memory(*renderer, cube_verts, cube_indices,
+                               NullableVFSPath::create("engine://cube"))
+            .value();
     auto capsule_mesh_handle =
-        mesh::load_from_memory(*renderer, capsule_verts, capsule_indices)
+        mesh::load_from_memory(*renderer, capsule_verts, capsule_indices,
+                               NullableVFSPath::create("engine://capsule"))
             .value();
 
-    auto &scene = *active_scene;
-    constexpr int grid_side = 10;
+    auto &concrete_loader = static_cast<AssetLoader &>(*asset_loader);
+    concrete_loader.mesh_cache.try_emplace("engine://cube", cube_mesh_handle);
+    concrete_loader.mesh_cache.try_emplace("engine://capsule", capsule_mesh_handle);
 
-    auto cube = scene.make("Cube");
-    cube.emplace<Components::Mesh>(cube_mesh_handle);
-    cube.get<Components::Transform>().mut().scale = {
-        grid_side,
-        grid_side,
-        grid_side,
+    auto &scene = *active_scene;
+
+    auto make_wall = [&](std::string_view name, glm::vec3 pos, glm::vec3 scl) {
+      auto e = scene.make(name);
+      auto &mc = e.emplace<Components::Mesh>(cube_mesh_handle);
+      mc.source_path = VFSPath::create("engine://cube");
+      auto t = e.get<Components::Transform>().mut();
+      t.position = pos;
+      t.scale = scl;
     };
 
-    auto human_like = scene.make("Human");
-    auto xt = human_like.get<Components::Transform>().mut();
-    xt.position = glm::vec3(0.0f, 0.875f, 0.0f);
-    human_like.emplace<Components::Mesh>(capsule_mesh_handle);
-    xt.scale = glm::vec3(0.2f, 1.75f, 0.2f);
+    // Capsule mesh Y spans [-3.913, +3.913] (height 7.826). Scale Y = 1.75/7.826
+    // to get a 1.75-unit tall figure; position Y = 3.913 * scale_y to stand on y=0.
+    constexpr float human_scale_y = 1.75F / 7.826F;
+    constexpr float human_foot_y  = 3.913F * human_scale_y;
 
-    auto floor = scene.make("Floor");
-    floor.emplace<Components::Mesh>(cube_mesh_handle);
-    floor.get<Components::Transform>().mut().scale = {30, 1, 30};
-    floor.get<Components::Transform>().mut().position = {0, -10, 0};
+    auto make_human = [&](std::string_view name, float x, float z) {
+      auto e = scene.make(name);
+      auto &mc = e.emplace<Components::Mesh>(capsule_mesh_handle);
+      mc.source_path = VFSPath::create("engine://capsule");
+      auto t = e.get<Components::Transform>().mut();
+      t.position = {x, human_foot_y, z};
+      t.scale = {0.2F, human_scale_y, 0.2F};
+    };
 
-    auto light_parent = scene.make("Light parent");
-    const auto floor_pos = glm::vec3{0, -10, 0};
-    for (int i = 0; i < 128; i++) {
+    constexpr float wh = 4.0F;   // wall height
+    constexpr float wt = 0.5F;   // wall thickness
+    constexpr float wy = wh * 0.5F; // wall center Y (bottom sits on floor at y=0)
+
+    // Floor — surface at y=0
+    make_wall("Floor", {0.0F, -0.5F, 0.0F}, {60.0F, 1.0F, 60.0F});
+
+    // Central room (x: -8..8, z: -8..8)
+    // South wall — door gap at center (x: -1.5..1.5)
+    make_wall("Wall_Central_S_L", {-4.75F, wy, -8.0F}, {6.5F, wh, wt});
+    make_wall("Wall_Central_S_R", { 4.75F, wy, -8.0F}, {6.5F, wh, wt});
+    // North wall — door gap for north corridor (x: -2..2)
+    make_wall("Wall_Central_N_L", {-5.0F, wy,  8.0F}, {6.0F, wh, wt});
+    make_wall("Wall_Central_N_R", { 5.0F, wy,  8.0F}, {6.0F, wh, wt});
+    // West wall — solid
+    make_wall("Wall_Central_W",   {-8.0F, wy,  0.0F}, {wt, wh, 16.0F});
+    // East wall — door gap for east wing (z: -5..5)
+    make_wall("Wall_Central_E_N", {8.0F, wy,  6.5F}, {wt, wh, 3.0F});
+    make_wall("Wall_Central_E_S", {8.0F, wy, -6.5F}, {wt, wh, 3.0F});
+
+    // Central room columns
+    make_wall("Column_NE", { 4.0F, wy,  4.0F}, {0.8F, wh, 0.8F});
+    make_wall("Column_NW", {-4.0F, wy,  4.0F}, {0.8F, wh, 0.8F});
+    make_wall("Column_SE", { 4.0F, wy, -4.0F}, {0.8F, wh, 0.8F});
+    make_wall("Column_SW", {-4.0F, wy, -4.0F}, {0.8F, wh, 0.8F});
+
+    // North corridor (x: -2..2, z: 8..20)
+    make_wall("Wall_CorridorN_W",   {-2.0F, wy, 14.0F}, {wt, wh, 12.0F});
+    make_wall("Wall_CorridorN_E",   { 2.0F, wy, 14.0F}, {wt, wh, 12.0F});
+    make_wall("Wall_CorridorN_End", { 0.0F, wy, 20.0F}, {4.0F, wh, wt});
+
+    // South room (x: -10..10, z: -8..-20)
+    // Filler pieces connecting wider south room to central room south wall
+    make_wall("Wall_South_ExtW", {-9.0F, wy, -8.0F}, {2.0F, wh, wt});
+    make_wall("Wall_South_ExtE", { 9.0F, wy, -8.0F}, {2.0F, wh, wt});
+    make_wall("Wall_South_W",    {-10.0F, wy, -14.0F}, {wt, wh, 12.0F});
+    make_wall("Wall_South_E",    { 10.0F, wy, -14.0F}, {wt, wh, 12.0F});
+    make_wall("Wall_South_End",  {  0.0F, wy, -20.0F}, {20.0F, wh, wt});
+    // Interior divider with a 2-wide gap at center
+    make_wall("Wall_South_Div_L", {-5.5F, wy, -14.0F}, {9.0F, wh, wt});
+    make_wall("Wall_South_Div_R", { 5.5F, wy, -14.0F}, {9.0F, wh, wt});
+
+    // East wing (x: 8..20, z: -5..5)
+    make_wall("Wall_East_N",   {14.0F, wy,  5.0F}, {12.0F, wh, wt});
+    make_wall("Wall_East_S",   {14.0F, wy, -5.0F}, {12.0F, wh, wt});
+    make_wall("Wall_East_End", {20.0F, wy,  0.0F}, {wt, wh, 10.0F});
+    make_wall("Column_East",   {14.0F, wy,  0.0F}, {0.8F, wh, 0.8F});
+
+    // Humans
+    make_human("Human_01", -6.0F,  1.0F);  // central room, near west wall
+    make_human("Human_02",  6.0F, -1.0F);  // central room, near east wall
+    make_human("Human_03",  0.0F, -6.0F);  // central room, near south door
+    make_human("Human_04",  3.5F,  3.5F);  // near NE column
+    make_human("Human_05", -3.5F, -3.5F);  // near SW column
+    make_human("Human_06",  0.5F,  0.0F);  // central room, open space
+    make_human("Human_07",  0.0F, 10.0F);  // north corridor, entrance
+    make_human("Human_08", -0.5F, 14.5F);  // north corridor, mid
+    make_human("Human_09",  0.5F, 18.5F);  // north corridor, near end
+    make_human("Human_10", -6.0F,-10.0F);  // south room, left side
+    make_human("Human_11",  6.0F,-11.0F);  // south room, right side
+    make_human("Human_12", -1.5F,-12.5F);  // south room, near divider
+    make_human("Human_13",  3.0F,-17.0F);  // south room, far end
+    make_human("Human_14", 10.5F,  2.0F);  // east wing, near entrance
+    make_human("Human_15", 17.0F, -1.0F);  // east wing, far end
+
+    // Lights — one per zone, positioned near ceiling
+    auto light_parent = scene.make("Lights");
+    auto make_light = [&](float x, float z, float intensity, float radius) {
       auto light = scene.make("Light", light_parent);
       auto &l = light.emplace<Components::PointLight>();
-      l.color = glm::linearRand(glm::vec3{0.5F}, glm::vec3{1.F});
-      l.intensity = glm::linearRand(0.5F, 5.F);
-      l.radius = glm::linearRand(5.F, 20.F);
-      auto &t = light.get<Components::Transform>();
-      t.mut().position =
-          floor_pos + glm::vec3{glm::linearRand(-15.F, 15.F), 2.F,
-                                glm::linearRand(-15.F, 15.F)};
-    }
+      l.color = glm::linearRand(glm::vec3{0.8F}, glm::vec3{1.F});
+      l.intensity = intensity;
+      l.radius = radius;
+      light.get<Components::Transform>().mut().position = {x, 3.5F, z};
+    };
+
+    make_light(  0.0F,  0.0F, 3.0F, 14.0F); // central room, center
+    make_light(  5.0F,  5.0F, 2.0F,  8.0F); // central room, NE corner
+    make_light( -5.0F, -5.0F, 2.0F,  8.0F); // central room, SW corner
+    make_light(  0.0F, 11.0F, 2.0F,  6.0F); // north corridor, near entrance
+    make_light(  0.0F, 18.0F, 2.0F,  6.0F); // north corridor, far end
+    make_light(  0.0F,-10.0F, 2.5F, 12.0F); // south room, front half
+    make_light( -4.0F,-17.0F, 2.0F,  8.0F); // south room, back left
+    make_light(  4.0F,-17.0F, 2.0F,  8.0F); // south room, back right
+    make_light( 12.0F,  0.0F, 2.5F,  8.0F); // east wing, center
+    make_light( 18.5F,  0.0F, 2.0F,  5.0F); // east wing, far end
   }
 
   auto &registry = *renderer->pipeline_registry;
@@ -307,11 +391,11 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       renderer->textures, renderer->samplers, renderer->comparison_samplers,
       renderer->subimages);
 
-  if (auto loaded_sponza = mesh::load_from_path(
-          VFSPath::create("meshes://Sponza/MISSING_main_sponza.glb"),
-          *renderer)) {
+  constexpr std::string_view sponza_path = "meshes://Sponza/MISSING_main_sponza.glb";
+  if (auto loaded_sponza = asset_loader->load_mesh(VFSPath::create(sponza_path))) {
     auto sponza = active_scene->make("Sponza");
-    sponza.emplace<Components::Mesh>(*loaded_sponza);
+    auto &sponza_mc = sponza.emplace<Components::Mesh>(*loaded_sponza);
+    sponza_mc.source_path = VFSPath::create(sponza_path);
     sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
   }
 
@@ -330,8 +414,12 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     editor_state.cache_dirty = true;
   };
 
+  renderer->initialise_settings();
+
   panels.push_back(std::make_unique<SceneOutlinerPanel>());
   panels.push_back(std::make_unique<InspectorPanel>());
+  panels.push_back(
+      std::make_unique<RendererSettingsPanel>(renderer->settings_registry));
 
   load_toolbar_icons();
 
@@ -997,11 +1085,10 @@ auto Dockforge::build_ui() -> void {
 
     if (auto *mesh = selected_entity.try_get<Components::Mesh>();
         mesh != nullptr) {
-      const auto *asset = renderer->resolve(mesh->handle);
-      const auto &aabb = asset->mesh_aabb;
-
-      canvas_renderer->box(transform.matrix_without_rotation(), aabb,
-                           glm::vec4{0.9F, 0.1F, 0.1F, 1.0F});
+      if (const auto *asset = renderer->resolve(mesh->handle)) {
+        canvas_renderer->box(transform.matrix_without_rotation(), asset->mesh_aabb,
+                             glm::vec4{0.9F, 0.1F, 0.1F, 1.0F});
+      }
     }
 
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj), gizmo_op,
@@ -1205,6 +1292,17 @@ auto Dockforge::play() -> void {
                                         writer);
     MemoryReader reader{snapshot_buf};
     SceneSerializer::deserialize(*runtime_scene, reader);
+
+    runtime_scene->registry().view<Components::Mesh>().each(
+        [&](Components::Mesh &mesh) {
+          if (mesh.source_path.valid()) {
+            if (auto result = asset_loader->load_mesh(mesh.source_path.value()))
+              mesh.handle = *result;
+            else
+              warn("Failed to resolve mesh '{}': {}", mesh.source_path.view(),
+                   result.error());
+          }
+        });
 
     runtime_scene->group<Components::Transform, Components::LocalToWorld,
                          Components::Mesh>();

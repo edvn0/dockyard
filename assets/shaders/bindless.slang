@@ -57,6 +57,18 @@ float4 sample_cube(uint tex, uint samp, float3 dir)
         .Sample(samplers[NonUniformResourceIndex(samp)], dir);
 }
 
+float4 sample_cube_lod(TextureHandle tex, SamplerHandle samp, float3 dir, float lod)
+{
+    return sampled_cubemaps[NonUniformResourceIndex(tex.index)]
+        .SampleLevel(samplers[NonUniformResourceIndex(samp.index)], dir, lod);
+}
+
+float4 sample_cube_lod(uint tex, uint samp, float3 dir, float lod)
+{
+    return sampled_cubemaps[NonUniformResourceIndex(tex)]
+        .SampleLevel(samplers[NonUniformResourceIndex(samp)], dir, lod);
+}
+
 float4 sample_3d(TextureHandle tex, SamplerHandle samp, float3 uvw)
 {
     return sampled_3d_images[NonUniformResourceIndex(tex.index)]

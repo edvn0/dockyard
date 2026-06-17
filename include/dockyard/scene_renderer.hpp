@@ -16,6 +16,8 @@
 #include <dockyard/texture_upload_pool.hpp>
 #include <dockyard/thread_safe_memory_cache.hpp>
 
+#include <dockyard/renderer_settings_registry.hpp>
+
 #include <BS_thread_pool.hpp>
 #include <deque>
 #include <glm/glm.hpp>
@@ -270,6 +272,7 @@ struct SceneRenderer {
   TextureHandle dummy_texture_handle;
   SamplerHandle dummy_sampler_handle;
   SamplerHandle hiz_sampler_handle;
+  SamplerHandle cube_sampler_handle;
   TextureHandle white_texture;
   TextureHandle normal_texture;
   TextureHandle metallic_roughness_texture;
@@ -310,6 +313,10 @@ struct SceneRenderer {
   glm::vec4 sun_direction =
       glm::normalize(glm::vec4{0, 0, 0, 0} - glm::vec4{3, -7, 5, 0});
 
+  f32 skybox_lod = 0.7F;
+
+  RendererSettingsRegistry settings_registry;
+
   PipelineHandle shadow_pipeline;
   PipelineHandle composite_pipeline;
   PipelineHandle skybox_pipeline;
@@ -325,6 +332,7 @@ struct SceneRenderer {
   explicit SceneRenderer(VulkanContext &c, SwapchainResources &sc);
 
   auto initialise_bindless() -> void;
+  auto initialise_settings() -> void;
   void init_csm();
   auto upload_texture(std::span<const std::byte> data, std::string_view name,
                       u32 w, u32 h, VkFormat fmt, bool gen_mips,

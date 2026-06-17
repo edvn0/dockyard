@@ -126,25 +126,32 @@ struct ComponentRenderer<dy::Components::Mesh>
       auto current_handle = m.handle;
       std::string preview_name =
           current_handle.valid()
-              ? "Mesh Asset #" + std::to_string(current_handle.index())
+              ? (m.source_path.valid() ? std::string{m.source_path.view()}
+                                       : "Mesh Asset #" + std::to_string(current_handle.index()))
               : "None (Empty Handle)";
 
       ImGui::TextUnformatted("Bound Mesh");
-      if (ImGui::BeginCombo("##BoundMesh", preview_name.c_str())) { // BeginCombo needs EndCombo pair — can't use labelled_input
+      if (ImGui::BeginCombo("##BoundMesh", preview_name.c_str())) {
         if (ImGui::Selectable("None (Empty)", current_handle.empty())) {
           m.handle = {};
+          m.source_path = {};
           modified = true;
         }
 
         auto slots = registry.data();
-        for (dy::u32 idx = 0u; idx < slots.size(); ++idx) {
+        for (dy::u32 idx = 0U; idx < slots.size(); ++idx) {
           if (registry.is_live(idx)) {
             auto live_handle = registry.handle_at(idx);
-            std::string mesh_label = "Mesh Asset #" + std::to_string(idx);
+            const auto *live_asset = registry.get(live_handle);
+            std::string mesh_label =
+                (live_asset && live_asset->source_path.valid())
+                    ? std::string{live_asset->source_path.view()}
+                    : "Mesh Asset #" + std::to_string(idx);
 
             if (ImGui::Selectable(mesh_label.c_str(),
                                   current_handle == live_handle)) {
               m.handle = live_handle;
+              m.source_path = live_asset ? live_asset->source_path : dy::NullableVFSPath{};
               modified = true;
             }
           }

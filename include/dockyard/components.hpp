@@ -20,6 +20,7 @@ struct MeshRequest {
 
 struct Mesh {
   MeshAssetHandle handle;
+  NullableVFSPath source_path;
 
   explicit(false) operator MeshAssetHandle() const { return handle; }
 };

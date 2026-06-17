@@ -43,7 +43,8 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
     -> std::expected<MeshAssetHandle, std::string>;
 
 auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
-                      std::span<const u32> indices)
+                      std::span<const u32> indices,
+                      NullableVFSPath source_path = {})
     -> std::expected<MeshAssetHandle, std::string>;
 
 } // namespace dy::mesh

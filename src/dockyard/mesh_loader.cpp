@@ -1592,11 +1592,13 @@ auto build_patch_list(const fastgltf::Asset &asset, usize image_idx,
 }
 
 auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
-                      std::span<const u32> indices)
+                      std::span<const u32> indices,
+                      NullableVFSPath source_path)
     -> std::expected<MeshAssetHandle, std::string> {
   auto &pool = *renderer.geometry_pool;
 
   MeshAsset result{.mesh_aabb = AABB::create()};
+  result.source_path.path = source_path.path;
   result.material_base_slot = 0u;
   result.material_count = 1u;
   result.material_slots = {0u};
@@ -1654,6 +1656,7 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
 
   auto result =
       std::make_unique<MeshAsset>(MeshAsset{.mesh_aabb = AABB::create()});
+  result->source_path = NullableVFSPath{path};
   result->texture_handles.resize(asset.images.size(),
                                  renderer.dummy_texture_handle);
   result->material_slots.resize(asset.materials.size(), 0u);

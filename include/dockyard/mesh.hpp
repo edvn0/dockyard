@@ -1,4 +1,5 @@
 #pragma once
+#include <dockyard/vfs_path.hpp>
 
 #include <array>
 #include <dockyard/bindless_handle.hpp>
@@ -105,6 +106,7 @@ struct MeshNodeDescription {
 };
 
 struct MeshAsset {
+  NullableVFSPath source_path;                // VFS path used to load this asset, null for anonymous
   std::vector<TextureHandle> texture_handles; // [gltf_image_idx]
   std::vector<u32> material_slots;            // [gltf_material_idx]
   std::vector<std::vector<MeshLodGroup>> meshes;
