@@ -1122,8 +1122,6 @@ auto Dockforge::build_ui() -> void {
 }
 
 auto Dockforge::destroy() -> void {
-  NFD::Quit();
-
   if (!sim_state.in<sim::S::Editing>())
     stop();
 
