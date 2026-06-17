@@ -338,6 +338,8 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     FrameMark;
   }
 
+  glfwPollEvents();
+
   char *stats_json = nullptr;
   vmaBuildStatsString(ctx.allocator, &stats_json, VK_TRUE);
   std::ofstream f("vma_stats.json");

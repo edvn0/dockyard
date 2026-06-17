@@ -125,6 +125,10 @@ struct AssetLoader : dy::IAssetLoader {
       mesh_cache.emplace(std::string{path.view()}, *result);
     return result;
   }
+
+  auto notify_material_overrides_added() -> void override {
+    renderer.override_pool.needs_grow = true;
+  }
 };
 
 inline auto pack_normal(glm::vec3 n) {
@@ -215,130 +219,22 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   }
 
   {
-    cube_mesh_handle =
+    auto cube =
         mesh::load_from_memory(*renderer, cube_verts, cube_indices,
-                               NullableVFSPath::create("engine://cube"))
-            .value();
-    auto capsule_mesh_handle =
+                               NullableVFSPath::create("engine://cube"));
+
+    auto capsule =
         mesh::load_from_memory(*renderer, capsule_verts, capsule_indices,
-                               NullableVFSPath::create("engine://capsule"))
-            .value();
+                               NullableVFSPath::create("engine://capsule"));
 
-    auto &concrete_loader = static_cast<AssetLoader &>(*asset_loader);
-    concrete_loader.mesh_cache.try_emplace("engine://cube", cube_mesh_handle);
-    concrete_loader.mesh_cache.try_emplace("engine://capsule", capsule_mesh_handle);
+    if (cube && capsule && cube->valid() && capsule->valid()) {
+      info("Created engine meshes");
+    }
 
-    auto &scene = *active_scene;
-
-    auto make_wall = [&](std::string_view name, glm::vec3 pos, glm::vec3 scl) {
-      auto e = scene.make(name);
-      auto &mc = e.emplace<Components::Mesh>(cube_mesh_handle);
-      mc.source_path = VFSPath::create("engine://cube");
-      auto t = e.get<Components::Transform>().mut();
-      t.position = pos;
-      t.scale = scl;
-    };
-
-    // Capsule mesh Y spans [-3.913, +3.913] (height 7.826). Scale Y = 1.75/7.826
-    // to get a 1.75-unit tall figure; position Y = 3.913 * scale_y to stand on y=0.
-    constexpr float human_scale_y = 1.75F / 7.826F;
-    constexpr float human_foot_y  = 3.913F * human_scale_y;
-
-    auto make_human = [&](std::string_view name, float x, float z) {
-      auto e = scene.make(name);
-      auto &mc = e.emplace<Components::Mesh>(capsule_mesh_handle);
-      mc.source_path = VFSPath::create("engine://capsule");
-      auto t = e.get<Components::Transform>().mut();
-      t.position = {x, human_foot_y, z};
-      t.scale = {0.2F, human_scale_y, 0.2F};
-    };
-
-    constexpr float wh = 4.0F;   // wall height
-    constexpr float wt = 0.5F;   // wall thickness
-    constexpr float wy = wh * 0.5F; // wall center Y (bottom sits on floor at y=0)
-
-    // Floor — surface at y=0
-    make_wall("Floor", {0.0F, -0.5F, 0.0F}, {60.0F, 1.0F, 60.0F});
-
-    // Central room (x: -8..8, z: -8..8)
-    // South wall — door gap at center (x: -1.5..1.5)
-    make_wall("Wall_Central_S_L", {-4.75F, wy, -8.0F}, {6.5F, wh, wt});
-    make_wall("Wall_Central_S_R", { 4.75F, wy, -8.0F}, {6.5F, wh, wt});
-    // North wall — door gap for north corridor (x: -2..2)
-    make_wall("Wall_Central_N_L", {-5.0F, wy,  8.0F}, {6.0F, wh, wt});
-    make_wall("Wall_Central_N_R", { 5.0F, wy,  8.0F}, {6.0F, wh, wt});
-    // West wall — solid
-    make_wall("Wall_Central_W",   {-8.0F, wy,  0.0F}, {wt, wh, 16.0F});
-    // East wall — door gap for east wing (z: -5..5)
-    make_wall("Wall_Central_E_N", {8.0F, wy,  6.5F}, {wt, wh, 3.0F});
-    make_wall("Wall_Central_E_S", {8.0F, wy, -6.5F}, {wt, wh, 3.0F});
-
-    // Central room columns
-    make_wall("Column_NE", { 4.0F, wy,  4.0F}, {0.8F, wh, 0.8F});
-    make_wall("Column_NW", {-4.0F, wy,  4.0F}, {0.8F, wh, 0.8F});
-    make_wall("Column_SE", { 4.0F, wy, -4.0F}, {0.8F, wh, 0.8F});
-    make_wall("Column_SW", {-4.0F, wy, -4.0F}, {0.8F, wh, 0.8F});
-
-    // North corridor (x: -2..2, z: 8..20)
-    make_wall("Wall_CorridorN_W",   {-2.0F, wy, 14.0F}, {wt, wh, 12.0F});
-    make_wall("Wall_CorridorN_E",   { 2.0F, wy, 14.0F}, {wt, wh, 12.0F});
-    make_wall("Wall_CorridorN_End", { 0.0F, wy, 20.0F}, {4.0F, wh, wt});
-
-    // South room (x: -10..10, z: -8..-20)
-    // Filler pieces connecting wider south room to central room south wall
-    make_wall("Wall_South_ExtW", {-9.0F, wy, -8.0F}, {2.0F, wh, wt});
-    make_wall("Wall_South_ExtE", { 9.0F, wy, -8.0F}, {2.0F, wh, wt});
-    make_wall("Wall_South_W",    {-10.0F, wy, -14.0F}, {wt, wh, 12.0F});
-    make_wall("Wall_South_E",    { 10.0F, wy, -14.0F}, {wt, wh, 12.0F});
-    make_wall("Wall_South_End",  {  0.0F, wy, -20.0F}, {20.0F, wh, wt});
-    // Interior divider with a 2-wide gap at center
-    make_wall("Wall_South_Div_L", {-5.5F, wy, -14.0F}, {9.0F, wh, wt});
-    make_wall("Wall_South_Div_R", { 5.5F, wy, -14.0F}, {9.0F, wh, wt});
-
-    // East wing (x: 8..20, z: -5..5)
-    make_wall("Wall_East_N",   {14.0F, wy,  5.0F}, {12.0F, wh, wt});
-    make_wall("Wall_East_S",   {14.0F, wy, -5.0F}, {12.0F, wh, wt});
-    make_wall("Wall_East_End", {20.0F, wy,  0.0F}, {wt, wh, 10.0F});
-    make_wall("Column_East",   {14.0F, wy,  0.0F}, {0.8F, wh, 0.8F});
-
-    // Humans
-    make_human("Human_01", -6.0F,  1.0F);  // central room, near west wall
-    make_human("Human_02",  6.0F, -1.0F);  // central room, near east wall
-    make_human("Human_03",  0.0F, -6.0F);  // central room, near south door
-    make_human("Human_04",  3.5F,  3.5F);  // near NE column
-    make_human("Human_05", -3.5F, -3.5F);  // near SW column
-    make_human("Human_06",  0.5F,  0.0F);  // central room, open space
-    make_human("Human_07",  0.0F, 10.0F);  // north corridor, entrance
-    make_human("Human_08", -0.5F, 14.5F);  // north corridor, mid
-    make_human("Human_09",  0.5F, 18.5F);  // north corridor, near end
-    make_human("Human_10", -6.0F,-10.0F);  // south room, left side
-    make_human("Human_11",  6.0F,-11.0F);  // south room, right side
-    make_human("Human_12", -1.5F,-12.5F);  // south room, near divider
-    make_human("Human_13",  3.0F,-17.0F);  // south room, far end
-    make_human("Human_14", 10.5F,  2.0F);  // east wing, near entrance
-    make_human("Human_15", 17.0F, -1.0F);  // east wing, far end
-
-    // Lights — one per zone, positioned near ceiling
-    auto light_parent = scene.make("Lights");
-    auto make_light = [&](float x, float z, float intensity, float radius) {
-      auto light = scene.make("Light", light_parent);
-      auto &l = light.emplace<Components::PointLight>();
-      l.color = glm::linearRand(glm::vec3{0.8F}, glm::vec3{1.F});
-      l.intensity = intensity;
-      l.radius = radius;
-      light.get<Components::Transform>().mut().position = {x, 3.5F, z};
-    };
-
-    make_light(  0.0F,  0.0F, 3.0F, 14.0F); // central room, center
-    make_light(  5.0F,  5.0F, 2.0F,  8.0F); // central room, NE corner
-    make_light( -5.0F, -5.0F, 2.0F,  8.0F); // central room, SW corner
-    make_light(  0.0F, 11.0F, 2.0F,  6.0F); // north corridor, near entrance
-    make_light(  0.0F, 18.0F, 2.0F,  6.0F); // north corridor, far end
-    make_light(  0.0F,-10.0F, 2.5F, 12.0F); // south room, front half
-    make_light( -4.0F,-17.0F, 2.0F,  8.0F); // south room, back left
-    make_light(  4.0F,-17.0F, 2.0F,  8.0F); // south room, back right
-    make_light( 12.0F,  0.0F, 2.5F,  8.0F); // east wing, center
-    make_light( 18.5F,  0.0F, 2.0F,  5.0F); // east wing, far end
+    auto &concrete = static_cast<AssetLoader &>(*asset_loader);
+    concrete.mesh_cache.try_emplace("engine://cube", std::move(cube.value()));
+    concrete.mesh_cache.try_emplace("engine://capsule",
+                                    std::move(capsule.value()));
   }
 
   auto &registry = *renderer->pipeline_registry;
@@ -391,11 +287,14 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       renderer->textures, renderer->samplers, renderer->comparison_samplers,
       renderer->subimages);
 
-  constexpr std::string_view sponza_path = "meshes://Sponza/MISSING_main_sponza.glb";
-  if (auto loaded_sponza = asset_loader->load_mesh(VFSPath::create(sponza_path))) {
+  constexpr std::string_view sponza_path =
+      "meshes://Sponza/MISSING_main_sponza.glb";
+  if (auto loaded_sponza =
+          asset_loader->load_mesh(VFSPath::create(sponza_path))) {
     auto sponza = active_scene->make("Sponza");
-    auto &sponza_mc = sponza.emplace<Components::Mesh>(*loaded_sponza);
-    sponza_mc.source_path = VFSPath::create(sponza_path);
+    auto &mc = sponza.emplace<Components::Mesh>();
+    mc.handle = *loaded_sponza;
+    mc.source_path = VFSPath::create(sponza_path);
     sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
   }
 
@@ -468,8 +367,7 @@ auto Dockforge::draw_titlebar() -> void {
   ImGui::PopStyleColor();
 
   const float right = ImGui::GetContentRegionMax().x;
-  const float center_y =
-      (titlebar_height - ImGui::GetTextLineHeight()) * 0.5F;
+  const float center_y = (titlebar_height - ImGui::GetTextLineHeight()) * 0.5F;
   const float drag_w =
       right - titlebar_btn_w * static_cast<float>(titlebar_btn_count);
 
@@ -622,29 +520,52 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
 [[nodiscard]] auto draw_material_editor(GPUMaterial &mat) -> bool {
   bool changed = false;
 
-  changed |= labelled_input("Albedo Factor",    [&](const char *id) { return ImGui::ColorEdit4(id, mat.albedo_factor); });
-  changed |= labelled_input("Metallic",         [&](const char *id) { return ImGui::SliderFloat(id, &mat.metallic_factor,     0.0F, 1.0F); });
-  changed |= labelled_input("Roughness",        [&](const char *id) { return ImGui::SliderFloat(id, &mat.roughness_factor,    0.0F, 1.0F); });
-  changed |= labelled_input("Normal Scale",     [&](const char *id) { return ImGui::SliderFloat(id, &mat.normal_scale,        0.0F, 2.0F); });
-  changed |= labelled_input("Occlusion",        [&](const char *id) { return ImGui::SliderFloat(id, &mat.occlusion_strength,  0.0F, 1.0F); });
-  changed |= labelled_input("Alpha Cutoff",     [&](const char *id) { return ImGui::SliderFloat(id, &mat.alpha_cutoff,        0.0F, 1.0F); });
-  changed |= labelled_input("Transmission",     [&](const char *id) { return ImGui::SliderFloat(id, &mat.transmission_factor, 0.0F, 1.0F); });
-  changed |= labelled_input("Anisotropy",       [&](const char *id) { return ImGui::SliderFloat(id, &mat.anisotropy_factor,   0.0F, 1.0F); });
-  changed |= labelled_input("Anisotropy Angle", [&](const char *id) { return ImGui::SliderFloat(id, &mat.anisotropy_rotation, 0.0F, 1.0F); });
+  changed |= labelled_input("Albedo Factor", [&](const char *id) {
+    return ImGui::ColorEdit4(id, mat.albedo_factor);
+  });
+  changed |= labelled_input("Metallic", [&](const char *id) {
+    return ImGui::SliderFloat(id, &mat.metallic_factor, 0.0F, 1.0F);
+  });
+  changed |= labelled_input("Roughness", [&](const char *id) {
+    return ImGui::SliderFloat(id, &mat.roughness_factor, 0.0F, 1.0F);
+  });
+  changed |= labelled_input("Normal Scale", [&](const char *id) {
+    return ImGui::SliderFloat(id, &mat.normal_scale, 0.0F, 2.0F);
+  });
+  changed |= labelled_input("Occlusion", [&](const char *id) {
+    return ImGui::SliderFloat(id, &mat.occlusion_strength, 0.0F, 1.0F);
+  });
+  changed |= labelled_input("Alpha Cutoff", [&](const char *id) {
+    return ImGui::SliderFloat(id, &mat.alpha_cutoff, 0.0F, 1.0F);
+  });
+  changed |= labelled_input("Transmission", [&](const char *id) {
+    return ImGui::SliderFloat(id, &mat.transmission_factor, 0.0F, 1.0F);
+  });
+  changed |= labelled_input("Anisotropy", [&](const char *id) {
+    return ImGui::SliderFloat(id, &mat.anisotropy_factor, 0.0F, 1.0F);
+  });
+  changed |= labelled_input("Anisotropy Angle", [&](const char *id) {
+    return ImGui::SliderFloat(id, &mat.anisotropy_rotation, 0.0F, 1.0F);
+  });
 
   // Emissive: colour (RGB) and intensity (W) share a row
   ImGui::TextUnformatted("Emissive Factor");
-  const float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5F;
+  const float half =
+      (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) *
+      0.5F;
   ImGui::SetNextItemWidth(half);
   changed |= ImGui::ColorEdit3("##EmissiveColor", mat.emissive_factor);
   ImGui::SameLine();
   ImGui::SetNextItemWidth(half);
-  changed |= ImGui::SliderFloat("##EmissiveIntensity", &mat.emissive_factor[3], 0.0F, 10.0F);
+  changed |= ImGui::SliderFloat("##EmissiveIntensity", &mat.emissive_factor[3],
+                                0.0F, 10.0F);
 
-  static constexpr std::array<const char *, 3> alpha_modes = {"Opaque", "Mask", "Blend"};
+  static constexpr std::array<const char *, 3> alpha_modes = {"Opaque", "Mask",
+                                                              "Blend"};
   int alpha_mode = static_cast<int>(mat.alpha_mode);
   ImGui::TextUnformatted("Alpha Mode");
-  if (ImGui::Combo("##AlphaMode", &alpha_mode, alpha_modes.data(), std::size(alpha_modes))) {
+  if (ImGui::Combo("##AlphaMode", &alpha_mode, alpha_modes.data(),
+                   std::size(alpha_modes))) {
     mat.alpha_mode = static_cast<u32>(alpha_mode);
     changed = true;
   }
@@ -832,8 +753,8 @@ auto Dockforge::draw_hdr_selector() -> void {
     NFD::UniquePath out_path;
     nfdwindowhandle_t parent{};
     NFD_GetNativeWindowFromGLFWWindow(get_window(), &parent);
-    const nfdresult_t result =
-        NFD::OpenDialog(out_path, filters.data(), std::size(filters), nullptr, parent);
+    const nfdresult_t result = NFD::OpenDialog(
+        out_path, filters.data(), std::size(filters), nullptr, parent);
 
     if (result == NFD_OKAY) {
       const auto virtual_hdr_path = VFS::get().mount_file(
@@ -869,10 +790,10 @@ auto Dockforge::draw_hdr_selector() -> void {
       ImGui::InputInt(label, &idx, 0, 0, ImGuiInputTextFlags_ReadOnly);
     };
 
-    probe_row("Env map",     renderer->ibl_probe.env_map.index());
-    probe_row("Irradiance",  renderer->ibl_probe.irradiance.index());
+    probe_row("Env map", renderer->ibl_probe.env_map.index());
+    probe_row("Irradiance", renderer->ibl_probe.irradiance.index());
     probe_row("Prefiltered", renderer->ibl_probe.prefiltered.index());
-    probe_row("BRDF LUT",    renderer->ibl_probe.brdf_lut.index());
+    probe_row("BRDF LUT", renderer->ibl_probe.brdf_lut.index());
   }
 
   ImGui::End();
@@ -1015,8 +936,7 @@ auto Dockforge::build_ui() -> void {
 
   const ImGuiViewport *vp = ImGui::GetMainViewport();
   ImGui::SetNextWindowPos({vp->WorkPos.x, vp->WorkPos.y + titlebar_height});
-  ImGui::SetNextWindowSize(
-      {vp->WorkSize.x, vp->WorkSize.y - titlebar_height});
+  ImGui::SetNextWindowSize({vp->WorkSize.x, vp->WorkSize.y - titlebar_height});
   ImGui::SetNextWindowViewport(vp->ID);
 
   ImGuiWindowFlags host_flags =
@@ -1086,7 +1006,8 @@ auto Dockforge::build_ui() -> void {
     if (auto *mesh = selected_entity.try_get<Components::Mesh>();
         mesh != nullptr) {
       if (const auto *asset = renderer->resolve(mesh->handle)) {
-        canvas_renderer->box(transform.matrix_without_rotation(), asset->mesh_aabb,
+        canvas_renderer->box(transform.matrix_without_rotation(),
+                             asset->mesh_aabb,
                              glm::vec4{0.9F, 0.1F, 0.1F, 1.0F});
       }
     }
@@ -1341,6 +1262,7 @@ auto Dockforge::update(float ts) -> void {
       game_memory.reset();
       game_dll->game()->pre_init(*asset_loader);
       game_dll->game()->init(&game_memory, active_scene, *asset_loader);
+      renderer->override_pool.needs_grow = true;
       info("Game DLL hot reloaded");
       TracyMessage("GameDLL hot reloaded", 20);
     }
@@ -1475,8 +1397,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       active_scene->group<Components::Transform, Components::LocalToWorld,
                           Components::Mesh>();
 
-  flush_material_overrides();
-
   for (auto &&[e, xt, ltw, m] : render_group.each()) {
     renderer->submit(m.handle, ltw.matrix, forward_pipeline.index(),
                      resolve_material_slot({*active_scene, e}));
@@ -1524,6 +1444,8 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   if (prepare_result.failed()) {
     return ctx.next_frame_wait_value();
   }
+
+  flush_material_overrides();
 
   if (renderer->bindless.repopulate_if_needed(
           renderer->textures, renderer->samplers, renderer->comparison_samplers,

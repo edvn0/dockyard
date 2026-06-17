@@ -9,6 +9,7 @@ namespace dy {
 struct IAssetLoader {
   virtual auto load_mesh(const VFSPath &path)
       -> std::expected<MeshAssetHandle, std::string> = 0;
+  virtual auto notify_material_overrides_added() -> void = 0;
   virtual ~IAssetLoader() = default;
 };
 

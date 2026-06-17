@@ -195,14 +195,6 @@ struct KtxTexture2Guard {
   return out;
 }
 
-[[nodiscard]] auto lower_extension(std::filesystem::path path) -> std::string {
-  auto ext = path.extension().string();
-  std::ranges::transform(ext, ext.begin(), [](unsigned char c) {
-    return static_cast<char>(std::tolower(c));
-  });
-  return ext;
-}
-
 } // namespace
 
 namespace {
@@ -242,41 +234,6 @@ auto get_format_block_info(VkFormat format) -> FormatBlockInfo {
 
   default:
     return {.block_width = 1, .block_height = 1, .block_size_bytes = 4};
-  }
-}
-
-auto bytes_per_texel(VkFormat fmt) -> u32 {
-  switch (fmt) {
-  case VK_FORMAT_R8G8B8A8_SRGB:
-  case VK_FORMAT_R8G8B8A8_UNORM:
-  case VK_FORMAT_B8G8R8A8_SRGB:
-  case VK_FORMAT_B8G8R8A8_UNORM:
-    return 4;
-  case VK_FORMAT_R8G8B8_SRGB:
-  case VK_FORMAT_R8G8B8_UNORM:
-    return 3;
-  case VK_FORMAT_R8_UNORM:
-    return 1;
-  case VK_FORMAT_R16G16_UNORM:
-  case VK_FORMAT_R16G16_SFLOAT:
-    return 4;
-  case VK_FORMAT_R16G16B16A16_SFLOAT:
-    return 8;
-  case VK_FORMAT_R32G32B32A32_SFLOAT:
-    return 16;
-  case VK_FORMAT_BC7_SRGB_BLOCK:
-  case VK_FORMAT_BC7_UNORM_BLOCK:
-  case VK_FORMAT_BC5_UNORM_BLOCK:
-  case VK_FORMAT_BC6H_UFLOAT_BLOCK:
-  case VK_FORMAT_BC6H_SFLOAT_BLOCK:
-    // 16 bytes per 4x4 block; sizing via this value is only valid when
-    // the caller supplies pre-sized byte spans (e.g. from libktx).
-    return 16;
-  default:
-    info("Warning: bytes_per_texel: unknown format {}, defaulting to 4",
-         std::to_underlying(fmt));
-    assert(false && "bytes_per_texel: unknown format");
-    return 4;
   }
 }
 

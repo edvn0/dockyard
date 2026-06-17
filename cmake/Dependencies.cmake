@@ -128,7 +128,7 @@ CPMAddPackage(
 CPMAddPackage(
         NAME glfw
         GITHUB_REPOSITORY glfw/glfw
-        GIT_TAG master
+        GIT_TAG 567b1ec
         OPTIONS
         "GLFW_BUILD_DOCS OFF"
         "GLFW_BUILD_TESTS OFF"

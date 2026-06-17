@@ -154,6 +154,8 @@ auto grow_pool(SceneRenderer &renderer) -> u32 {
   renderer.override_pool.needs_grow = false;
   renderer.bindless.mark_dirty();
 
+  info("Material override pool grew from {} to {}", old_capacity, new_capacity);
+
   return delta;
 }
 
@@ -626,7 +628,8 @@ cube_sampler_handle = samplers.create(SamplerEntry{.sampler = cube_sampler_vk});
 
   {
     ZoneScopedNC("IBL Probe Init", 0xFFD700);
-    pending_hdr_map = VFSPath::create("textures://env/quattro_canti_1k.hdr");
+    pending_hdr_map =
+        VFSPath::create("textures://env/kloppenheim_06_puresky_4k.hdr");
   }
 }
 
@@ -1234,6 +1237,9 @@ void SceneRenderer::forward_occlusion_culling_pass(
 
   auto geometry_count = global_instance_data.size();
   auto &forward_ws = forward_pass.frame_workspaces.at(current_frame_index);
+
+  if (geometry_count == 0)
+    return;
 
   /*  {
      ZoneScopedNC("Clear Forward Indirect Buffer", 0x708090);
