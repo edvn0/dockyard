@@ -123,6 +123,40 @@ CPMAddPackage(
         DOWNLOAD_ONLY YES
 )
 
+# ---- Scripting (Lua + sol2) --------------------------------------------------
+
+# walterschell/Lua uses cmake_minimum_required(VERSION 3.1); CMake >= 3.27
+# removed pre-3.5 compat. Lift the floor for the subdirectory only.
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+CPMAddPackage(
+        NAME lua
+        GITHUB_REPOSITORY walterschell/Lua
+        GIT_TAG v5.4.6
+        GIT_SHALLOW YES
+        OPTIONS
+        "LUA_ENABLE_SHARED OFF"
+        "LUA_ENABLE_TESTING OFF"
+        "LUA_BUILD_BINARY OFF"
+        "LUA_BUILD_COMPILER OFF"
+)
+unset(CMAKE_POLICY_VERSION_MINIMUM CACHE)
+
+CPMAddPackage(
+        NAME sol2
+        GITHUB_REPOSITORY ThePhd/sol2
+        GIT_TAG v3.3.0
+        GIT_SHALLOW YES
+        DOWNLOAD_ONLY YES
+)
+
+if (sol2_ADDED)
+  add_library(sol2_interface INTERFACE)
+  target_include_directories(sol2_interface INTERFACE "${sol2_SOURCE_DIR}/include")
+  # Propagate Lua headers so sol2 can find lua.h
+  target_link_libraries(sol2_interface INTERFACE lua_static)
+  add_library(sol2::sol2 ALIAS sol2_interface)
+endif ()
+
 # ---- Windowing / UI ----------------------------------------------------------
 
 CPMAddPackage(
@@ -329,7 +363,7 @@ set_solution_folder("third_party/vulkan"
 )
 set_solution_folder("third_party/ui" imgui)
 set_solution_folder("third_party/utility"
-        EnTT spdlog efsw-static meshoptimizer freetype ThirdPartySTB glm
+        EnTT spdlog efsw-static meshoptimizer freetype ThirdPartySTB glm lua_static
 )
 if (DOCKYARD_ENABLE_TRACY)
   set_solution_folder("third_party/utility" TracyClient)

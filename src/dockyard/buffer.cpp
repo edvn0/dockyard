@@ -26,7 +26,8 @@ Buffer::Buffer(VmaAllocator alloc, VkDeviceSize size, VkBufferUsageFlags u)
       .pNext = nullptr,
       .buffer = buffer,
   };
-  address = DeviceAddress{vkGetBufferDeviceAddress(info.device, &address_info)};
+  auto* p = vkGetBufferDeviceAddress;
+  address = DeviceAddress{p(info.device, &address_info)};
   mapped_data = allocation_info.pMappedData;
   usage_flags = u;
 }

@@ -16,6 +16,7 @@
 namespace dy {
 
 struct SceneRenderer;
+struct CommandBuffer;
 
 struct VulkanContext {
   vkb::Instance instance{};
@@ -53,6 +54,9 @@ struct VulkanContext {
   auto transition_to_general(
       VkImage, VkImageAspectFlags aspect, u32 mip_count, u32 layer_count,
       std::source_location = std::source_location::current()) const -> void;
+
+  // Submit a fully-recorded CommandBuffer synchronously (blocks until done).
+  auto submit_and_wait(CommandBuffer &cb) const -> void;
 
   static auto create(vkb::Instance &&inst, VkSurfaceKHR &&s) -> VulkanContext;
 };
@@ -100,6 +104,21 @@ struct CommandBuffer {
   auto end() -> bool;
   auto destroy(const VulkanContext &ctx) -> void;
   static auto create(const VulkanContext &ctx) -> CommandBuffer;
+
+  auto bind_compute(VkPipeline pipeline) -> void;
+
+  template <typename T>
+  auto push_constants(VkPipelineLayout layout, VkShaderStageFlags stages,
+                      u32 offset, const T &data) -> void {
+    vkCmdPushConstants(command_buffer, layout, stages, offset, sizeof(T), &data);
+  }
+
+  auto dispatch(u32 x, u32 y, u32 z) -> void;
+
+  auto buffer_barrier(VkBuffer buffer, VkDeviceSize offset, VkDeviceSize size,
+                      VkPipelineStageFlags2 src_stage, VkAccessFlags2 src_access,
+                      VkPipelineStageFlags2 dst_stage,
+                      VkAccessFlags2 dst_access) -> void;
 };
 
 struct ViewportResources {

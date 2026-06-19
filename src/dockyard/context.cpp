@@ -689,6 +689,58 @@ auto VulkanContext::one_time_submit_without_being_end(
   vkDestroyCommandPool(device, pool, nullptr);
 }
 
+auto VulkanContext::submit_and_wait(CommandBuffer &cb) const -> void {
+  const VkCommandBufferSubmitInfo cbsi{
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO,
+      .commandBuffer = cb.command_buffer,
+  };
+  const VkSubmitInfo2 submit_info{
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2,
+      .commandBufferInfoCount = 1,
+      .pCommandBufferInfos = &cbsi,
+  };
+  VkFenceCreateInfo fence_ci{.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  VkFence fence{};
+  vkCreateFence(device, &fence_ci, nullptr, &fence);
+  vkQueueSubmit2(graphics_queue(), 1, &submit_info, fence);
+  vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+  vkDestroyFence(device, fence, nullptr);
+}
+
+auto CommandBuffer::bind_compute(VkPipeline pipeline) -> void {
+  vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+}
+
+auto CommandBuffer::dispatch(u32 x, u32 y, u32 z) -> void {
+  vkCmdDispatch(command_buffer, x, y, z);
+}
+
+auto CommandBuffer::buffer_barrier(VkBuffer buffer, VkDeviceSize offset,
+                                   VkDeviceSize size,
+                                   VkPipelineStageFlags2 src_stage,
+                                   VkAccessFlags2 src_access,
+                                   VkPipelineStageFlags2 dst_stage,
+                                   VkAccessFlags2 dst_access) -> void {
+  const VkBufferMemoryBarrier2 barrier{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask = src_stage,
+      .srcAccessMask = src_access,
+      .dstStageMask = dst_stage,
+      .dstAccessMask = dst_access,
+      .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+      .buffer = buffer,
+      .offset = offset,
+      .size = size,
+  };
+  const VkDependencyInfo dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1,
+      .pBufferMemoryBarriers = &barrier,
+  };
+  vkCmdPipelineBarrier2(command_buffer, &dep);
+}
+
 auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
                       TextureHandle equirect)
     -> std::expected<IblProbe, std::string> {

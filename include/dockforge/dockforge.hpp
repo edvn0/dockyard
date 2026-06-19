@@ -8,9 +8,8 @@
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/canvas_renderer.hpp>
 #include <dockyard/freelist_pool.hpp>
-#include <dockyard/game_dll.hpp>
-#include <dockyard/game_memory.hpp>
 #include <dockyard/scene.hpp>
+#include <dockyard/script_engine.hpp>
 
 #include <filesystem>
 #include <memory>
@@ -72,11 +71,10 @@ struct Dockforge : App {
   static constexpr double resize_debounce_delay = 0.1;
   bool viewport_hovered = false;
 
-  std::unique_ptr<dy::GameDll> game_dll;
+  std::unique_ptr<dy::ScriptEngine> script_engine;
   std::unique_ptr<dy::IAssetLoader> asset_loader;
-  dy::GameMemory game_memory;
   sim::Machine sim_state{sim::Editing{}};
-  std::filesystem::path game_dll_path;
+  std::filesystem::path script_path;
 
   TextureHandle icon_play;
   TextureHandle icon_pause;
@@ -103,6 +101,7 @@ struct Dockforge : App {
   auto draw_debug_shapes() -> void;
   auto duplicate_entity(Entity) -> Entity;
   auto flush_material_overrides() -> void;
+  auto patch_material_override_slots(u32 delta) -> void;
   auto draw_hdr_selector() -> void;
 
   auto configure_window_hints() -> void override;
@@ -116,7 +115,7 @@ private:
   auto resume() -> void;
   auto stop() -> void;
   auto step() -> void;
-  auto load_game_dll(const std::filesystem::path &) -> void;
+  auto load_script(const std::filesystem::path &) -> void;
   auto load_toolbar_icons() -> void;
   auto draw_toolbar() -> void;
   auto draw_titlebar() -> void;

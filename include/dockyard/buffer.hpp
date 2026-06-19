@@ -100,6 +100,10 @@ public:
     }
   }
 
+  auto invalidate() const -> void {
+    vmaInvalidateAllocation(allocator, allocation, 0, allocation_info.size);
+  }
+
   [[nodiscard]] auto get_mapped_pointer() const { return mapped_data; }
   [[nodiscard]] auto get_device_address() const { return address; }
   [[nodiscard]] auto get_allocation_info() const -> const auto & {

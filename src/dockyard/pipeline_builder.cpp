@@ -369,6 +369,38 @@ auto build_compute_pipeline(VulkanContext &ctx,
 
 } // namespace
 
+auto ComputePipeline::create(VulkanContext &ctx, const VFSPath &shader_path)
+    -> std::expected<ComputePipeline, std::string> {
+  auto maybe_compiled = shader::Compiler::the().compile(shader_path);
+  if (!maybe_compiled)
+    return std::unexpected(maybe_compiled.error().message);
+
+  auto layout_res =
+      create_layout_from_reflection(ctx.device, *maybe_compiled);
+  if (!layout_res)
+    return std::unexpected(layout_res.error());
+
+  const ComputePipelineDescription desc{.shader_path = shader_path};
+  auto maybe_pipeline = build_compute_pipeline(ctx, desc, *layout_res);
+  if (!maybe_pipeline) {
+    vkDestroyPipelineLayout(ctx.device, *layout_res, nullptr);
+    return std::unexpected(std::move(maybe_pipeline.error()));
+  }
+
+  return ComputePipeline{.pipeline = *maybe_pipeline, .layout = *layout_res};
+}
+
+auto ComputePipeline::destroy(const VulkanContext &ctx) -> void {
+  if (pipeline != VK_NULL_HANDLE) {
+    vkDestroyPipeline(ctx.device, pipeline, nullptr);
+    pipeline = VK_NULL_HANDLE;
+  }
+  if (layout != VK_NULL_HANDLE) {
+    vkDestroyPipelineLayout(ctx.device, layout, nullptr);
+    layout = VK_NULL_HANDLE;
+  }
+}
+
 auto BlendMode::to_vk() const -> VkPipelineColorBlendAttachmentState {
   return {
       .blendEnable = enabled ? VK_TRUE : VK_FALSE,

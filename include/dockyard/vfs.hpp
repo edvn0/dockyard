@@ -23,10 +23,7 @@ namespace dy {
 class VFS {
 
 public:
-  static auto get() -> VFS & {
-    static VFS instance;
-    return instance;
-  }
+  static auto get() -> VFS &;
 
   VFS(const VFS &) = delete;
   VFS &operator=(const VFS &) = delete;

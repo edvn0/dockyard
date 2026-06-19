@@ -104,6 +104,20 @@ struct ComputePipelineDescription {
   VkPipelineLayout layout = VK_NULL_HANDLE;
 };
 
+// Owning compute pipeline + layout pair for one-off dispatches that don't
+// belong to a persistent PipelineRegistry.  Layout is always auto-derived from
+// shader reflection (no descriptor sets).
+struct ComputePipeline {
+  VkPipeline pipeline = VK_NULL_HANDLE;
+  VkPipelineLayout layout = VK_NULL_HANDLE;
+
+  [[nodiscard]] auto valid() const { return pipeline != VK_NULL_HANDLE; }
+  auto destroy(const VulkanContext &ctx) -> void;
+
+  static auto create(VulkanContext &ctx, const VFSPath &shader_path)
+      -> std::expected<ComputePipeline, std::string>;
+};
+
 using PipelineDescription =
     std::variant<std::monostate, GraphicsPipelineDescription,
                  ComputePipelineDescription>;

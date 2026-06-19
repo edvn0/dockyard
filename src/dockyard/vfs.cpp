@@ -25,6 +25,11 @@ auto generic_vfs_filename(const std::filesystem::path &path) -> std::string {
 
 } // namespace
 
+auto VFS::get() -> VFS & {
+  static VFS instance;
+  return instance;
+}
+
 void VFS::initialize(const std::filesystem::path &assets_root) {
   std::scoped_lock lock(mutex);
 

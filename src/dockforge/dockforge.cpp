@@ -16,8 +16,7 @@
 #include <dockyard/buffer.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/context.hpp>
-#include <dockyard/game_dll.hpp>
-#include <dockyard/game_memory.hpp>
+#include <dockyard/script_engine.hpp>
 #include <dockyard/imgui_renderer.hpp>
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene.hpp>
@@ -127,7 +126,7 @@ struct AssetLoader : dy::IAssetLoader {
   }
 
   auto notify_material_overrides_added() -> void override {
-    renderer.override_pool.needs_grow = true;
+      renderer.override_pool.needs_grow = true;
   }
 };
 
@@ -163,9 +162,8 @@ auto make_app() -> std::unique_ptr<Dockforge> {
 
 Dockforge::~Dockforge() = default;
 
-static constexpr std::string_view gamedll_scheme = "gamedll";
-static const std::filesystem::path dll_settings_path =
-    std::filesystem::path(ASSETS_ROOT_PATH) / "editor" / "game_dll_path.txt";
+static const std::filesystem::path script_settings_path =
+    std::filesystem::path(ASSETS_ROOT_PATH) / "editor" / "script_path.txt";
 
 auto Dockforge::init(const InitialisationContext &ctx) -> void {
   renderer =
@@ -174,19 +172,19 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   context = &ctx.context;
   NFD_SetDisplayPropertiesFromGLFW();
 
-  game_memory = GameMemory::create();
+  script_engine = ScriptEngine::create();
 
-  std::filesystem::path dll_to_load;
-  if (std::ifstream ifs{dll_settings_path}; ifs) {
+  std::filesystem::path path_to_load;
+  if (std::ifstream ifs{script_settings_path}; ifs) {
     std::string line;
     if (std::getline(ifs, line) && !line.empty())
-      dll_to_load = line;
+      path_to_load = line;
   }
-  if (dll_to_load.empty() || !std::filesystem::exists(dll_to_load)) {
-    dll_to_load = std::filesystem::path(ASSETS_ROOT_PATH) / "binary" /
-                  std::format("sandbox.{}", shared_extension);
+  if (path_to_load.empty() || !std::filesystem::exists(path_to_load)) {
+    path_to_load =
+        std::filesystem::path(ASSETS_ROOT_PATH) / "scripts" / "sandbox.lua";
   }
-  load_game_dll(dll_to_load);
+  load_script(path_to_load);
 
   editor_scene = std::make_shared<Scene>();
   active_scene = editor_scene.get();
@@ -848,7 +846,7 @@ auto Dockforge::draw_toolbar() -> void {
   const bool editing = sim_state.in<sim::S::Editing>();
   const bool playing = sim_state.in<sim::S::Playing>();
   const bool paused = sim_state.in<sim::S::Paused>();
-  const bool has_dll = game_dll && game_dll->game();
+  const bool has_dll = script_engine && script_engine->loaded();
 
   auto icon_button = [](const char *id, TextureHandle handle,
                         bool enabled) -> bool {
@@ -881,16 +879,16 @@ auto Dockforge::draw_toolbar() -> void {
   if (editing) {
     ImGui::SameLine();
 
-    const auto dll_label = game_dll_path.empty()
-                               ? std::string{"No DLL loaded"}
-                               : game_dll_path.filename().string();
+    const auto dll_label = script_path.empty()
+                               ? std::string{"No script loaded"}
+                               : script_path.filename().string();
     const float button_h =
         icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F;
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
                          (button_h - ImGui::GetTextLineHeight()) * 0.5F);
     ImGui::TextDisabled("%s", dll_label.c_str());
-    if (!game_dll_path.empty() && ImGui::IsItemHovered())
-      ImGui::SetTooltip("%s", game_dll_path.string().c_str());
+    if (!script_path.empty() && ImGui::IsItemHovered())
+      ImGui::SetTooltip("%s", script_path.string().c_str());
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() -
                          (button_h - ImGui::GetTextLineHeight()) * 0.5F);
 
@@ -901,13 +899,13 @@ auto Dockforge::draw_toolbar() -> void {
       nfdnchar_t *out = nullptr;
 #if _WIN32
       const nfdnfilteritem_t filter{
-          .name = L"Shared Library",
-          .spec = L"dll,so,dylib",
+          .name = L"Lua Script",
+          .spec = L"lua",
       };
 #else
       const nfdnfilteritem_t filter{
-          .name = "Shared Library",
-          .spec = "dll,so,dylib",
+          .name = "Lua Script",
+          .spec = "lua",
       };
 #endif
       nfdwindowhandle_t parent{};
@@ -915,16 +913,16 @@ auto Dockforge::draw_toolbar() -> void {
       if (NFD::OpenDialog(out, &filter, 1, nullptr, parent) == NFD_OKAY) {
         const std::filesystem::path chosen{out};
         NFD::FreePath(out);
-        load_game_dll(chosen);
-        if (std::ofstream ofs{dll_settings_path}; ofs)
+        load_script(chosen);
+        if (std::ofstream ofs{script_settings_path}; ofs)
           ofs << chosen.string();
       }
     }
 
     ImGui::SameLine();
     if (icon_button("##reload", icon_reload, has_dll)) {
-      PROFILE_SCOPE("Reload dll");
-      load_game_dll(game_dll_path);
+      PROFILE_SCOPE("Reload script");
+      load_script(script_path);
     }
   }
 
@@ -1126,11 +1124,10 @@ auto Dockforge::destroy() -> void {
   if (!sim_state.in<sim::S::Editing>())
     stop();
 
-  if (game_dll) {
-    game_dll->stop_watching();
-    game_dll.reset();
+  if (script_engine) {
+    script_engine->stop_watching();
+    script_engine.reset();
   }
-  game_memory.destroy();
 
   imgui_renderer.reset();
   canvas_renderer.reset();
@@ -1167,19 +1164,15 @@ auto update_local_to_world_matrices(entt::registry &registry) -> void {
   }
 }
 
-auto Dockforge::load_game_dll(const std::filesystem::path &path) -> void {
-  if (game_dll) {
-    game_dll->stop_watching();
-    game_dll.reset();
-  }
-  const auto vfs_path = VFS::get().mount_file(gamedll_scheme, path);
-  if (auto result = GameDll::load(vfs_path)) {
-    game_dll_path = path;
-    game_dll = std::move(*result);
-    game_dll->start_watching(renderer->thread_pool);
-    game_dll->game()->pre_init(*asset_loader);
+auto Dockforge::load_script(const std::filesystem::path &path) -> void {
+  script_engine->stop_watching();
+  const auto vfs_path = VFS::get().mount_file("script", path);
+  if (auto result = script_engine->load(vfs_path)) {
+    script_path = path;
+    script_engine->start_watching();
+    script_engine->pre_init(*asset_loader);
   } else {
-    warn("GameDll: {}", result.error());
+    warn("[ScriptEngine] {}", result.error());
   }
 }
 
@@ -1194,13 +1187,13 @@ auto Dockforge::resume() -> void {
 }
 
 auto Dockforge::step() -> void {
-  if (!sim_state.in<sim::S::Paused>() || !game_dll || !game_dll->game())
+  if (!sim_state.in<sim::S::Paused>() || !script_engine || !script_engine->loaded())
     return;
-  game_dll->game()->update(&game_memory, active_scene, step_dt);
+  script_engine->update(active_scene, step_dt);
 }
 
 auto Dockforge::play() -> void {
-  if (!game_dll || !game_dll->game())
+  if (!script_engine || !script_engine->loaded())
     return;
 
   sim_state.try_transition<sim::S::Playing>([&](auto) {
@@ -1229,8 +1222,7 @@ auto Dockforge::play() -> void {
 
     active_scene = runtime_scene.get();
     editor_state.active_scene = active_scene;
-    game_memory.reset();
-    game_dll->game()->init(&game_memory, active_scene, *asset_loader);
+    script_engine->init(active_scene, *asset_loader);
     TracyMessage("Game started", 12);
     editor_state.cache_dirty = true;
   });
@@ -1238,10 +1230,9 @@ auto Dockforge::play() -> void {
 
 auto Dockforge::stop() -> void {
   sim_state.try_transition<sim::S::Editing>([&](auto) {
-    if (game_dll && game_dll->game())
-      game_dll->game()->destroy(&game_memory, active_scene);
+    if (script_engine && script_engine->loaded())
+      script_engine->destroy(active_scene);
 
-    game_memory.reset();
     TracyMessage("Game stopped", 12);
     active_scene = editor_scene.get();
     editor_state.active_scene = active_scene;
@@ -1255,18 +1246,17 @@ auto Dockforge::stop() -> void {
 
 auto Dockforge::update(float ts) -> void {
   ZoneScopedNC("Dockforge::update", 0x00BFFF);
-  if (!sim_state.in<sim::S::Editing>() && game_dll && game_dll->game()) {
-    if (game_dll->poll_reload()) {
-      game_dll->game()->destroy(&game_memory, active_scene);
-      game_memory.reset();
-      game_dll->game()->pre_init(*asset_loader);
-      game_dll->game()->init(&game_memory, active_scene, *asset_loader);
+  if (!sim_state.in<sim::S::Editing>() && script_engine && script_engine->loaded()) {
+    if (script_engine->poll_reload()) {
+      script_engine->destroy(active_scene);
+      script_engine->pre_init(*asset_loader);
+      script_engine->init(active_scene, *asset_loader);
       renderer->override_pool.needs_grow = true;
-      info("Game DLL hot reloaded");
-      TracyMessage("GameDLL hot reloaded", 20);
+      info("Lua script hot reloaded");
+      TracyMessage("Lua hot reloaded", 16);
     }
     if (sim_state.in<sim::S::Playing>())
-      game_dll->game()->update(&game_memory, active_scene, ts);
+      script_engine->update(active_scene, ts);
   }
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
@@ -1310,14 +1300,25 @@ void Dockforge::flush_material_overrides() {
         override_slot.gpu_slot = *slot;
         override_slot.dirty = true;
       } else {
-        warn("MaterialOverridePool full — override skipped this frame");
+        warn("MaterialOverridePool full - override skipped this frame");
       }
     }
-    if (override_slot.dirty) {
+    if (override_slot.dirty && override_slot.gpu_slot != Components::MaterialOverride::invalid_material) {
       renderer->geometry_pool->get_materials_mut(override_slot.gpu_slot, 1)[0] =
           override_slot.material;
       renderer->geometry_pool->flush_material(override_slot.gpu_slot);
       override_slot.dirty = false;
+    }
+  }
+}
+
+void Dockforge::patch_material_override_slots(u32 delta) {
+  ZoneScopedNC("Dockforge::patch_material_override_slots", 0xFF8C00);
+  auto view = active_scene->registry().view<Components::MaterialOverride>();
+  for (auto &&[e, override_slot] : view.each()) {
+    if (override_slot.gpu_slot != Components::MaterialOverride::invalid_material) {
+      override_slot.gpu_slot += delta;
+      override_slot.dirty = true;
     }
   }
 }
@@ -1442,6 +1443,12 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   });
   if (prepare_result.failed()) {
     return ctx.next_frame_wait_value();
+  }
+
+  if (prepare_result.status ==
+          SceneRenderer::PrepareResult::Status::SuccessMaterialPoolGrew &&
+      prepare_result.material_pool_delta > 0) {
+    patch_material_override_slots(prepare_result.material_pool_delta);
   }
 
   flush_material_overrides();

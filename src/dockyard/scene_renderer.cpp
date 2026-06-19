@@ -127,7 +127,7 @@ auto grow_pool(SceneRenderer &renderer) -> u32 {
   const u32 old_capacity = renderer.override_pool.capacity;
   const u32 new_capacity = old_capacity * 2;
 
-  info("MaterialOverridePool growing {} → {} slots", old_capacity,
+  info("MaterialOverridePool growing {} to {} slots", old_capacity,
        new_capacity);
 
   vkDeviceWaitIdle(renderer.ctx.device);
@@ -153,8 +153,6 @@ auto grow_pool(SceneRenderer &renderer) -> u32 {
   renderer.override_pool.capacity = new_capacity;
   renderer.override_pool.needs_grow = false;
   renderer.bindless.mark_dirty();
-
-  info("Material override pool grew from {} to {}", old_capacity, new_capacity);
 
   return delta;
 }
@@ -312,6 +310,9 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
       depth_prepass(RenderPassType::DepthPrepass, ctx.allocator, *this),
       forward_pass(RenderPassType::Forward, ctx.allocator, *this) {
   ZoneScopedNC("SceneRenderer::SceneRenderer", 0x4169E1);
+
+
+
   constexpr auto vertex_count = 1'000'000;
   constexpr auto index_count = 10'000'000;
   constexpr auto material_count = 500;
@@ -319,6 +320,18 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
       ctx.allocator, vertex_count * sizeof(Vertex),
       vertex_count * sizeof(PositionOnlyVertex), index_count * sizeof(u32),
       material_count * sizeof(GPUMaterial));
+
+  {
+    ZoneScopedNC("Override Pool Init", 0x888888);
+    constexpr u32 override_material_count_initial = 16U;
+    auto blank =
+        make_default_override_materials(override_material_count_initial);
+    auto offset = geometry_pool->allocate_materials(std::span(blank));
+    override_pool = {
+        .base_slot = offset.start_index,
+        .capacity = override_material_count_initial,
+    };
+  }
 
   constexpr auto white_pixel = std::array{255_b, 255_b, 255_b, 255_b};
   constexpr auto blue_pixel = std::array{127_b, 127_b, 255_b, 255_b};
@@ -361,17 +374,6 @@ auto SceneRenderer::initialise_settings() -> void {
 auto SceneRenderer::initialise_bindless() -> void {
   ZoneScopedNC("SceneRenderer::initialise_bindless", 0x4169E1);
 
-  {
-    ZoneScopedNC("Override Pool Init", 0x888888);
-    constexpr u32 override_material_count_initial = 16U;
-    auto blank =
-        make_default_override_materials(override_material_count_initial);
-    auto offset = geometry_pool->allocate_materials(std::span(blank));
-    override_pool = {
-        .base_slot = offset.start_index,
-        .capacity = override_material_count_initial,
-    };
-  }
 
   {
     ZoneScopedNC("Sampler Creation", 0x708090);

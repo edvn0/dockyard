@@ -52,9 +52,8 @@ add_library(dockyard STATIC
         src/dockyard/component_traits.cpp
         src/dockyard/bindless_handle.cpp
         src/dockyard/texture_upload_pool.cpp
-        src/dockyard/game_memory.cpp
-        src/dockyard/game_dll.cpp
         src/dockyard/image_decoder.cpp
+        src/dockyard/script_engine.cpp
 )
 
 dockyard_configure_renderdoc(dockyard
@@ -117,7 +116,26 @@ target_link_libraries(dockyard
         spdlog::spdlog
         volk::volk_headers
         ktx
+        lua_static
+        sol2::sol2
 )
+target_compile_definitions(dockyard PRIVATE
+        $<$<CONFIG:Debug>:SOL_ALL_SAFETIES_ON=1>
+)
+# sol2 headers are heavy template code; relax warnings for the one TU that includes them.
+# Skip PCH to avoid the warning-level inconsistency MSVC raises when overriding /W4→/W3.
+set_source_files_properties(src/dockyard/script_engine.cpp PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON
+)
+if (MSVC)
+  set_source_files_properties(src/dockyard/script_engine.cpp PROPERTIES
+          COMPILE_OPTIONS "/W3;/bigobj"
+  )
+else ()
+  set_source_files_properties(src/dockyard/script_engine.cpp PROPERTIES
+          COMPILE_OPTIONS "${DOCKYARD_SUPPRESSED_WARNINGS}"
+  )
+endif ()
 target_set_warnings(dockyard)
 set_target_properties(dockyard PROPERTIES FOLDER dockyard)
 
@@ -149,29 +167,6 @@ if(WIN32)
         )
 endif()
 
-# ---- sandbox -----------------------------------------------------------------
-
-add_library(sandbox SHARED src/sandbox/sandbox.cpp)
-target_link_libraries(sandbox PRIVATE dockyard)
-target_enable_native_arch(sandbox)
-target_compile_options(sandbox PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MP>)
-set_target_properties(sandbox PROPERTIES
-        FOLDER apps
-        PREFIX ""
-        RUNTIME_OUTPUT_DIRECTORY "${ASSETS_ROOT_ABS}/binary"
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${ASSETS_ROOT_ABS}/binary"
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${ASSETS_ROOT_ABS}/binary"
-        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${ASSETS_ROOT_ABS}/binary"
-        LIBRARY_OUTPUT_DIRECTORY "${ASSETS_ROOT_ABS}/binary"
-        LIBRARY_OUTPUT_DIRECTORY_DEBUG "${ASSETS_ROOT_ABS}/binary"
-        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${ASSETS_ROOT_ABS}/binary"
-        LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${ASSETS_ROOT_ABS}/binary"
-        PDB_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
-        PDB_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_BINARY_DIR}"
-        PDB_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_BINARY_DIR}"
-        PDB_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_BINARY_DIR}"
-)
-
 # ---- Tools -------------------------------------------------------------------
 
 if(DOCKYARD_BUILD_TOOLS)
@@ -185,47 +180,14 @@ endif()
 # ---- Tests -------------------------------------------------------------------
 
 if(DOCKYARD_BUILD_TESTING)
-  set(TEST_DLL_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/test_dlls")
-
-  foreach(_dll IN ITEMS test-dll-valid test-dll-no-symbol test-dll-null-factory)
-    string(REPLACE "test-dll-" "" _stem "${_dll}")
-    string(REPLACE "-" "_" _stem "${_stem}")
-    add_library(${_dll} SHARED "${CMAKE_SOURCE_DIR}/tests/helpers/dll_${_stem}.cpp")
-    set_target_properties(${_dll} PROPERTIES
-                        PREFIX ""
-                        RUNTIME_OUTPUT_DIRECTORY "${TEST_DLL_OUTPUT_DIR}"
-                        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${TEST_DLL_OUTPUT_DIR}"
-                        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${TEST_DLL_OUTPUT_DIR}"
-                        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${TEST_DLL_OUTPUT_DIR}"
-                        LIBRARY_OUTPUT_DIRECTORY "${TEST_DLL_OUTPUT_DIR}"
-                        LIBRARY_OUTPUT_DIRECTORY_DEBUG "${TEST_DLL_OUTPUT_DIR}"
-                        LIBRARY_OUTPUT_DIRECTORY_RELEASE "${TEST_DLL_OUTPUT_DIR}"
-                        LIBRARY_OUTPUT_DIRECTORY_RELWITHDEBINFO "${TEST_DLL_OUTPUT_DIR}"
-                        FOLDER tests/helpers
-                )
-  endforeach()
-
-  target_include_directories(test-dll-valid PRIVATE include)
-  target_include_directories(test-dll-null-factory PRIVATE include)
-
   add_executable(dockyard-testing
                 ${CMAKE_SOURCE_DIR}/tests/test_main.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_scene_serialisation.cpp
-                ${CMAKE_SOURCE_DIR}/tests/test_game_dll.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_sim_state.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_state_machine.cpp
         )
-  add_dependencies(dockyard-testing
-                test-dll-valid test-dll-no-symbol test-dll-null-factory)
   target_enable_native_arch(dockyard-testing)
   target_set_warnings(dockyard-testing)
-  target_compile_definitions(dockyard-testing PRIVATE
-                "TEST_DLL_DIR=\"${TEST_DLL_OUTPUT_DIR}\""
-                "TEST_DLL_VALID_NAME=\"$<TARGET_FILE_NAME:test-dll-valid>\""
-                "TEST_DLL_NO_SYMBOL_NAME=\"$<TARGET_FILE_NAME:test-dll-no-symbol>\""
-                "TEST_DLL_NULL_FACTORY_NAME=\"$<TARGET_FILE_NAME:test-dll-null-factory>\""
-                "TEST_DLL_SUFFIX=\"${CMAKE_SHARED_LIBRARY_SUFFIX}\""
-        )
   if(DOCKYARD_BUILD_SMOKE_TESTS)
     target_compile_definitions(dockyard-testing PRIVATE RUN_SERIALISATION_SMOKE_TESTS)
   endif()
@@ -243,8 +205,7 @@ if(DOCKYARD_BUILD_TESTING)
   include(doctest)
   doctest_discover_tests(dockyard-testing)
 
-  set_solution_folder("tests"
-                dockyard-testing test-dll-valid test-dll-no-symbol test-dll-null-factory)
+  set_solution_folder("tests" dockyard-testing)
 endif()
 
 # ---- Developer tooling -------------------------------------------------------
