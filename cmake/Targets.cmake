@@ -185,6 +185,7 @@ if(DOCKYARD_BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/test_scene_serialisation.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_sim_state.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_state_machine.cpp
+                ${CMAKE_SOURCE_DIR}/tests/test_skin_vertex.cpp
         )
   target_enable_native_arch(dockyard-testing)
   target_set_warnings(dockyard-testing)

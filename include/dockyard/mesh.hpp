@@ -78,8 +78,15 @@ static constexpr auto max_lods = 6UZ;
 
 struct MeshLodGroup {
   i32 vertex_offset = 0;
+  // Index into GeometryPool::skin_vertex_buffer (SkinVertex units), parallel to
+  // vertex_offset. -1 means the primitive is not skinned.
+  i32 skin_vertex_offset = -1;
   u8 lod_count = 1;
   std::array<MeshLod, max_lods> lods{};
+
+  [[nodiscard]] auto is_skinned() const noexcept -> bool {
+    return skin_vertex_offset >= 0;
+  }
 
   [[nodiscard]] Mesh resolve(u8 idx) const noexcept {
     idx = std::min(idx, static_cast<u8>(lod_count - 1));

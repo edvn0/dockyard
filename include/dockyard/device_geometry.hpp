@@ -3,6 +3,9 @@
 #include <dockyard/bindless_descriptor.hpp>
 #include <dockyard/types.hpp>
 
+#include <array>
+#include <glm/glm.hpp>
+#include <limits>
 #include <memory>
 #include <type_traits>
 #include <utility>
@@ -29,6 +32,28 @@ struct PositionOnlyVertex {
 };
 static_assert(std::is_trivially_copyable_v<PositionOnlyVertex>);
 static_assert(sizeof(PositionOnlyVertex) == 12);
+
+// Per-vertex skinning attributes, stored sparsely in GeometryPool's
+// skin_vertex_buffer parallel to the main vertex stream. Only skinned
+// primitives allocate skin vertices; static geometry never touches this buffer.
+//
+// Joints are packed as two u16 pairs (up to 65536 joints per skin); weights as
+// unorm8x4. The skinning compute pass reads this by index alongside Vertex.
+struct SkinVertex {
+  u32 joints_0_1; // joint[0] | (joint[1] << 16)
+  u32 joints_2_3; // joint[2] | (joint[3] << 16)
+  u32 weights;    // unorm8x4, normalized to sum to 1
+};
+static_assert(std::is_trivially_copyable_v<SkinVertex>);
+static_assert(sizeof(SkinVertex) == 12);
+
+static constexpr u32 max_joints_per_skin = std::numeric_limits<u16>::max();
+
+// Pack four joint indices and their (un-normalized) influence weights into the
+// GPU SkinVertex layout. Weights are renormalized so they sum to 1; an all-zero
+// weight vector degenerates to full influence from joint[0].
+[[nodiscard]] auto pack_skin_vertex(const std::array<u16, 4> &joints,
+                                    const glm::vec4 &weights) -> SkinVertex;
 
 enum class MaterialFlags : u32 {
   None = 0,
@@ -189,11 +214,15 @@ struct GeometryPool {
   std::unique_ptr<Buffer> position_only_vertex_buffer;
   std::unique_ptr<Buffer> index_buffer;
   std::unique_ptr<Buffer> material_buffer;
+  // Lazily created on the first skinned upload; null for scenes with no
+  // skinned geometry. Indexed in SkinVertex units, parallel to vertex_buffer.
+  std::unique_ptr<Buffer> skin_vertex_buffer;
 
   usize vertex_offset = 0;
   usize shadow_vertex_offset = 0;
   usize index_offset = 0;
   usize material_offset = 0;
+  usize skin_vertex_offset = 0; // in SkinVertex units
 
   static auto create(VmaAllocator allocator, usize v_size,
                      usize position_only_size, usize i_size, usize m_size)
@@ -207,6 +236,14 @@ struct GeometryPool {
 
   void reserve(usize additional_vertices, usize additional_indices);
   void reserve_materials(usize additional_mats);
+
+  // Ensure skin_vertex_buffer exists and can hold skin_vertex_offset +
+  // additional_skin_vertices entries, creating or growing it as needed.
+  void ensure_skin_capacity(usize additional_skin_vertices);
+  // Mapped write pointer to the skin buffer at the given SkinVertex index.
+  // Requires ensure_skin_capacity to have been called for the range.
+  [[nodiscard]] auto skin_mapped_pointer(usize vertex_index) -> SkinVertex *;
+  auto flush_skin_range(usize first_vertex, usize vertex_count) -> void;
 
   [[nodiscard]] auto get_material(u32 slot) -> GPUMaterial &;
   auto update_material(u32 slot, const GPUMaterial &mat) -> void;

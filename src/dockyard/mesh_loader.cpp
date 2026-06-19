@@ -44,6 +44,8 @@ namespace dy {
 struct PrimitiveData {
   std::vector<Vertex> vertices;
   std::vector<u32> indices;
+  // Empty unless the primitive has JOINTS_0 + WEIGHTS_0; parallel to vertices.
+  std::vector<SkinVertex> skin;
 };
 struct PrimitiveResult {
   PrimitiveData data;
@@ -526,6 +528,27 @@ constexpr u32 fb_emissive = 4u;
         asset, asset.accessors[a->accessorIndex], [&](glm::vec4 t, usize i) {
           out.vertices[i].bitangent = glm::packSnorm4x8(t);
         });
+  }
+
+  // Skinning attributes: only meaningful when both joints and weights exist.
+  const auto *joints_attr = prim.findAttribute("JOINTS_0");
+  const auto *weights_attr = prim.findAttribute("WEIGHTS_0");
+  if (joints_attr != prim.attributes.end() &&
+      weights_attr != prim.attributes.end()) {
+    std::vector<glm::u16vec4> joints(vtx_count, glm::u16vec4{0});
+    std::vector<glm::vec4> weights(vtx_count, glm::vec4{0.0F});
+
+    fastgltf::iterateAccessorWithIndex<glm::u16vec4>(
+        asset, asset.accessors[joints_attr->accessorIndex],
+        [&](glm::u16vec4 j, usize i) { joints[i] = j; });
+    fastgltf::iterateAccessorWithIndex<glm::vec4>(
+        asset, asset.accessors[weights_attr->accessorIndex],
+        [&](glm::vec4 w, usize i) { weights[i] = w; });
+
+    out.skin.resize(vtx_count);
+    for (usize i = 0; i < vtx_count; ++i)
+      out.skin[i] = pack_skin_vertex(
+          {joints[i].x, joints[i].y, joints[i].z, joints[i].w}, weights[i]);
   }
 
   const auto &idx_acc = asset.accessors[*prim.indicesAccessor];
@@ -1369,16 +1392,21 @@ upload_geometry(const fastgltf::Asset &asset,
     // share LOD0's vertex range — their vertices are never uploaded.
     usize total_v = 0;
     usize total_i = 0;
+    usize total_skin = 0;
     for (usize i = 0; i < prim_work_list.size(); ++i) {
       if (!extracted_prims[i])
         continue;
       const auto &w = prim_work_list[i];
       const bool uploads_vertices = !w.is_explicit_lod || w.lod_slot == 0;
-      if (uploads_vertices)
+      if (uploads_vertices) {
         total_v += extracted_prims[i]->data.vertices.size();
+        total_skin += extracted_prims[i]->data.skin.size();
+      }
       total_i += extracted_prims[i]->data.indices.size();
     }
     pool.reserve(total_v, total_i + total_lod_indices);
+    if (total_skin > 0)
+      pool.ensure_skin_capacity(total_skin);
   }
 
   auto batch = pool.begin_transaction();
@@ -1398,6 +1426,11 @@ upload_geometry(const fastgltf::Asset &asset,
   usize cur_v = 0;
   usize cur_sv = 0;
   usize cur_i = 0;
+  // Skin vertices are packed densely (only skinned prims contribute), starting
+  // at the pool's current skin offset. skin_base stays valid for the whole loop
+  // because ensure_skin_capacity already reserved the full range above.
+  const usize skin_base = pool.skin_vertex_offset;
+  usize cur_skin = 0;
 
   {
     PROFILE_SCOPE("Serial Processing Loop");
@@ -1491,6 +1524,17 @@ upload_geometry(const fastgltf::Asset &asset,
         lod_group.lods[0].index_count = static_cast<u32>(pdata.indices.size());
         lod_group.lod_count = 1;
 
+        // Skin vertices (when present) are written densely into the skin buffer
+        // parallel to this LOD0's vertices; higher LODs reuse this offset since
+        // they share LOD0's vertex range.
+        if (!pdata.skin.empty()) {
+          const usize skin_idx = skin_base + cur_skin;
+          std::memcpy(pool.skin_mapped_pointer(skin_idx), pdata.skin.data(),
+                      pdata.skin.size() * sizeof(SkinVertex));
+          lod_group.skin_vertex_offset = static_cast<i32>(skin_idx);
+          cur_skin += pdata.skin.size();
+        }
+
         // Append meshopt-generated LODs (only for non-explicit-lod prims).
         if (!w.is_explicit_lod) {
           for (const auto &lod_indices : prim_lods[i].extra) {
@@ -1528,6 +1572,11 @@ upload_geometry(const fastgltf::Asset &asset,
   pool.vertex_offset += cur_v;
   pool.shadow_vertex_offset += cur_sv;
   pool.index_offset += cur_i;
+
+  if (cur_skin > 0) {
+    pool.flush_skin_range(skin_base, cur_skin);
+    pool.skin_vertex_offset += cur_skin;
+  }
 
   {
     PROFILE_SCOPE("Transaction Commit & VMA Flush");

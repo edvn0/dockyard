@@ -2,7 +2,24 @@
 
 #include <dockyard/buffer.hpp>
 
+#include <glm/gtc/packing.hpp>
+
 namespace dy {
+
+auto pack_skin_vertex(const std::array<u16, 4> &joints,
+                      const glm::vec4 &weights) -> SkinVertex {
+  const f32 sum = weights.x + weights.y + weights.z + weights.w;
+  const glm::vec4 normalized =
+      sum > 0.0F ? weights / sum : glm::vec4{1.0F, 0.0F, 0.0F, 0.0F};
+
+  return SkinVertex{
+      .joints_0_1 = static_cast<u32>(joints[0]) |
+                    (static_cast<u32>(joints[1]) << 16U),
+      .joints_2_3 = static_cast<u32>(joints[2]) |
+                    (static_cast<u32>(joints[3]) << 16U),
+      .weights = glm::packUnorm4x8(normalized),
+  };
+}
 
 auto GeometryPool::create(VmaAllocator allocator, usize v_size,
                           usize shadow_v_size, usize i_size, usize m_size)
@@ -145,6 +162,38 @@ void GeometryPool::reserve(usize additional_vertices,
     resize_buffer(allocator, "position_only_vertex_buffer",
                   position_only_vertex_buffer, shadow_vertex_offset + sv_bytes);
   }
+}
+
+void GeometryPool::ensure_skin_capacity(usize additional_skin_vertices) {
+  const usize required_bytes =
+      (skin_vertex_offset + additional_skin_vertices) * sizeof(SkinVertex);
+
+  if (!skin_vertex_buffer) {
+    const VkBufferUsageFlags usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                     VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    skin_vertex_buffer = Buffer::create(
+        allocator, "geometry_pool_skin_vertex_buffer", required_bytes, usage);
+    return;
+  }
+
+  if (required_bytes > skin_vertex_buffer->size())
+    resize_buffer(allocator, "skin_vertex_buffer", skin_vertex_buffer,
+                  required_bytes);
+}
+
+auto GeometryPool::skin_mapped_pointer(usize vertex_index) -> SkinVertex * {
+  assert(skin_vertex_buffer && "skin buffer not allocated");
+  auto *base = static_cast<u8 *>(skin_vertex_buffer->get_mapped_pointer());
+  return std::bit_cast<SkinVertex *>(base + vertex_index * sizeof(SkinVertex));
+}
+
+auto GeometryPool::flush_skin_range(usize first_vertex, usize vertex_count)
+    -> void {
+  if (vertex_count == 0 || !skin_vertex_buffer)
+    return;
+  vmaFlushAllocation(allocator, skin_vertex_buffer->get_allocation(),
+                     first_vertex * sizeof(SkinVertex),
+                     vertex_count * sizeof(SkinVertex));
 }
 
 auto GeometryPool::allocate_materials(std::span<const GPUMaterial> mats)
