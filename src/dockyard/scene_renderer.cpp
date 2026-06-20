@@ -602,6 +602,20 @@ cube_sampler_handle = samplers.create(SamplerEntry{.sampler = cube_sampler_vk});
     }
 
     {
+      ZoneScopedNC("Skinning Pipeline", 0xFF8C00);
+      auto result = pipeline_registry->create_compute({
+          .shader_path = VFSPath::create("shaders://skinning.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .layout = VK_NULL_HANDLE,
+      });
+      if (!result) {
+        error("skinning pipeline initialization failed: {}", result.error());
+        std::abort();
+      }
+      skinning_pipeline = *result;
+    }
+
+    {
       ZoneScopedNC("Shadow Pipeline", 0x9370DB);
       auto result = pipeline_registry->create_graphics({
           .shader_path = VFSPath::create("shaders://shadow.slang"),
@@ -1764,6 +1778,119 @@ auto SceneRenderer::process_pending_hdr_map() -> void {
   old_probe.destroy(ctx, *this);
 
   bindless.mark_dirty();
+}
+
+// ---------------------------------------------------------------------------
+// GPU skinning compute pass
+// ---------------------------------------------------------------------------
+
+void SceneRenderer::ensure_skinned_scratch(usize vertex_count) {
+  if (skinned_scratch_capacity >= vertex_count)
+    return;
+  const usize new_cap =
+      std::max(vertex_count, skinned_scratch_capacity * 3 / 2 + 1);
+  for (u32 i = 0; i < frames_in_flight; ++i) {
+    skinned_vertex_scratch[i] =
+        Buffer::create(ctx.allocator, "skinned_vertex_scratch",
+                       new_cap * sizeof(Vertex),
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    skinned_position_scratch[i] =
+        Buffer::create(ctx.allocator, "skinned_position_scratch",
+                       new_cap * sizeof(PositionOnlyVertex),
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  }
+  skinned_scratch_capacity = new_cap;
+}
+
+void SceneRenderer::ensure_joint_palette_capacity(usize mat_count) {
+  const auto byte_size = mat_count * sizeof(glm::mat4);
+  for (u32 i = 0; i < frames_in_flight; ++i) {
+    auto &buf = joint_palette_buffers[i];
+    if (buf && buf->size() >= byte_size)
+      continue;
+    buf = Buffer::create(ctx.allocator, "joint_palette",
+                         byte_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  }
+  joint_palette_capacity = std::max(joint_palette_capacity, mat_count);
+}
+
+void SceneRenderer::skinning_pass(VkCommandBuffer cmd) {
+  ZoneScopedNC("SceneRenderer::skinning_pass", 0xFF8C00);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "skinning_pass", 0xFF8C00);
+
+  if (pending_skin_jobs.empty())
+    return;
+
+  const auto fi = static_cast<u32>(current_frame_index);
+
+  // Barrier: CPU palette upload → compute read
+  VkBufferMemoryBarrier2 palette_bar{
+      .sType       = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+      .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+      .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+      .buffer        = joint_palette_buffers[fi]->get_buffer(),
+      .size          = VK_WHOLE_SIZE,
+  };
+  VkDependencyInfo pre_dep{
+      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1U,
+      .pBufferMemoryBarriers    = &palette_bar,
+  };
+  vkCmdPipelineBarrier2(cmd, &pre_dep);
+
+  const auto &entry = pipeline_registry->get_entry(skinning_pipeline);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
+                          0U, 1U, &bindless.set, 0U, nullptr);
+
+  const auto src_v_addr  = geometry_pool->vertex_buffer->get_device_address();
+  const auto src_p_addr  = geometry_pool->position_only_vertex_buffer->get_device_address();
+  const auto skin_addr   = geometry_pool->skin_vertex_buffer
+                               ? geometry_pool->skin_vertex_buffer->get_device_address()
+                               : DeviceAddress{};
+  const auto pal_addr    = joint_palette_buffers[fi]->get_device_address();
+  const auto dst_v_addr  = skinned_vertex_scratch[fi]->get_device_address();
+  const auto dst_p_addr  = skinned_position_scratch[fi]->get_device_address();
+
+  for (const auto &job : pending_skin_jobs) {
+    SkinningPushConstants pc{
+        .src_vertices         = src_v_addr,
+        .src_positions        = src_p_addr,
+        .skin_attrs           = skin_addr,
+        .joint_palette        = pal_addr,
+        .dst_vertices         = dst_v_addr,
+        .dst_positions        = dst_p_addr,
+        .src_vertex_offset    = job.src_vertex_offset,
+        .skin_vertex_offset   = job.skin_vertex_offset,
+        .dst_vertex_offset    = job.dst_vertex_offset,
+        .vertex_count         = job.vertex_count,
+        .joint_palette_offset = job.joint_palette_offset,
+    };
+    vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                       0U, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, (job.vertex_count + 63U) / 64U, 1U, 1U);
+  }
+
+  // Barrier: compute write → vertex shader read
+  VkMemoryBarrier2 post_bar{
+      .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+  };
+  VkDependencyInfo post_dep{
+      .sType                = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount   = 1U,
+      .pMemoryBarriers      = &post_bar,
+  };
+  vkCmdPipelineBarrier2(cmd, &post_dep);
+
+  pending_skin_jobs.clear();
+  frame_skin_dst_vertex   = 0;
+  frame_palette_mat_count = 0;
 }
 
 } // namespace dy

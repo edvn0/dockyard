@@ -83,6 +83,31 @@ struct HizPushConstants {
   VkExtent2D src_dimension;
 };
 
+struct SkinningPushConstants {
+  DeviceAddress src_vertices;
+  DeviceAddress src_positions;
+  DeviceAddress skin_attrs;
+  DeviceAddress joint_palette;
+  DeviceAddress dst_vertices;
+  DeviceAddress dst_positions;
+  u32 src_vertex_offset;
+  u32 skin_vertex_offset;
+  u32 dst_vertex_offset;  // also stored as CompressedInstanceData::padding0
+  u32 vertex_count;
+  u32 joint_palette_offset; // in glm::mat4 units
+  u32 _pad{};
+};
+static_assert(sizeof(SkinningPushConstants) == 72);
+
+// One dispatch job per skinned instance per frame.
+struct SkinJob {
+  u32 src_vertex_offset;    // into vertex_buffer (Vertex units)
+  u32 skin_vertex_offset;   // into skin_vertex_buffer (SkinVertex units)
+  u32 dst_vertex_offset;    // into per-frame scratch (Vertex units)
+  u32 vertex_count;
+  u32 joint_palette_offset; // into joint_palette_buffers (mat4 units)
+};
+
 enum class RenderPassType : u8 { DepthPrepass, Forward, Shadow };
 
 struct PendingDraw {
@@ -324,6 +349,24 @@ struct SceneRenderer {
   PipelineHandle depth_to_r32_pipeline;
   PipelineHandle forward_occlusion_pipeline;
   PipelineHandle hiz_downsample_pipeline;
+  PipelineHandle skinning_pipeline;
+
+  // Per-frame buffers for GPU skinning.
+  // joint_palette_buffers holds all joint matrices for all skinned entities,
+  // concatenated (glm::mat4 per joint, indexed by SkinJob::joint_palette_offset).
+  FrameArray<std::unique_ptr<Buffer>> joint_palette_buffers;
+  // Scratch regions that the skinning compute writes into; vertex shaders read
+  // from these via device address stored in CompressedInstanceData::padding0/1.
+  FrameArray<std::unique_ptr<Buffer>> skinned_vertex_scratch;
+  FrameArray<std::unique_ptr<Buffer>> skinned_position_scratch;
+  usize skinned_scratch_capacity  = 0; // in Vertex units
+  usize joint_palette_capacity    = 0; // in mat4 units
+
+  // Skin jobs queued this frame; cleared at the start of each prepare().
+  std::vector<SkinJob> pending_skin_jobs;
+  // Per-frame accumulators; reset in prepare() alongside pending_skin_jobs.
+  u32 frame_skin_dst_vertex  = 0; // next free offset in scratch (Vertex units)
+  u32 frame_palette_mat_count = 0; // next free slot in joint_palette_buffers (mat4 units)
 
   Cache<StringMap<TextureHandle>> texture_cache{};
 
@@ -379,6 +422,13 @@ struct SceneRenderer {
   void composite_pass(VkCommandBuffer);
   void skybox_pass(VkCommandBuffer);
   void depth_frustum_culling_pass(VkCommandBuffer);
+  // Dispatches one compute job per pending SkinJob; inserts a compute→vertex
+  // barrier after all jobs. Clears pending_skin_jobs on return.
+  void skinning_pass(VkCommandBuffer);
+  // Ensures per-frame scratch buffers can hold at least vertex_count vertices.
+  void ensure_skinned_scratch(usize vertex_count);
+  // Ensures per-frame joint palette buffers can hold at least mat_count mat4s.
+  void ensure_joint_palette_capacity(usize mat_count);
   auto blit_depth_to_pre_hiz_pass(VkCommandBuffer, TextureHandle depth_resolved,
                                   TextureHandle depth_pre_hiz) -> void;
   void build_hierarchical_depth_pyramid_pass(VkCommandBuffer,

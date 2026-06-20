@@ -39,6 +39,7 @@ add_library(dockyard STATIC
         src/dockyard/event_callbacks.cpp
         src/dockyard/vfs.cpp
         src/dockyard/device_geometry.cpp
+        src/dockyard/animation.cpp
         src/dockyard/bindless_descriptor.cpp
         src/dockyard/texture.cpp
         src/dockyard/scene_renderer.cpp
@@ -186,6 +187,7 @@ if(DOCKYARD_BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/test_sim_state.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_state_machine.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_skin_vertex.cpp
+                ${CMAKE_SOURCE_DIR}/tests/test_animation.cpp
         )
   target_enable_native_arch(dockyard-testing)
   target_set_warnings(dockyard-testing)

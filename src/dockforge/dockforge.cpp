@@ -1495,6 +1495,10 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       renderer->resolve(viewport_resources.display_target);
 
   {
+    renderer->skinning_pass(ctx.main_cb);
+  }
+
+  {
     renderer->depth_frustum_culling_pass(ctx.main_cb);
   }
 

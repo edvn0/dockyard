@@ -2,6 +2,7 @@
 #include <dockyard/vfs_path.hpp>
 
 #include <array>
+#include <dockyard/animation.hpp>
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/types.hpp>
 #include <glm/glm.hpp>
@@ -81,6 +82,7 @@ struct MeshLodGroup {
   // Index into GeometryPool::skin_vertex_buffer (SkinVertex units), parallel to
   // vertex_offset. -1 means the primitive is not skinned.
   i32 skin_vertex_offset = -1;
+  u32 vertex_count = 0; // number of vertices in the LOD0 vertex range
   u8 lod_count = 1;
   std::array<MeshLod, max_lods> lods{};
 
@@ -109,6 +111,7 @@ struct MeshNodeDescription {
   std::string name;
   glm::mat4 local_transform{1.f};
   i32 parent_index{-1};
+  i32 skin_index{-1}; // index into MeshAsset::skeletons; -1 if not skinned
   std::vector<MeshPrimitiveReference> primitives;
 };
 
@@ -130,6 +133,9 @@ struct MeshAsset {
 
   std::vector<MeshNodeDescription> nodes;
   std::vector<u32> root_node_indices;
+
+  std::vector<Skeleton> skeletons;     // one per glTF skin
+  std::vector<AnimationClip> animations;
 };
 
 } // namespace dy
