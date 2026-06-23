@@ -144,7 +144,7 @@ unset(CMAKE_POLICY_VERSION_MINIMUM CACHE)
 CPMAddPackage(
         NAME sol2
         GITHUB_REPOSITORY ThePhd/sol2
-        GIT_TAG v3.3.0
+        GIT_TAG c1f95a773c6f8f4fde8ca3efe872e7286afe4444
         GIT_SHALLOW YES
         DOWNLOAD_ONLY YES
 )

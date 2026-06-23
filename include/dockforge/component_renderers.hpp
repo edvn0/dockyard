@@ -284,6 +284,64 @@ struct ComponentRenderer<dy::Components::Camera>
 };
 
 template <>
+struct ComponentRenderer<dy::AnimationState>
+    : public BaseComponentRenderer<ComponentRenderer<dy::AnimationState>> {
+  static constexpr std::string_view label = "Animation State";
+  static constexpr bool removable = true;
+  static constexpr bool addable = false;
+
+  static auto draw(dy::AnimationState &state, dy::SceneRenderer &renderer,
+                   dy::Scene &, dy::Entity &e) -> bool {
+    bool changed = false;
+
+    const auto *mesh_comp = e.try_get<dy::Components::Mesh>();
+    if (mesh_comp == nullptr || !mesh_comp->handle.valid()) {
+      ImGui::TextDisabled("No mesh asset.");
+      return false;
+    }
+    const auto *asset = renderer.get_mesh(mesh_comp->handle);
+    if (asset == nullptr || asset->animations.empty()) {
+      ImGui::TextDisabled("Mesh has no animation clips.");
+      return false;
+    }
+
+    int current_idx = -1;
+    for (int i = 0; i < static_cast<int>(asset->animations.size()); ++i) {
+      if (state.clip == &asset->animations[i]) {
+        current_idx = i;
+        break;
+      }
+    }
+
+    const char *preview = current_idx >= 0
+                              ? asset->animations[current_idx].name.c_str()
+                              : "(none)";
+    ImGui::TextUnformatted("Clip");
+    if (ImGui::BeginCombo("##clip", preview)) {
+      for (int i = 0; i < static_cast<int>(asset->animations.size()); ++i) {
+        const bool selected = (i == current_idx);
+        if (ImGui::Selectable(asset->animations[i].name.c_str(), selected)) {
+          state.update_animation(asset->animations[i]);
+          state.time = 0.0F;
+          changed = true;
+        }
+        if (selected)
+          ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+
+    if (state.clip != nullptr) {
+      ImGui::Spacing();
+      ImGui::Text("%.2f / %.2f s", state.time, state.clip->duration);
+      changed |= labelled_input("Loop", ImGui::Checkbox, &state.loop);
+    }
+
+    return changed;
+  }
+};
+
+template <>
 struct ComponentRenderer<dy::Components::DebugFrustum>
     : public BaseComponentRenderer<
           ComponentRenderer<dy::Components::DebugFrustum>> {
@@ -441,63 +499,6 @@ inline auto ComponentInspector::draw_one(
 
   return changed;
 }
-
-template <>
-struct ComponentRenderer<dy::AnimationState>
-    : public BaseComponentRenderer<ComponentRenderer<dy::AnimationState>> {
-  static constexpr std::string_view label = "Animation State";
-  static constexpr bool removable = true;
-  static constexpr bool addable = false;
-
-  static auto draw(dy::AnimationState &state, dy::SceneRenderer &renderer,
-                   dy::Scene &, dy::Entity &e) -> bool {
-    bool changed = false;
-
-    const auto *mesh_comp = e.try_get<dy::Components::Mesh>();
-    if (mesh_comp == nullptr || !mesh_comp->handle.valid()) {
-      ImGui::TextDisabled("No mesh asset.");
-      return false;
-    }
-    const auto *asset = renderer.get_mesh(mesh_comp->handle);
-    if (asset == nullptr || asset->animations.empty()) {
-      ImGui::TextDisabled("Mesh has no animation clips.");
-      return false;
-    }
-
-    int current_idx = -1;
-    for (int i = 0; i < static_cast<int>(asset->animations.size()); ++i) {
-      if (state.clip == &asset->animations[i]) {
-        current_idx = i;
-        break;
-      }
-    }
-
-    const char *preview =
-        current_idx >= 0 ? asset->animations[current_idx].name.c_str() : "(none)";
-    ImGui::TextUnformatted("Clip");
-    if (ImGui::BeginCombo("##clip", preview)) {
-      for (int i = 0; i < static_cast<int>(asset->animations.size()); ++i) {
-        const bool selected = (i == current_idx);
-        if (ImGui::Selectable(asset->animations[i].name.c_str(), selected)) {
-          state.clip = &asset->animations[i];
-          state.time = 0.0F;
-          changed = true;
-        }
-        if (selected)
-          ImGui::SetItemDefaultFocus();
-      }
-      ImGui::EndCombo();
-    }
-
-    if (state.clip != nullptr) {
-      ImGui::Spacing();
-      ImGui::Text("%.2f / %.2f s", state.time, state.clip->duration);
-      changed |= labelled_input("Loop", ImGui::Checkbox, &state.loop);
-    }
-
-    return changed;
-  }
-};
 
 inline auto ComponentInspector::draw_add_button(
     dy::SceneRenderer &renderer, dy::Entity &entity,

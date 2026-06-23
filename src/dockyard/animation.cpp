@@ -1,20 +1,27 @@
+#include <algorithm>
 #include <dockyard/animation.hpp>
 
 #include <algorithm>
 #include <cmath>
-#include <unordered_map>
-
-#include <glm/gtc/matrix_transform.hpp>
+#include <utility>
 
 namespace dy {
 
 auto resolve_joint_parents(std::span<const i32> joint_nodes,
                            std::span<const i32> node_parent)
     -> std::vector<i32> {
-  std::unordered_map<i32, i32> node_to_joint;
-  node_to_joint.reserve(joint_nodes.size());
-  for (u32 i = 0; i < joint_nodes.size(); ++i)
-    node_to_joint.emplace(joint_nodes[i], static_cast<i32>(i));
+  if (joint_nodes.empty())
+    return {};
+
+  i32 max_node = std::ranges::fold_left(
+      joint_nodes, 0, [](i32 acc, i32 node) { return std::max(acc, node); });
+
+  std::vector<i32> node_to_joint(max_node + 1, -1);
+  for (u32 i = 0; i < joint_nodes.size(); ++i) {
+    if (joint_nodes[i] >= 0) {
+      node_to_joint[joint_nodes[i]] = static_cast<i32>(i);
+    }
+  }
 
   std::vector<i32> parents(joint_nodes.size(), -1);
 
@@ -25,9 +32,8 @@ auto resolve_joint_parents(std::span<const i32> joint_nodes,
                        : -1;
 
     while (ancestor >= 0) {
-      if (const auto it = node_to_joint.find(ancestor);
-          it != node_to_joint.end()) {
-        parents[i] = it->second;
+      if (ancestor <= max_node && node_to_joint[ancestor] != -1) {
+        parents[i] = node_to_joint[ancestor];
         break;
       }
       ancestor = ancestor < static_cast<i32>(node_parent.size())
@@ -47,25 +53,28 @@ auto compute_clip_duration(std::span<const AnimationSampler> samplers) -> f32 {
   return duration;
 }
 
-auto sample_channel(const AnimationSampler &s, AnimationTargetPath path,
-                    f32 t) -> glm::vec4 {
+auto sample_channel(const AnimationSampler &s, AnimationTargetPath path, f32 t,
+                    u32 &cursor) -> glm::vec4 {
   if (s.inputs.empty())
     return glm::vec4{0.0F};
 
   t = std::clamp(t, s.inputs.front(), s.inputs.back());
 
-  const auto it = std::upper_bound(s.inputs.begin(), s.inputs.end(), t);
-  const auto hi = static_cast<u32>(it - s.inputs.begin());
-
-  // t is at or past the last keyframe — return final value directly
-  if (hi == static_cast<u32>(s.inputs.size())) {
-    const u32 last = hi - 1;
-    return (s.interpolation == AnimationInterpolation::CubicSpline)
-               ? s.outputs[last * 3 + 1]
-               : s.outputs[last];
+  if (t < s.inputs[cursor]) {
+    cursor = 0;
+  }
+  while (cursor < s.inputs.size() - 1 && t >= s.inputs[cursor + 1]) {
+    cursor++;
   }
 
-  const u32 lo = hi - 1;
+  const u32 lo = cursor;
+  const u32 hi = std::min(lo + 1, static_cast<u32>(s.inputs.size() - 1));
+
+  if (lo == hi) {
+    return (s.interpolation == AnimationInterpolation::CubicSpline)
+               ? s.outputs[(lo * 3) + 1]
+               : s.outputs[lo];
+  }
 
   if (s.interpolation == AnimationInterpolation::Step)
     return s.outputs[lo];
@@ -79,86 +88,133 @@ auto sample_channel(const AnimationSampler &s, AnimationTargetPath path,
                          s.outputs[lo].z};
       const glm::quat q1{s.outputs[hi].w, s.outputs[hi].x, s.outputs[hi].y,
                          s.outputs[hi].z};
-      const glm::quat r = glm::slerp(q0, q1, alpha);
+      const auto r = glm::slerp(q0, q1, alpha);
       return {r.x, r.y, r.z, r.w};
     }
     return glm::mix(s.outputs[lo], s.outputs[hi], alpha);
   }
 
-  // CubicSpline — cubic Hermite: h00·p0 + h10·m0 + h01·p1 + h11·m1
-  const f32 t2 = alpha * alpha;
-  const f32 t3 = t2 * alpha;
-  const glm::vec4 p0 = s.outputs[lo * 3 + 1];
-  const glm::vec4 m0 = s.outputs[lo * 3 + 2] * seg_dt;
-  const glm::vec4 p1 = s.outputs[hi * 3 + 1];
-  const glm::vec4 m1 = s.outputs[hi * 3 + 0] * seg_dt;
+  const auto t2 = alpha * alpha;
+  const auto t3 = t2 * alpha;
+  const auto p0 = s.outputs[(lo * 3) + 1];
+  const auto m0 = s.outputs[(lo * 3) + 2] * seg_dt;
+  const auto p1 = s.outputs[(hi * 3) + 1];
+  const auto m1 = s.outputs[(hi * 3) + 0] * seg_dt;
 
-  glm::vec4 result = (2.0F * t3 - 3.0F * t2 + 1.0F) * p0 +
-                     (t3 - 2.0F * t2 + alpha) * m0 +
-                     (-2.0F * t3 + 3.0F * t2) * p1 + (t3 - t2) * m1;
+  glm::vec4 result = ((2.0F * t3) - (3.0F * t2) + 1.0F) * p0 +
+                     (t3 - (2.0F * t2) + alpha) * m0 +
+                     ((-2.0F * t3) + (3.0F * t2)) * p1 + (t3 - t2) * m1;
 
   if (path == AnimationTargetPath::Rotation) {
-    const glm::quat qn = glm::normalize(glm::quat{result.w, result.x,
-                                                   result.y, result.z});
+    const auto qn =
+        glm::normalize(glm::quat{result.w, result.x, result.y, result.z});
     return {qn.x, qn.y, qn.z, qn.w};
   }
   return result;
 }
 
-auto compute_joint_palette(const Skeleton &skeleton, const AnimationClip &clip,
-                            i32 skeleton_index, f32 t)
-    -> std::vector<glm::mat4> {
-  const u32 n = skeleton.joint_count();
+auto AnimationState::init(const Skeleton *target_skeleton,
+                          const AnimationClip *target_clip, i32 skel_idx)
+    -> void {
+  skeleton = target_skeleton;
+  clip = target_clip;
+  skeleton_index = skel_idx;
+  time = 0.0F;
 
-  std::vector<glm::vec3> translations(n);
-  std::vector<glm::quat> rotations(n);
-  std::vector<glm::vec3> scales(n);
-  for (u32 i = 0; i < n; ++i) {
-    const auto &j  = skeleton.joints[i];
-    translations[i] = j.bind_translation;
-    rotations[i]    = j.bind_rotation;
-    scales[i]       = j.bind_scale;
+  if (skeleton != nullptr) {
+    size_t joint_count = skeleton->joints.size();
+    local_transforms.resize(joint_count);
+    world_transforms.resize(joint_count);
+    joint_palette.resize(joint_count);
+  } else {
+    local_transforms.clear();
+    world_transforms.clear();
+    joint_palette.clear();
   }
 
-  for (const auto &ch : clip.channels) {
-    if (ch.skeleton_index != skeleton_index) continue;
-    if (ch.joint_index < 0 || ch.joint_index >= static_cast<i32>(n)) continue;
-    const auto &sampler = clip.samplers[ch.sampler_index];
-    const glm::vec4 v   = sample_channel(sampler, ch.path, t);
-    const u32 ji        = static_cast<u32>(ch.joint_index);
+  if (clip != nullptr) {
+    channel_cursors.assign(clip->channels.size(), 0);
+  } else {
+    channel_cursors.clear();
+  }
+}
+
+auto AnimationState::update_animation(const AnimationClip &new_clip) -> void {
+  if (this->clip != &new_clip) {
+    this->init(this->skeleton, &new_clip, this->skeleton_index);
+  }
+}
+
+auto compute_joint_palette(AnimationState &state) -> void {
+  if (state.skeleton == nullptr || state.clip == nullptr)
+    return;
+
+  const u32 n = state.skeleton->joint_count();
+
+  for (u32 i = 0; i < n; ++i) {
+    const auto &j = state.skeleton->joints[i];
+    state.local_transforms[i].translation = j.bind_translation;
+    state.local_transforms[i].rotation = j.bind_rotation;
+    state.local_transforms[i].scale = j.bind_scale;
+  }
+
+  for (u32 i = 0; i < state.clip->channels.size(); ++i) {
+    const auto &ch = state.clip->channels[i];
+    if (ch.skeleton_index != state.skeleton_index)
+      continue;
+    if (ch.joint_index < 0 || static_cast<u32>(ch.joint_index) >= n)
+      continue;
+
+    const auto &sampler = state.clip->samplers[ch.sampler_index];
+    const auto v =
+        sample_channel(sampler, ch.path, state.time, state.channel_cursors[i]);
+    const u32 ji = static_cast<u32>(ch.joint_index);
+
     switch (ch.path) {
-    case AnimationTargetPath::Translation: translations[ji] = glm::vec3{v};                           break;
-    case AnimationTargetPath::Rotation:    rotations[ji]    = glm::quat{v.w, v.x, v.y, v.z};         break;
-    case AnimationTargetPath::Scale:       scales[ji]       = glm::vec3{v};                           break;
+    case AnimationTargetPath::Translation:
+      state.local_transforms[ji].translation = glm::vec3{v};
+      break;
+    case AnimationTargetPath::Rotation:
+      state.local_transforms[ji].rotation = glm::quat{v.w, v.x, v.y, v.z};
+      break;
+    case AnimationTargetPath::Scale:
+      state.local_transforms[ji].scale = glm::vec3{v};
+      break;
     }
   }
 
-  // Compose world transforms. Joints must be in topological order (parent < child).
-  std::vector<glm::mat4> world(n);
   for (u32 i = 0; i < n; ++i) {
-    glm::mat4 local = glm::translate(glm::mat4{1.0F}, translations[i]);
-    local           = local * glm::mat4_cast(rotations[i]);
-    local           = glm::scale(local, scales[i]);
+    const auto &trs = state.local_transforms[i];
 
-    const i32 parent = skeleton.joints[i].parent;
-    world[i]         = (parent >= 0) ? world[static_cast<u32>(parent)] * local : local;
+    glm::mat4 local = glm::mat4_cast(trs.rotation);
+    local[0] *= trs.scale.x;
+    local[1] *= trs.scale.y;
+    local[2] *= trs.scale.z;
+    local[3] = glm::vec4(trs.translation, 1.0F);
+
+    const i32 parent = state.skeleton->joints[i].parent;
+    state.world_transforms[i] =
+        (parent >= 0) ? state.world_transforms[static_cast<u32>(parent)] * local
+                      : local;
   }
 
-  std::vector<glm::mat4> palette(n);
-  for (u32 i = 0; i < n; ++i)
-    palette[i] = world[i] * skeleton.joints[i].inverse_bind;
-
-  return palette;
+  for (u32 i = 0; i < n; ++i) {
+    state.joint_palette[i] =
+        state.world_transforms[i] * state.skeleton->joints[i].inverse_bind;
+  }
 }
 
 auto AnimationState::advance(f32 dt) -> void {
-  if (!clip || !skeleton) return;
+  if (clip == nullptr || skeleton == nullptr)
+    return;
+
   time += dt;
   if (loop && clip->duration > 0.0F)
     time = std::fmod(time, clip->duration);
   else
     time = std::min(time, clip->duration);
-  joint_palette = compute_joint_palette(*skeleton, *clip, skeleton_index, time);
+
+  compute_joint_palette(*this);
 }
 
 } // namespace dy

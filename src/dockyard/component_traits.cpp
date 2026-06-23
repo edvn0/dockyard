@@ -9,10 +9,7 @@
 
 namespace dy {
 namespace {
-
 constexpr u32 max_string_length = 4096;
-
-// Validates that a string sequence conforms strictly to RFC 3629 UTF-8.
 [[maybe_unused]] auto is_valid_utf8(std::string_view str) -> bool {
   const auto *bytes = reinterpret_cast<const std::uint8_t *>(str.data());
   std::size_t i = 0;
@@ -241,18 +238,35 @@ void ComponentSerializer<Components::PointLight>::load(
   archive.reader.read(&value.radius, sizeof(float));
 }
 
-#define EXPLICITLY_DEFINE(T)                                                   \
-  template void ComponentSerializer<Components::T>::load(                      \
-      CompileTimeInputArchive &, Components::T &);                             \
-  template void ComponentSerializer<Components::T>::save(                      \
-      CompileTimeOutputArchive &, const Components::T &);
+void ComponentSerializer<AnimationState>::save(auto &, const AnimationState &) {
+}
 
-EXPLICITLY_DEFINE(Tag);
-EXPLICITLY_DEFINE(MeshRequest);
-EXPLICITLY_DEFINE(Camera);
-EXPLICITLY_DEFINE(Transform);
-EXPLICITLY_DEFINE(LocalToWorld);
-EXPLICITLY_DEFINE(PointLight);
-EXPLICITLY_DEFINE(Mesh);
+void ComponentSerializer<AnimationState>::load(auto &, AnimationState &) {}
+
+void ComponentSerializer<Components::MaterialOverride>::save(
+    auto &archive, const Components::MaterialOverride &m) {
+  archive.writer.write(&m.material, sizeof(m.material));
+}
+void ComponentSerializer<Components::MaterialOverride>::load(
+    auto &archive, Components::MaterialOverride &m) {
+  archive.reader.read(&m.material, sizeof(m.material));
+  m.gpu_slot = Components::MaterialOverride::invalid_material;
+  m.dirty = true;
+}
+
+#define EXPLICITLY_DEFINE(T)                                                   \
+  template void ComponentSerializer<T>::load(CompileTimeInputArchive &, T &);  \
+  template void ComponentSerializer<T>::save(CompileTimeOutputArchive &,       \
+                                             const T &);
+
+EXPLICITLY_DEFINE(Components::Tag);
+EXPLICITLY_DEFINE(Components::MeshRequest);
+EXPLICITLY_DEFINE(Components::Camera);
+EXPLICITLY_DEFINE(Components::Transform);
+EXPLICITLY_DEFINE(Components::LocalToWorld);
+EXPLICITLY_DEFINE(Components::PointLight);
+EXPLICITLY_DEFINE(Components::Mesh);
+EXPLICITLY_DEFINE(Components::MaterialOverride);
+EXPLICITLY_DEFINE(AnimationState);
 
 } // namespace dy

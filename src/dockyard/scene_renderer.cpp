@@ -758,7 +758,7 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
     const glm::mat4 node_t = t * node.local_transform;
 
     // Upload joint palette once per node (all primitives share the same skin).
-    u32 palette_offset = ~0u;
+    u32 palette_offset = ~0U;
     if (node.skin_index >= 0 && !joint_palette.empty()) {
       palette_offset = frame_palette_mat_count;
       pending_palette_data.insert(pending_palette_data.end(),

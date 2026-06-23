@@ -70,7 +70,9 @@ TEST_CASE("Given a Step sampler with two keyframes, When sampled between them, "
   s.outputs       = {glm::vec4{1.0F, 0.0F, 0.0F, 0.0F},
                      glm::vec4{0.0F, 1.0F, 0.0F, 0.0F}};
 
-  const auto v = sample_channel(s, AnimationTargetPath::Translation, 0.4F);
+  u32 cursor = 0;
+  const auto v =
+      sample_channel(s, AnimationTargetPath::Translation, 0.4F, cursor);
   CHECK(v.x == doctest::Approx(1.0F));
   CHECK(v.y == doctest::Approx(0.0F));
 }
@@ -82,7 +84,9 @@ TEST_CASE("Given a Step sampler, When sampled past the last keyframe, "
   s.inputs        = {0.0F, 1.0F};
   s.outputs       = {glm::vec4{0.0F}, glm::vec4{5.0F, 0.0F, 0.0F, 0.0F}};
 
-  const auto v = sample_channel(s, AnimationTargetPath::Translation, 2.0F);
+  u32 cursor = 0;
+  const auto v =
+      sample_channel(s, AnimationTargetPath::Translation, 2.0F, cursor);
   CHECK(v.x == doctest::Approx(5.0F));
 }
 
@@ -94,7 +98,9 @@ TEST_CASE("Given a Linear translation sampler, When sampled at 50% between "
   s.outputs       = {glm::vec4{0.0F, 0.0F, 0.0F, 0.0F},
                      glm::vec4{2.0F, 4.0F, 0.0F, 0.0F}};
 
-  const auto v = sample_channel(s, AnimationTargetPath::Translation, 0.5F);
+  u32 cursor = 0;
+  const auto v =
+      sample_channel(s, AnimationTargetPath::Translation, 0.5F, cursor);
   CHECK(v.x == doctest::Approx(1.0F));
   CHECK(v.y == doctest::Approx(2.0F));
 }
@@ -111,7 +117,8 @@ TEST_CASE("Given a Linear rotation sampler, When sampled at 50% between "
   s.outputs       = {glm::vec4{q0.x, q0.y, q0.z, q0.w},
                      glm::vec4{q1.x, q1.y, q1.z, q1.w}};
 
-  const auto v    = sample_channel(s, AnimationTargetPath::Rotation, 0.5F);
+  u32 cursor = 0;
+  const auto v = sample_channel(s, AnimationTargetPath::Rotation, 0.5F, cursor);
   const glm::quat r{v.w, v.x, v.y, v.z};
   CHECK(glm::length(r) == doctest::Approx(1.0F).epsilon(1e-5));
 }
@@ -126,8 +133,11 @@ TEST_CASE("Given a CubicSpline sampler, When sampled exactly at a keyframe, "
   s.outputs       = {glm::vec4{0.0F}, glm::vec4{3.0F, 0.0F, 0.0F, 0.0F}, glm::vec4{0.0F},
                      glm::vec4{0.0F}, glm::vec4{7.0F, 0.0F, 0.0F, 0.0F}, glm::vec4{0.0F}};
 
-  CHECK(sample_channel(s, AnimationTargetPath::Translation, 0.0F).x == doctest::Approx(3.0F));
-  CHECK(sample_channel(s, AnimationTargetPath::Translation, 1.0F).x == doctest::Approx(7.0F));
+  u32 cursor = 0;
+  CHECK(sample_channel(s, AnimationTargetPath::Translation, 0.0F, cursor).x ==
+        doctest::Approx(3.0F));
+  CHECK(sample_channel(s, AnimationTargetPath::Translation, 1.0F, cursor).x ==
+        doctest::Approx(7.0F));
 }
 
 // ---------------------------------------------------------------------------
@@ -149,11 +159,14 @@ TEST_CASE("Given a single root joint with identity transforms and no animation "
   AnimationClip clip;
   clip.duration = 1.0F;
 
-  const auto palette = compute_joint_palette(sk, clip, 0, 0.5F);
+  auto state = AnimationState::create(&sk, &clip, 0);
+  state.time = 0.5F;
 
-  REQUIRE(palette.size() == 1);
+  compute_joint_palette(state);
+
+  REQUIRE(state.joint_palette.size() == 1);
   // world[0] = identity (bind pose), so palette[0] = identity * inverse_bind = inverse_bind
-  CHECK(palette[0][3][0] == doctest::Approx(-5.0F));
+  CHECK(state.joint_palette[0][3][0] == doctest::Approx(-5.0F));
 }
 
 TEST_CASE("Given a two-joint chain with a translation channel on the parent, "
@@ -197,13 +210,16 @@ TEST_CASE("Given a two-joint chain with a translation channel on the parent, "
   clip.samplers.push_back(sampler);
   clip.channels.push_back(ch);
 
-  const auto palette = compute_joint_palette(sk, clip, 0, 0.0F);
+  AnimationState state = AnimationState::create(&sk, &clip, 0);
 
-  REQUIRE(palette.size() == 2);
+  compute_joint_palette(state);
+
+  REQUIRE(state.joint_palette.size() == 2);
   // root world = translate(3,0,0), palette[0] = translate(3,0,0) * identity
-  CHECK(palette[0][3][0] == doctest::Approx(3.0F));
-  // child world = root_world * identity = translate(3,0,0), palette[1] = same
-  CHECK(palette[1][3][0] == doctest::Approx(3.0F));
+  CHECK(state.joint_palette[0][3][0] == doctest::Approx(3.0F));
+  // child world = root_world * identity = translate(3,0,0),
+  // state.joint_palette[1] = same
+  CHECK(state.joint_palette[1][3][0] == doctest::Approx(3.0F));
 }
 
 // ---------------------------------------------------------------------------
@@ -223,11 +239,9 @@ TEST_CASE("Given an AnimationState with a looping clip, When advanced past the "
   AnimationClip clip;
   clip.duration = 2.0F;
 
-  AnimationState state;
-  state.skeleton        = &sk;
-  state.clip            = &clip;
-  state.skeleton_index  = 0;
-  state.loop            = true;
+  AnimationState state = AnimationState::create(&sk, &clip, 0);
+
+  state.loop = true;
 
   state.advance(3.5F); // 3.5 mod 2.0 = 1.5
   CHECK(state.time == doctest::Approx(1.5F).epsilon(1e-5));
@@ -247,11 +261,8 @@ TEST_CASE("Given an AnimationState with looping disabled, When advanced past "
   AnimationClip clip;
   clip.duration = 1.0F;
 
-  AnimationState state;
-  state.skeleton        = &sk;
-  state.clip            = &clip;
-  state.skeleton_index  = 0;
-  state.loop            = false;
+  AnimationState state = AnimationState::create(&sk, &clip, 0);
+  state.loop = false;
 
   state.advance(5.0F);
   CHECK(state.time == doctest::Approx(1.0F));

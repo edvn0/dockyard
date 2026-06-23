@@ -299,26 +299,30 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
   }
 
-  {
-    constexpr std::string_view fox_path = "meshes://fox/Fox.glb";
-    if (auto loaded_fox = asset_loader->load_mesh(VFSPath::create(fox_path))) {
-      const auto *asset = renderer->get_mesh(*loaded_fox);
-      if (asset && !asset->skeletons.empty() && !asset->animations.empty()) {
-        auto fox = active_scene->make("Fox");
+  constexpr std::string_view fox_path = "meshes://fox/Fox.glb";
+
+  if (auto loaded_fox = asset_loader->load_mesh(VFSPath::create(fox_path))) {
+    const auto *asset = renderer->get_mesh(*loaded_fox);
+
+    if ((asset != nullptr) && !asset->skeletons.empty() &&
+        !asset->animations.empty()) {
+
+      for (int i = 0; i < 10; ++i) {
+        auto fox = active_scene->make("Fox_" + std::to_string(i));
+
         auto &mc = fox.emplace<Components::Mesh>();
         mc.handle = *loaded_fox;
         mc.source_path = VFSPath::create(fox_path);
 
-        // Fox.glb is authored in centimetres; scale to metres.
-        fox.get<Components::Transform>().mut().scale = glm::vec3{0.01f};
+        auto transform = fox.get<Components::Transform>().mut();
+        transform.scale = glm::vec3{0.01F};
 
-        AnimationState anim_state{
-            .skeleton = &asset->skeletons[0],
-            .clip = &asset->animations[0],
-            .skeleton_index = 0,
-            .loop = true,
-        };
-        anim_state.advance(0.0F);
+        transform.position = glm::linearRand(glm::vec3{-25.0F, 0.0F, -25.0F},
+                                             glm::vec3{25.0F, 0.0F, 25.0F});
+
+        AnimationState anim_state = AnimationState::create(
+            &asset->skeletons[0], &asset->animations[0], 0);
+
         fox.emplace<AnimationState>(std::move(anim_state));
       }
     }
@@ -1090,7 +1094,9 @@ auto Dockforge::build_ui() -> void {
     ImGui::SeparatorText("Shadow Settings");
     ImGui::DragFloat("Shadow Distance", &shadow_map_state.far_plane, 1.0F,
                      10.0F, 1000.0F, "%.0f m");
-    if (ImGui::IsItemDeactivatedAfterEdit())
+    static bool always_invalidate_shadows = true;
+    ImGui::Checkbox("Always invalidate", &always_invalidate_shadows);
+    if (always_invalidate_shadows || ImGui::IsItemDeactivatedAfterEdit())
       shadow_map_state.invalid = true;
   }
   ImGui::End();
@@ -1320,8 +1326,21 @@ auto Dockforge::update(float ts) -> void {
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
 
-  for (auto &&[e, anim] : active_scene->view<AnimationState>().each())
-    anim.advance(ts);
+  {
+    ZoneScopedNC("Animation state update", 0xFF6611);
+    std::vector<std::future<void>> futures;
+    auto view = active_scene->view<AnimationState>();
+    futures.reserve(view->size());
+
+    for (auto &&[e, anim] : view.each()) {
+      futures.push_back(renderer->thread_pool.submit_task(
+          [&anim, ts]() { anim.advance(ts); }));
+    }
+
+    for (auto &f : futures) {
+      f.wait();
+    }
+  }
 
   update_local_to_world_matrices(active_scene->registry());
 
@@ -1520,6 +1539,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     return ctx.next_frame_wait_value();
   }
 
+#undef Status
   if (prepare_result.status ==
           SceneRenderer::PrepareResult::Status::SuccessMaterialPoolGrew &&
       prepare_result.material_pool_delta > 0) {

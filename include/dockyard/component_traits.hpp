@@ -106,18 +106,14 @@ template <> struct ComponentSerializer<Components::PointLight> {
   static void load(auto &archive, Components::PointLight &);
 };
 
-// gpu_slot is a renderer-owned runtime handle — never round-trip it through
-// serialization. Deserialized instances always start with invalid_material so
-// flush_material_overrides() allocates a fresh slot on the first frame.
+template <> struct ComponentSerializer<AnimationState> {
+  static void save(auto &archive, const AnimationState &);
+  static void load(auto &archive, AnimationState &);
+};
+
 template <> struct ComponentSerializer<Components::MaterialOverride> {
-  static void save(auto &archive, const Components::MaterialOverride &m) {
-    archive.writer.write(&m.material, sizeof(m.material));
-  }
-  static void load(auto &archive, Components::MaterialOverride &m) {
-    archive.reader.read(&m.material, sizeof(m.material));
-    m.gpu_slot = Components::MaterialOverride::invalid_material;
-    m.dirty = true;
-  }
+  static void save(auto &archive, const Components::MaterialOverride &);
+  static void load(auto &archive, Components::MaterialOverride &);
 };
 
 } // namespace dy
