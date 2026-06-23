@@ -1169,11 +1169,13 @@ auto SceneRenderer::blit_depth_to_pre_hiz_pass(VkCommandBuffer cmd,
       },
       {
           .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_NONE,
+          // WAR: pyramid build (COMPUTE READ) must finish before we overwrite.
+          // srcAccessMask=NONE is correct for WAR — execution dep is enough.
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
           .srcAccessMask = VK_ACCESS_2_NONE,
           .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
           .dstAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+          .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
           .newLayout = VK_IMAGE_LAYOUT_GENERAL,
           .image = dst->texture.image,
           .subresourceRange =
@@ -1250,8 +1252,8 @@ void SceneRenderer::build_hierarchical_depth_pyramid_pass(
 
   VkImageMemoryBarrier2 input_depth_barrier{
       .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-      .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-      .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
       .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
       .oldLayout = VK_IMAGE_LAYOUT_GENERAL,

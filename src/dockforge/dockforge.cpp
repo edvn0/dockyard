@@ -1251,6 +1251,7 @@ auto Dockforge::play() -> void {
 
     active_scene = runtime_scene.get();
     editor_state.active_scene = active_scene;
+    editor_state.hierarchy_dirty = true;
     script_engine->init(active_scene, *asset_loader);
     TracyMessage("Game started", 12);
     editor_state.cache_dirty = true;
