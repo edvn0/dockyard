@@ -747,6 +747,58 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
   }
 }
 
+void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
+                           std::span<const glm::mat4> joint_palette,
+                           u32 pipeline_id, u32 material_id) {
+  auto *asset = get_mesh(handle);
+  if (asset == nullptr) [[unlikely]]
+    return;
+
+  for (const auto &node : asset->nodes) {
+    const glm::mat4 node_t = t * node.local_transform;
+
+    // Upload joint palette once per node (all primitives share the same skin).
+    u32 palette_offset = ~0u;
+    if (node.skin_index >= 0 && !joint_palette.empty()) {
+      palette_offset = frame_palette_mat_count;
+      pending_palette_data.insert(pending_palette_data.end(),
+                                   joint_palette.begin(), joint_palette.end());
+      frame_palette_mat_count += static_cast<u32>(joint_palette.size());
+    }
+
+    for (const auto &prim : node.primitives) {
+      const u32 resolved_mat =
+          material_id != 0 ? material_id : prim.material_id;
+      const u64 key = (static_cast<u64>(pipeline_id) << 48) |
+                      (static_cast<u64>(resolved_mat) << 32) |
+                      static_cast<u64>(prim.flat_index & 0xFFFF'FFFFU);
+
+      u32 skinned_base = ~0u;
+      if (prim.lod_group.is_skinned() && palette_offset != ~0u) {
+        skinned_base = frame_skin_dst_vertex;
+        pending_skin_jobs.push_back({
+            .src_vertex_offset    = static_cast<u32>(prim.lod_group.vertex_offset),
+            .skin_vertex_offset   = static_cast<u32>(prim.lod_group.skin_vertex_offset),
+            .dst_vertex_offset    = frame_skin_dst_vertex,
+            .vertex_count         = prim.lod_group.vertex_count,
+            .joint_palette_offset = palette_offset,
+        });
+        frame_skin_dst_vertex += prim.lod_group.vertex_count;
+      }
+
+      frame_submission.entries.push_back({
+          .sort_key             = key,
+          .mesh_prim_flat_index = prim.flat_index,
+          .material_id          = resolved_mat,
+          .pipeline_id          = pipeline_id,
+          .transform            = node_t,
+          .aabb                 = prim.aabb,
+          .skinned_base         = skinned_base,
+      });
+    }
+  }
+}
+
 namespace {
 std::atomic_uint64_t current_frame_index{std::numeric_limits<u64>::max()};
 
@@ -820,6 +872,19 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
 
   current_frame_index = info.frame_index;
 
+  // Reset skinning accumulators; upload any palette data queued by submit().
+  {
+    const auto total_skin_verts   = std::exchange(frame_skin_dst_vertex, 0u);
+    const auto total_palette_mats = std::exchange(frame_palette_mat_count, 0u);
+    if (total_skin_verts > 0)
+      ensure_skinned_scratch(total_skin_verts);
+    if (!pending_palette_data.empty()) {
+      ensure_joint_palette_capacity(total_palette_mats);
+      joint_palette_buffers[current_frame_index]->upload(pending_palette_data);
+      pending_palette_data.clear();
+    }
+  }
+
   auto &fs = frame_submission;
   if (fs.entries.empty()) {
     return {
@@ -850,6 +915,11 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
           glm::length(half),
           flat_prim_table[e.mesh_prim_flat_index].lod_group->lod_count,
       };
+      if (e.skinned_base != ~0u) {
+        global_instance_data[i].padding0 = std::bit_cast<float>(e.skinned_base);
+        global_instance_data[i].padding1 = std::bit_cast<float>(
+            static_cast<u32>(flat_prim_table[e.mesh_prim_flat_index].lod_group->vertex_offset));
+      }
     }
     global_instance_buffer[current_frame_index]->upload(global_instance_data);
   }
@@ -920,6 +990,7 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
   vkCmdBindIndexBuffer(cmd, geometry_pool->index_buffer->get_buffer(), 0U,
                        VK_INDEX_TYPE_UINT32);
 
+  const auto fi = static_cast<u32>(current_frame_index);
   const GpuPushConstants push_constants{
       .vertex_buffer_ptr =
           DeviceAddress{
@@ -945,6 +1016,14 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
           DeviceAddress{
               pool.material_buffer->get_device_address(),
           },
+      .skinned_vertex_buffer_ptr =
+          skinned_vertex_scratch[fi]
+              ? skinned_vertex_scratch[fi]->get_device_address()
+              : DeviceAddress::Invalid,
+      .skinned_position_buffer_ptr =
+          skinned_position_scratch[fi]
+              ? skinned_position_scratch[fi]->get_device_address()
+              : DeviceAddress::Invalid,
   };
 
   for (const auto &batch : pass.batches) {
@@ -1550,6 +1629,7 @@ void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
   auto &ws = pass.frame_workspaces.at(current_frame_index);
 
   auto &pool = *geometry_pool;
+  const auto shadow_fi = static_cast<u32>(current_frame_index);
   const GpuPushConstants push_constants{
       .vertex_buffer_ptr =
           DeviceAddress{
@@ -1575,6 +1655,14 @@ void SceneRenderer::render_shadow_cascade(VkCommandBuffer cmd,
           DeviceAddress{
               pool.material_buffer->get_device_address(),
           },
+      .skinned_vertex_buffer_ptr =
+          skinned_vertex_scratch[shadow_fi]
+              ? skinned_vertex_scratch[shadow_fi]->get_device_address()
+              : DeviceAddress::Invalid,
+      .skinned_position_buffer_ptr =
+          skinned_position_scratch[shadow_fi]
+              ? skinned_position_scratch[shadow_fi]->get_device_address()
+              : DeviceAddress::Invalid,
       .cascade_index = cascade_idx,
   };
 
@@ -1695,7 +1783,7 @@ CompressedInstanceData::CompressedInstanceData(const glm::mat4 &t,
   material_and_lod = std::bit_cast<float>(meta);
 
   this->bounding_radius = bounding_radius;
-  padding0 = 0.0f;
+  padding0 = std::bit_cast<float>(~0u); // sentinel: not skinned
   padding1 = 0.0f;
 }
 
@@ -1889,8 +1977,6 @@ void SceneRenderer::skinning_pass(VkCommandBuffer cmd) {
   vkCmdPipelineBarrier2(cmd, &post_dep);
 
   pending_skin_jobs.clear();
-  frame_skin_dst_vertex   = 0;
-  frame_palette_mat_count = 0;
 }
 
 } // namespace dy

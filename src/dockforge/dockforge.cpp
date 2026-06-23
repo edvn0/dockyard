@@ -18,6 +18,7 @@
 #include <dockyard/context.hpp>
 #include <dockyard/script_engine.hpp>
 #include <dockyard/imgui_renderer.hpp>
+#include <dockyard/animation.hpp>
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/scene_renderer.hpp>
@@ -294,6 +295,31 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     mc.handle = *loaded_sponza;
     mc.source_path = VFSPath::create(sponza_path);
     sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
+  }
+
+  {
+    constexpr std::string_view fox_path = "meshes://fox/Fox.glb";
+    if (auto loaded_fox = asset_loader->load_mesh(VFSPath::create(fox_path))) {
+      const auto *asset = renderer->get_mesh(*loaded_fox);
+      if (asset && !asset->skeletons.empty() && !asset->animations.empty()) {
+        auto fox = active_scene->make("Fox");
+        auto &mc = fox.emplace<Components::Mesh>();
+        mc.handle = *loaded_fox;
+        mc.source_path = VFSPath::create(fox_path);
+
+        // Fox.glb is authored in centimetres; scale to metres.
+        fox.get<Components::Transform>().mut().scale = glm::vec3{0.01f};
+
+        AnimationState anim_state{
+            .skeleton       = &asset->skeletons[0],
+            .clip           = &asset->animations[0],
+            .skeleton_index = 0,
+            .loop           = true,
+        };
+        anim_state.advance(0.0F);
+        fox.emplace<AnimationState>(std::move(anim_state));
+      }
+    }
   }
 
   editor_state.active_scene = active_scene;
@@ -1261,6 +1287,9 @@ auto Dockforge::update(float ts) -> void {
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
 
+  for (auto &&[e, anim] : active_scene->view<AnimationState>().each())
+    anim.advance(ts);
+
   update_local_to_world_matrices(active_scene->registry());
 
   /*  active_scene->registry().view<Components::MeshRequest>().each([&](auto e,
@@ -1393,12 +1422,23 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     resize_viewport(*this);
   }
 
-  auto render_group =
-      active_scene->group<Components::Transform, Components::LocalToWorld,
-                          Components::Mesh>();
+  auto render_view =
+      active_scene->view<Components::Transform, Components::LocalToWorld,
+                         Components::Mesh>(entt::exclude<AnimationState>);
 
-  for (auto &&[e, xt, ltw, m] : render_group.each()) {
+  for (auto &&[e, xt, ltw, m] : render_view.each()) {
     renderer->submit(m.handle, ltw.matrix, forward_pipeline.index(),
+                     resolve_material_slot({*active_scene, e}));
+  }
+
+  for (auto &&[e, xt, ltw, m, anim] :
+       active_scene
+           ->view<Components::Transform, Components::LocalToWorld,
+                  Components::Mesh, AnimationState>()
+           .each()) {
+    renderer->submit(m.handle, ltw.matrix,
+                     std::span<const glm::mat4>(anim.joint_palette),
+                     forward_pipeline.index(),
                      resolve_material_slot({*active_scene, e}));
   }
   auto [view, projection] = resolve_camera();
@@ -1429,7 +1469,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
 
   TracyPlot("point_lights", static_cast<int64_t>(light_count));
-  TracyPlot("mesh_entities", static_cast<int64_t>(render_group.size()));
+  TracyPlot("mesh_entities", static_cast<int64_t>(render_view.size_hint()));
 
   auto prepare_result = renderer->prepare({
       .frame_index = ctx.frame_index,

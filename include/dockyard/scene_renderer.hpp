@@ -21,6 +21,7 @@
 #include <BS_thread_pool.hpp>
 #include <deque>
 #include <glm/glm.hpp>
+#include <span>
 #include <type_traits>
 
 namespace dy {
@@ -36,6 +37,8 @@ struct GpuPushConstants {
   const DeviceAddress culled_index_remapping_buffer;
   const DeviceAddress frame_ubo;
   const DeviceAddress material_ptr;
+  const DeviceAddress skinned_vertex_buffer_ptr;
+  const DeviceAddress skinned_position_buffer_ptr;
   u32 cascade_index;
   u32 padding[3];
 };
@@ -128,6 +131,7 @@ struct FrameSubmission {
     u32 pipeline_id;
     glm::mat4 transform;
     AABB aabb;
+    u32 skinned_base = ~0u; // dst_vertex_offset in scratch; ~0u = not skinned
   };
 
   std::vector<Entry> entries;
@@ -362,10 +366,12 @@ struct SceneRenderer {
   usize skinned_scratch_capacity  = 0; // in Vertex units
   usize joint_palette_capacity    = 0; // in mat4 units
 
-  // Skin jobs queued this frame; cleared at the start of each prepare().
+  // Skin jobs queued this frame; cleared by skinning_pass().
   std::vector<SkinJob> pending_skin_jobs;
-  // Per-frame accumulators; reset in prepare() alongside pending_skin_jobs.
-  u32 frame_skin_dst_vertex  = 0; // next free offset in scratch (Vertex units)
+  // CPU-side joint palette accumulator; uploaded to GPU in prepare().
+  std::vector<glm::mat4> pending_palette_data;
+  // Per-frame accumulators; reset in prepare().
+  u32 frame_skin_dst_vertex   = 0; // next free offset in scratch (Vertex units)
   u32 frame_palette_mat_count = 0; // next free slot in joint_palette_buffers (mat4 units)
 
   Cache<StringMap<TextureHandle>> texture_cache{};
@@ -413,6 +419,9 @@ struct SceneRenderer {
 
   void submit(MeshAssetHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
               u32 material_id = 0U);
+  void submit(MeshAssetHandle handle, const glm::mat4 &,
+              std::span<const glm::mat4> joint_palette,
+              u32 pipeline_id = 0U, u32 material_id = 0U);
 
   void update_csm(const glm::mat4 &view, const glm::mat4 &proj,
                   float camera_near, float camera_far);

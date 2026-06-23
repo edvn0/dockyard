@@ -130,6 +130,8 @@ struct GpuPushConstants
     ImmutablePtr<uint, AddressSpace.Device> culled_index_remapping_buffer;
     Ptr<FrameUBO, Access.Read, AddressSpace.Device> frame_ubo;
     ImmutablePtr<GPUMaterial, AddressSpace.Device> material_buffer_ptr;
+    ImmutablePtr<Vertex, AddressSpace.Device> skinned_vertex_buffer_ptr;
+    ImmutablePtr<PositionOnlyVertex, AddressSpace.Device> skinned_position_buffer_ptr;
     uint cascade_index;
     uint _pad[3];
 };
@@ -140,6 +142,8 @@ struct UnpackedInstanceData
     uint material_id;
     float bounding_radius;
     uint lod_count;
+    uint skinned_base;         // dst_vertex_offset in per-frame scratch; 0xFFFFFFFF = not skinned
+    uint source_vertex_offset; // lod_group.vertex_offset in the static vertex buffer
 };
 UnpackedInstanceData unpack_instance_data(InstanceData compressed)
 {
@@ -154,6 +158,8 @@ UnpackedInstanceData unpack_instance_data(InstanceData compressed)
     unpacked.material_id = meta_bits & 0xFFFFu;
     unpacked.lod_count = (meta_bits >> 16u) & 0x7u;
     unpacked.bounding_radius = compressed.bounding_radius;
+    unpacked.skinned_base = asuint(compressed.padding0);
+    unpacked.source_vertex_offset = asuint(compressed.padding1);
 
     return unpacked;
 }

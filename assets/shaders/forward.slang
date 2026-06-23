@@ -30,14 +30,18 @@ V2F vertexMain(uint vertex_id: SV_VulkanVertexID,
 
     let culled_remap_indices = pc.culled_index_remapping_buffer;
     let instance_data = pc.instance_buffer_ptr;
-    let vertices = pc.vertex_buffer_ptr;
 
     uint global_id = culled_remap_indices[NonUniformResourceIndex(inst_base)];
     var instance = unpack_instance_data(instance_data[global_id]);
     float4x4 model_matrix = instance.transform;
     float3x3 normal_matrix = (float3x3)model_matrix;
 
-    Vertex v = vertices[vertex_id];
+    Vertex v;
+    if (instance.skinned_base != 0xFFFFFFFFu) {
+        v = pc.skinned_vertex_buffer_ptr[instance.skinned_base + vertex_id - instance.source_vertex_offset];
+    } else {
+        v = pc.vertex_buffer_ptr[vertex_id];
+    }
 
     uint packed_data = culled_remap_indices[inst_base];
     uint true_instance_id = packed_data & 0x0FFFFFFF;
