@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <dockyard/animation.hpp>
 #include <dockyard/binary_stream.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/types.hpp>
@@ -38,13 +39,18 @@ template <> struct ComponentConfig<dy::Components::DebugFrustum> {
   static constexpr bool serializable = true;
   static constexpr bool ui_inspectable = true;
 };
+template <> struct ComponentConfig<dy::AnimationState> {
+  static constexpr bool serializable = false;
+  static constexpr bool ui_inspectable = true;
+};
 
 using MasterComponentList =
     std::tuple<dy::Components::Tag, dy::Components::Transform,
                dy::Components::Camera, dy::Components::LocalToWorld,
                dy::Components::MeshRequest, dy::Components::ParentOf,
                dy::Components::Mesh, dy::Components::MaterialOverride,
-               dy::Components::DebugFrustum, dy::Components::PointLight>;
+               dy::Components::DebugFrustum, dy::Components::PointLight,
+               dy::AnimationState>;
 
 template <typename Tuple, typename Fn> constexpr void for_each_type(Fn &&fn) {
   []<std::size_t... Is>(auto &&f, std::index_sequence<Is...>) {
@@ -98,6 +104,20 @@ template <> struct ComponentSerializer<Components::LocalToWorld> {
 template <> struct ComponentSerializer<Components::PointLight> {
   static void save(auto &archive, const Components::PointLight &);
   static void load(auto &archive, Components::PointLight &);
+};
+
+// gpu_slot is a renderer-owned runtime handle — never round-trip it through
+// serialization. Deserialized instances always start with invalid_material so
+// flush_material_overrides() allocates a fresh slot on the first frame.
+template <> struct ComponentSerializer<Components::MaterialOverride> {
+  static void save(auto &archive, const Components::MaterialOverride &m) {
+    archive.writer.write(&m.material, sizeof(m.material));
+  }
+  static void load(auto &archive, Components::MaterialOverride &m) {
+    archive.reader.read(&m.material, sizeof(m.material));
+    m.gpu_slot = Components::MaterialOverride::invalid_material;
+    m.dirty = true;
+  }
 };
 
 } // namespace dy

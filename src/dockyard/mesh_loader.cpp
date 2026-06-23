@@ -563,11 +563,39 @@ constexpr u32 fb_emissive = 4u;
   const bool has_uvs =
       prim.findAttribute("TEXCOORD_0") != prim.attributes.end();
 
+  if (!has_normals) {
+    // Generate smooth normals by accumulating face normals per vertex.
+    std::vector<glm::vec3> accum(vtx_count, glm::vec3{0.f});
+    for (usize t = 0; t + 2 < out.indices.size(); t += 3) {
+      const u32 i0 = out.indices[t], i1 = out.indices[t + 1],
+                i2 = out.indices[t + 2];
+      const glm::vec3 p0{out.vertices[i0].position[0],
+                         out.vertices[i0].position[1],
+                         out.vertices[i0].position[2]};
+      const glm::vec3 p1{out.vertices[i1].position[0],
+                         out.vertices[i1].position[1],
+                         out.vertices[i1].position[2]};
+      const glm::vec3 p2{out.vertices[i2].position[0],
+                         out.vertices[i2].position[1],
+                         out.vertices[i2].position[2]};
+      const glm::vec3 face_n = glm::cross(p1 - p0, p2 - p0);
+      accum[i0] += face_n;
+      accum[i1] += face_n;
+      accum[i2] += face_n;
+    }
+    for (usize i = 0; i < vtx_count; ++i) {
+      const glm::vec3 n =
+          glm::length(accum[i]) > 0.f ? glm::normalize(accum[i])
+                                      : glm::vec3{0.f, 1.f, 0.f};
+      out.vertices[i].normal = glm::packSnorm4x8(glm::vec4(n, 0.f));
+    }
+  }
+
   if (!has_tangents) {
-    if (!has_normals || !has_uvs)
-      return std::unexpected(
-          "Cannot generate tangents: missing NORMAL or TEXCOORD_0");
-    if (auto res = mikkt::generate_mikktspace_tangents(out); !res)
+    if (!has_uvs)
+      warn("extract_primitive: no TANGENT and no TEXCOORD_0 — tangents will "
+           "be zero (normal mapping unavailable for this primitive)");
+    else if (auto res = mikkt::generate_mikktspace_tangents(out); !res)
       return std::unexpected(res.error());
   }
 
@@ -884,6 +912,10 @@ void flatten_nodes(
                            : *node.meshIndex;
       const auto &lod_groups = out.meshes[mi];
       const auto &gltf_mesh = asset.meshes[mi];
+      if (lod_groups.empty())
+        warn("flatten_nodes: node '{}' references mesh {} but it has no "
+             "uploaded lod_groups — all primitives failed extraction",
+             desc.name, mi);
       desc.primitives.reserve(lod_groups.size());
 
       for (usize pi = 0; pi < lod_groups.size(); ++pi) {
@@ -1632,6 +1664,8 @@ upload_geometry(const fastgltf::Asset &asset,
                                         : w.mesh_idx;
 
       if (!res) {
+        warn("upload_geometry: skipping primitive (mesh={}, prim={}): {}",
+             w.mesh_idx, w.prim_idx, res.error());
         if (uploads_vertices)
           result.submesh_aabbs[owning_mesh_idx].push_back(AABB::create());
         continue;

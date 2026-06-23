@@ -11,18 +11,18 @@
 #include <dockforge/editor_utils.hpp>
 #include <dockforge/matrix_cache.hpp>
 
+#include <dockyard/animation.hpp>
 #include <dockyard/asset_loader.hpp>
 #include <dockyard/binary_stream.hpp>
 #include <dockyard/buffer.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/context.hpp>
-#include <dockyard/script_engine.hpp>
 #include <dockyard/imgui_renderer.hpp>
-#include <dockyard/animation.hpp>
 #include <dockyard/mesh_loader.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/scene_serialiser.hpp>
+#include <dockyard/script_engine.hpp>
 #include <dockyard/vfs.hpp>
 
 #include <GLFW/glfw3.h>
@@ -127,6 +127,8 @@ struct AssetLoader : dy::IAssetLoader {
   }
 
   auto notify_material_overrides_added() -> void override {
+    if (renderer.override_pool.free_slots.empty() &&
+        renderer.override_pool.next >= renderer.override_pool.capacity)
       renderer.override_pool.needs_grow = true;
   }
 };
@@ -311,10 +313,10 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
         fox.get<Components::Transform>().mut().scale = glm::vec3{0.01f};
 
         AnimationState anim_state{
-            .skeleton       = &asset->skeletons[0],
-            .clip           = &asset->animations[0],
+            .skeleton = &asset->skeletons[0],
+            .clip = &asset->animations[0],
             .skeleton_index = 0,
-            .loop           = true,
+            .loop = true,
         };
         anim_state.advance(0.0F);
         fox.emplace<AnimationState>(std::move(anim_state));
@@ -1213,7 +1215,8 @@ auto Dockforge::resume() -> void {
 }
 
 auto Dockforge::step() -> void {
-  if (!sim_state.in<sim::S::Paused>() || !script_engine || !script_engine->loaded())
+  if (!sim_state.in<sim::S::Paused>() || !script_engine ||
+      !script_engine->loaded())
     return;
   script_engine->update(active_scene, step_dt);
 }
@@ -1259,6 +1262,34 @@ auto Dockforge::stop() -> void {
     if (script_engine && script_engine->loaded())
       script_engine->destroy(active_scene);
 
+    // Free every runtime-allocated override slot back into the pool.
+    if (runtime_scene) {
+      auto view =
+          runtime_scene->registry().view<Components::MaterialOverride>();
+      for (auto &&[e, ov] : view.each()) {
+        if (ov.gpu_slot != Components::MaterialOverride::invalid_material)
+          renderer->override_pool.free(ov.gpu_slot);
+      }
+    }
+
+    // Drop all free-list state and reset the sequential counter. The pool may
+    // have grown and relocated its base during play; editor entities could hold
+    // stale slot indices. Resetting to zero lets flush_material_overrides()
+    // re-allocate clean slots from the current pool base on the first
+    // post-stop frame.
+    renderer->override_pool.next = 0;
+    renderer->override_pool.free_slots.clear();
+    renderer->override_pool.needs_grow = false;
+
+    // Invalidate editor entity slots so they are re-acquired next frame.
+    {
+      auto view = editor_scene->registry().view<Components::MaterialOverride>();
+      for (auto &&[e, ov] : view.each()) {
+        ov.gpu_slot = Components::MaterialOverride::invalid_material;
+        ov.dirty = true;
+      }
+    }
+
     TracyMessage("Game stopped", 12);
     active_scene = editor_scene.get();
     editor_state.active_scene = active_scene;
@@ -1272,7 +1303,8 @@ auto Dockforge::stop() -> void {
 
 auto Dockforge::update(float ts) -> void {
   ZoneScopedNC("Dockforge::update", 0x00BFFF);
-  if (!sim_state.in<sim::S::Editing>() && script_engine && script_engine->loaded()) {
+  if (!sim_state.in<sim::S::Editing>() && script_engine &&
+      script_engine->loaded()) {
     if (script_engine->poll_reload()) {
       script_engine->destroy(active_scene);
       script_engine->pre_init(*asset_loader);
@@ -1332,7 +1364,9 @@ void Dockforge::flush_material_overrides() {
         warn("MaterialOverridePool full - override skipped this frame");
       }
     }
-    if (override_slot.dirty && override_slot.gpu_slot != Components::MaterialOverride::invalid_material) {
+    if (override_slot.dirty &&
+        override_slot.gpu_slot !=
+            Components::MaterialOverride::invalid_material) {
       renderer->geometry_pool->get_materials_mut(override_slot.gpu_slot, 1)[0] =
           override_slot.material;
       renderer->geometry_pool->flush_material(override_slot.gpu_slot);
@@ -1345,7 +1379,8 @@ void Dockforge::patch_material_override_slots(u32 delta) {
   ZoneScopedNC("Dockforge::patch_material_override_slots", 0xFF8C00);
   auto view = active_scene->registry().view<Components::MaterialOverride>();
   for (auto &&[e, override_slot] : view.each()) {
-    if (override_slot.gpu_slot != Components::MaterialOverride::invalid_material) {
+    if (override_slot.gpu_slot !=
+        Components::MaterialOverride::invalid_material) {
       override_slot.gpu_slot += delta;
       override_slot.dirty = true;
     }
@@ -1436,10 +1471,9 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
            ->view<Components::Transform, Components::LocalToWorld,
                   Components::Mesh, AnimationState>()
            .each()) {
-    renderer->submit(m.handle, ltw.matrix,
-                     std::span<const glm::mat4>(anim.joint_palette),
-                     forward_pipeline.index(),
-                     resolve_material_slot({*active_scene, e}));
+    renderer->submit(
+        m.handle, ltw.matrix, std::span<const glm::mat4>(anim.joint_palette),
+        forward_pipeline.index(), resolve_material_slot({*active_scene, e}));
   }
   auto [view, projection] = resolve_camera();
   const auto camera_moved = view != shadow_map_state.last_view_matrix;
@@ -1830,7 +1864,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         VkImageMemoryBarrier2{
             .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
             .pNext = nullptr,
-            .srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+            .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             .srcAccessMask = 0,
             .dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             .dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
