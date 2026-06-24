@@ -311,8 +311,6 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
       forward_pass(RenderPassType::Forward, ctx.allocator, *this) {
   ZoneScopedNC("SceneRenderer::SceneRenderer", 0x4169E1);
 
-
-
   constexpr auto vertex_count = 1'000'000;
   constexpr auto index_count = 10'000'000;
   constexpr auto material_count = 500;
@@ -366,14 +364,12 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
 }
 
 auto SceneRenderer::initialise_settings() -> void {
-  settings_registry.add("Skybox", [this] {
-    ImGui::SliderFloat("LOD", &skybox_lod, 0.0F, 8.0F);
-  });
+  settings_registry.add(
+      "Skybox", [this] { ImGui::SliderFloat("LOD", &skybox_lod, 0.0F, 8.0F); });
 }
 
 auto SceneRenderer::initialise_bindless() -> void {
   ZoneScopedNC("SceneRenderer::initialise_bindless", 0x4169E1);
-
 
   {
     ZoneScopedNC("Sampler Creation", 0x708090);
@@ -462,26 +458,28 @@ auto SceneRenderer::initialise_bindless() -> void {
             .create(SamplerEntry{.sampler = shadow_comparison_sampler_vk})
             .index();
 
-      const VkSamplerCreateInfo cube_sampler_ci{
-    .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-    .magFilter = VK_FILTER_LINEAR,
-    .minFilter = VK_FILTER_LINEAR,
-    .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
-    .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-    .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-    .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-    .mipLodBias = 0.0f,
-    .anisotropyEnable = VK_FALSE,
-    .compareEnable = VK_FALSE,
-    .minLod = 0.0f,
-    .maxLod = VK_LOD_CLAMP_NONE,
-    .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
-    .unnormalizedCoordinates = VK_FALSE,
-};
+    const VkSamplerCreateInfo cube_sampler_ci{
+        .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .magFilter = VK_FILTER_LINEAR,
+        .minFilter = VK_FILTER_LINEAR,
+        .mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        .mipLodBias = 0.0f,
+        .anisotropyEnable = VK_FALSE,
+        .compareEnable = VK_FALSE,
+        .minLod = 0.0f,
+        .maxLod = VK_LOD_CLAMP_NONE,
+        .borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK,
+        .unnormalizedCoordinates = VK_FALSE,
+    };
 
-VkSampler cube_sampler_vk{};
-vk::check(vkCreateSampler(ctx.device, &cube_sampler_ci, nullptr, &cube_sampler_vk));
-cube_sampler_handle = samplers.create(SamplerEntry{.sampler = cube_sampler_vk});
+    VkSampler cube_sampler_vk{};
+    vk::check(vkCreateSampler(ctx.device, &cube_sampler_ci, nullptr,
+                              &cube_sampler_vk));
+    cube_sampler_handle =
+        samplers.create(SamplerEntry{.sampler = cube_sampler_vk});
   }
 
   {
@@ -537,6 +535,21 @@ cube_sampler_handle = samplers.create(SamplerEntry{.sampler = cube_sampler_vk});
         std::abort();
       }
       skybox_pipeline = *result;
+    }
+
+    {
+      ZoneScopedNC("Buffer reset pipeline", 0x9370DB);
+      auto result = pipeline_registry->create_compute({
+          .shader_path = VFSPath::create("shaders://buffer_reset.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .layout = VK_NULL_HANDLE,
+      });
+      if (!result) {
+        error("buffer reset initialization failed: {}",
+              result.error());
+        std::abort();
+      }
+      buffer_reset_pipeline = *result;
     }
 
     {
@@ -762,7 +775,7 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
     if (node.skin_index >= 0 && !joint_palette.empty()) {
       palette_offset = frame_palette_mat_count;
       pending_palette_data.insert(pending_palette_data.end(),
-                                   joint_palette.begin(), joint_palette.end());
+                                  joint_palette.begin(), joint_palette.end());
       frame_palette_mat_count += static_cast<u32>(joint_palette.size());
     }
 
@@ -777,23 +790,24 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
       if (prim.lod_group.is_skinned() && palette_offset != ~0u) {
         skinned_base = frame_skin_dst_vertex;
         pending_skin_jobs.push_back({
-            .src_vertex_offset    = static_cast<u32>(prim.lod_group.vertex_offset),
-            .skin_vertex_offset   = static_cast<u32>(prim.lod_group.skin_vertex_offset),
-            .dst_vertex_offset    = frame_skin_dst_vertex,
-            .vertex_count         = prim.lod_group.vertex_count,
+            .src_vertex_offset = static_cast<u32>(prim.lod_group.vertex_offset),
+            .skin_vertex_offset =
+                static_cast<u32>(prim.lod_group.skin_vertex_offset),
+            .dst_vertex_offset = frame_skin_dst_vertex,
+            .vertex_count = prim.lod_group.vertex_count,
             .joint_palette_offset = palette_offset,
         });
         frame_skin_dst_vertex += prim.lod_group.vertex_count;
       }
 
       frame_submission.entries.push_back({
-          .sort_key             = key,
+          .sort_key = key,
           .mesh_prim_flat_index = prim.flat_index,
-          .material_id          = resolved_mat,
-          .pipeline_id          = pipeline_id,
-          .transform            = node_t,
-          .aabb                 = prim.aabb,
-          .skinned_base         = skinned_base,
+          .material_id = resolved_mat,
+          .pipeline_id = pipeline_id,
+          .transform = node_t,
+          .aabb = prim.aabb,
+          .skinned_base = skinned_base,
       });
     }
   }
@@ -874,7 +888,7 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
 
   // Reset skinning accumulators; upload any palette data queued by submit().
   {
-    const auto total_skin_verts   = std::exchange(frame_skin_dst_vertex, 0u);
+    const auto total_skin_verts = std::exchange(frame_skin_dst_vertex, 0u);
     const auto total_palette_mats = std::exchange(frame_palette_mat_count, 0u);
     if (total_skin_verts > 0)
       ensure_skinned_scratch(total_skin_verts);
@@ -917,8 +931,9 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
       };
       if (e.skinned_base != ~0u) {
         global_instance_data[i].padding0 = std::bit_cast<float>(e.skinned_base);
-        global_instance_data[i].padding1 = std::bit_cast<float>(
-            static_cast<u32>(flat_prim_table[e.mesh_prim_flat_index].lod_group->vertex_offset));
+        global_instance_data[i]
+            .padding1 = std::bit_cast<float>(static_cast<u32>(
+            flat_prim_table[e.mesh_prim_flat_index].lod_group->vertex_offset));
       }
     }
     global_instance_buffer[current_frame_index]->upload(global_instance_data);
@@ -1051,14 +1066,10 @@ void SceneRenderer::depth_frustum_culling_pass(VkCommandBuffer cmd) {
       forward_pass.batches.empty())
     return;
   auto &depth_ws = depth_prepass.frame_workspaces.at(current_frame_index);
+  reset_indirect_counts(cmd, forward_pass);
 
-  /* {
-     ZoneScopedNC("Clear Indirect Buffer", 0x708090);
-     depth_ws.indirect_buffer->for_each_with_flush<PaddedDrawCommand>(
-         [](PaddedDrawCommand &v) { v.instance_count = 0; });
-   } */
 
-  VkBufferMemoryBarrier2 clear_barriers[1] = {
+  std::array<VkBufferMemoryBarrier2, 1> clear_barriers = {
       VkBufferMemoryBarrier2{
           .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
           .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is
@@ -1075,7 +1086,7 @@ void SceneRenderer::depth_frustum_culling_pass(VkCommandBuffer cmd) {
   VkDependencyInfo clear_dep{
       .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .bufferMemoryBarrierCount = 1U,
-      .pBufferMemoryBarriers = clear_barriers,
+      .pBufferMemoryBarriers = clear_barriers.data(),
   };
   vkCmdPipelineBarrier2(cmd, &clear_dep);
 
@@ -1338,11 +1349,7 @@ void SceneRenderer::forward_occlusion_culling_pass(
   if (geometry_count == 0)
     return;
 
-  /*  {
-     ZoneScopedNC("Clear Forward Indirect Buffer", 0x708090);
-     forward_ws.indirect_buffer->for_each_with_flush<PaddedDrawCommand>(
-         [](PaddedDrawCommand &v) { v.instance_count = 0; });
-   } */
+  reset_indirect_counts(cmd, forward_pass);
 
   VkBufferMemoryBarrier2 clear_barrier{
       .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
@@ -1452,12 +1459,12 @@ void SceneRenderer::skybox_pass(VkCommandBuffer cmd) {
   const auto inv_view_projection_no_translation = glm::inverse(
       frame_data.projection * glm::mat4(glm::mat3(frame_data.view)));
 
-const SkyboxPushConstants push{
-    .env_map_index = ibl_probe.prefiltered.index(),
-    .sampler_index = cube_sampler_handle.index(),
-    .inv_view_proj = inv_view_projection_no_translation,
-    .skybox_lod    = skybox_lod,
-};
+  const SkyboxPushConstants push{
+      .env_map_index = ibl_probe.prefiltered.index(),
+      .sampler_index = cube_sampler_handle.index(),
+      .inv_view_proj = inv_view_projection_no_translation,
+      .skybox_lod = skybox_lod,
+  };
 
   vkCmdPushConstants(cmd, entry.layout,
                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -1870,9 +1877,35 @@ auto SceneRenderer::process_pending_hdr_map() -> void {
   bindless.mark_dirty();
 }
 
-// ---------------------------------------------------------------------------
-// GPU skinning compute pass
-// ---------------------------------------------------------------------------
+void SceneRenderer::reset_indirect_counts(VkCommandBuffer cmd, RenderPass &pass) {
+  ZoneScopedNC("SceneRenderer::reset_indirect_counts", 0x708090);
+  auto &ws = pass.frame_workspaces.at(current_frame_index);
+  const u32 command_count = std::accumulate(
+      pass.batches.begin(), pass.batches.end(), 0u,
+      [](u32 acc, const auto &b) { return acc + b.max_command_count; });
+  if (command_count == 0)
+    return;
+
+  reset_field<PaddedDrawCommand>(
+      cmd, *ws.indirect_buffer, command_count,
+      offsetof(PaddedDrawCommand, instance_count));
+
+  VkBufferMemoryBarrier2 reset_barrier{
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+      .buffer = ws.indirect_buffer->get_buffer(),
+      .size = VK_WHOLE_SIZE,
+  };
+  VkDependencyInfo reset_dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1U,
+      .pBufferMemoryBarriers = &reset_barrier,
+  };
+  vkCmdPipelineBarrier2(cmd, &reset_dep);
+}
 
 void SceneRenderer::ensure_skinned_scratch(usize vertex_count) {
   if (skinned_scratch_capacity >= vertex_count)
@@ -1880,10 +1913,9 @@ void SceneRenderer::ensure_skinned_scratch(usize vertex_count) {
   const usize new_cap =
       std::max(vertex_count, skinned_scratch_capacity * 3 / 2 + 1);
   for (u32 i = 0; i < frames_in_flight; ++i) {
-    skinned_vertex_scratch[i] =
-        Buffer::create(ctx.allocator, "skinned_vertex_scratch",
-                       new_cap * sizeof(Vertex),
-                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    skinned_vertex_scratch[i] = Buffer::create(
+        ctx.allocator, "skinned_vertex_scratch", new_cap * sizeof(Vertex),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     skinned_position_scratch[i] =
         Buffer::create(ctx.allocator, "skinned_position_scratch",
                        new_cap * sizeof(PositionOnlyVertex),
@@ -1898,8 +1930,8 @@ void SceneRenderer::ensure_joint_palette_capacity(usize mat_count) {
     auto &buf = joint_palette_buffers[i];
     if (buf && buf->size() >= byte_size)
       continue;
-    buf = Buffer::create(ctx.allocator, "joint_palette",
-                         byte_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    buf = Buffer::create(ctx.allocator, "joint_palette", byte_size,
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   }
   joint_palette_capacity = std::max(joint_palette_capacity, mat_count);
 }
@@ -1915,66 +1947,68 @@ void SceneRenderer::skinning_pass(VkCommandBuffer cmd) {
 
   // Barrier: CPU palette upload → compute read
   VkBufferMemoryBarrier2 palette_bar{
-      .sType       = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-      .srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT,
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
       .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-      .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-      .buffer        = joint_palette_buffers[fi]->get_buffer(),
-      .size          = VK_WHOLE_SIZE,
+      .buffer = joint_palette_buffers[fi]->get_buffer(),
+      .size = VK_WHOLE_SIZE,
   };
   VkDependencyInfo pre_dep{
-      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .bufferMemoryBarrierCount = 1U,
-      .pBufferMemoryBarriers    = &palette_bar,
+      .pBufferMemoryBarriers = &palette_bar,
   };
   vkCmdPipelineBarrier2(cmd, &pre_dep);
 
   const auto &entry = pipeline_registry->get_entry(skinning_pipeline);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
-                          0U, 1U, &bindless.set, 0U, nullptr);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout, 0U,
+                          1U, &bindless.set, 0U, nullptr);
 
-  const auto src_v_addr  = geometry_pool->vertex_buffer->get_device_address();
-  const auto src_p_addr  = geometry_pool->position_only_vertex_buffer->get_device_address();
-  const auto skin_addr   = geometry_pool->skin_vertex_buffer
-                               ? geometry_pool->skin_vertex_buffer->get_device_address()
-                               : DeviceAddress{};
-  const auto pal_addr    = joint_palette_buffers[fi]->get_device_address();
-  const auto dst_v_addr  = skinned_vertex_scratch[fi]->get_device_address();
-  const auto dst_p_addr  = skinned_position_scratch[fi]->get_device_address();
+  const auto src_v_addr = geometry_pool->vertex_buffer->get_device_address();
+  const auto src_p_addr =
+      geometry_pool->position_only_vertex_buffer->get_device_address();
+  const auto skin_addr =
+      geometry_pool->skin_vertex_buffer
+          ? geometry_pool->skin_vertex_buffer->get_device_address()
+          : DeviceAddress{};
+  const auto pal_addr = joint_palette_buffers[fi]->get_device_address();
+  const auto dst_v_addr = skinned_vertex_scratch[fi]->get_device_address();
+  const auto dst_p_addr = skinned_position_scratch[fi]->get_device_address();
 
   for (const auto &job : pending_skin_jobs) {
     SkinningPushConstants pc{
-        .src_vertices         = src_v_addr,
-        .src_positions        = src_p_addr,
-        .skin_attrs           = skin_addr,
-        .joint_palette        = pal_addr,
-        .dst_vertices         = dst_v_addr,
-        .dst_positions        = dst_p_addr,
-        .src_vertex_offset    = job.src_vertex_offset,
-        .skin_vertex_offset   = job.skin_vertex_offset,
-        .dst_vertex_offset    = job.dst_vertex_offset,
-        .vertex_count         = job.vertex_count,
+        .src_vertices = src_v_addr,
+        .src_positions = src_p_addr,
+        .skin_attrs = skin_addr,
+        .joint_palette = pal_addr,
+        .dst_vertices = dst_v_addr,
+        .dst_positions = dst_p_addr,
+        .src_vertex_offset = job.src_vertex_offset,
+        .skin_vertex_offset = job.skin_vertex_offset,
+        .dst_vertex_offset = job.dst_vertex_offset,
+        .vertex_count = job.vertex_count,
         .joint_palette_offset = job.joint_palette_offset,
     };
-    vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                       0U, sizeof(pc), &pc);
+    vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                       sizeof(pc), &pc);
     vkCmdDispatch(cmd, (job.vertex_count + 63U) / 64U, 1U, 1U);
   }
 
   // Barrier: compute write → vertex shader read
   VkMemoryBarrier2 post_bar{
-      .sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
-      .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask  = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
       .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
   };
   VkDependencyInfo post_dep{
-      .sType                = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .memoryBarrierCount   = 1U,
-      .pMemoryBarriers      = &post_bar,
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .memoryBarrierCount = 1U,
+      .pMemoryBarriers = &post_bar,
   };
   vkCmdPipelineBarrier2(cmd, &post_dep);
 

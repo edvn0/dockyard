@@ -61,6 +61,14 @@ struct CullingPushConstants {
   u32 padding[3];
 };
 
+struct ResetPushConstants {
+    DeviceAddress base;
+    u32 element_count;
+    u32 stride_in_u32;
+    u32 offset_in_u32;
+    u32 reset_value;
+};
+
 struct OcclusionCullingPushConstants {
   DeviceAddress instance_buffer;
   DeviceAddress frame_data;
@@ -354,6 +362,7 @@ struct SceneRenderer {
   PipelineHandle forward_occlusion_pipeline;
   PipelineHandle hiz_downsample_pipeline;
   PipelineHandle skinning_pipeline;
+  PipelineHandle buffer_reset_pipeline;
 
   // Per-frame buffers for GPU skinning.
   // joint_palette_buffers holds all joint matrices for all skinned entities,
@@ -445,6 +454,29 @@ struct SceneRenderer {
                                              TextureHandle output_pyramid);
   void forward_occlusion_culling_pass(VkCommandBuffer,
                                       TextureHandle hiz_target);
+  void reset_indirect_counts(VkCommandBuffer , RenderPass &);
+  template <typename T>
+  void reset_field(VkCommandBuffer cmd, Buffer &buf,
+                                  u32 count, u32 field_offset, u32 value = 0U) {
+    static_assert(std::is_standard_layout_v<T>);
+    static_assert(sizeof(T) % 4 == 0, "stride must be u32-aligned");
+
+    const auto &entry = pipeline_registry->get_entry(buffer_reset_pipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
+                            0U, 1U, &bindless.set, 0U, nullptr);
+
+    const ResetPushConstants pc{
+        .base = buf.get_device_address(),
+        .element_count = count,
+        .stride_in_u32 = sizeof(T) / 4,
+        .offset_in_u32 = field_offset / 4,
+        .reset_value = value,
+    };
+    vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                       sizeof(pc), &pc);
+    vkCmdDispatch(cmd, (count + 63U) / 64U, 1U, 1U);
+  }
 
   auto register_gltf(MeshAsset &&asset) -> MeshAssetHandle;
   auto register_external_view(VkImageView view, VkImageViewType type)
