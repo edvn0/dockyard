@@ -1,5 +1,6 @@
 #pragma once
 
+#include <dockyard/log.hpp>
 #include <dockyard/mesh.hpp>
 #include <dockyard/pipeline_builder.hpp>
 
@@ -53,8 +54,23 @@ public:
   auto emplace_or_replace(Args &&...args) -> decltype(auto) {
     return reg.emplace_or_replace<T>(entity, std::forward<Args>(args)...);
   }
-  template <typename T> auto get() -> decltype(auto) {
-    return reg.get<T>(entity);
+  template <typename T> [[nodiscard]] auto get() -> T & {
+    T *ptr = reg.try_get<T>(entity);
+    if (ptr == nullptr) [[unlikely]] {
+      error("Entity::get<{}>: entity {:x} does not have this component",
+            typeid(T).name(), static_cast<u32>(entity));
+      std::abort();
+    }
+    return *ptr;
+  }
+  template <typename T> [[nodiscard]] auto get() const -> const T & {
+    const T *ptr = reg.try_get<T>(entity);
+    if (ptr == nullptr) [[unlikely]] {
+      error("Entity::get<{}>: entity {:x} does not have this component",
+            typeid(T).name(), static_cast<u32>(entity));
+      std::abort();
+    }
+    return *ptr;
   }
   template <typename T> auto try_get() -> T * { return reg.try_get<T>(entity); }
   template <typename T> auto try_get() const -> const T * {

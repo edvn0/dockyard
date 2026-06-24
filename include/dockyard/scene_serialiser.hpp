@@ -123,6 +123,20 @@ public:
       }
     });
   }
+
+  // Call after deserialize() once the asset registry is ready.
+  // Resolves renderer-owned pointers and handles for all components that
+  // declared ComponentFixup<T>::needs_fixup = true.
+  static void post_load_fixup(Scene &scene, const FixupContext &ctx) {
+    for_each_type<MasterComponentList>([&]<typename Component>() {
+      if constexpr (ComponentFixup<Component>::needs_fixup) {
+        auto view = scene.registry().view<Component>();
+        for (auto [entity, comp] : view.each()) {
+          ComponentFixup<Component>::fixup(scene.registry(), entity, comp, ctx);
+        }
+      }
+    });
+  }
 };
 
 } // namespace dy

@@ -40,7 +40,7 @@ template <> struct ComponentConfig<dy::Components::DebugFrustum> {
   static constexpr bool ui_inspectable = true;
 };
 template <> struct ComponentConfig<dy::AnimationState> {
-  static constexpr bool serializable = false;
+  static constexpr bool serializable = true;
   static constexpr bool ui_inspectable = true;
 };
 
@@ -114,6 +114,36 @@ template <> struct ComponentSerializer<AnimationState> {
 template <> struct ComponentSerializer<Components::MaterialOverride> {
   static void save(auto &archive, const Components::MaterialOverride &);
   static void load(auto &archive, Components::MaterialOverride &);
+};
+
+// ---------------------------------------------------------------------------
+// Post-load fixup — resolves renderer-owned pointers/handles after deserialization.
+//
+// Components that hold raw pointers or GPU handles into renderer-owned storage
+// (e.g. AnimationState, Components::Mesh) specialize ComponentFixup and set
+// needs_fixup = true.  SceneSerializer::post_load_fixup() iterates all such
+// components and calls fixup() once assets are available.
+// ---------------------------------------------------------------------------
+
+struct FixupContext {
+  // Returns {handle, asset*} for a given VFS path; handle/asset may be null/empty if not loaded.
+  std::function<std::pair<MeshAssetHandle, const MeshAsset *>(const NullableVFSPath &)> find_mesh;
+};
+
+template <typename T> struct ComponentFixup {
+  static constexpr bool needs_fixup = false;
+};
+
+template <> struct ComponentFixup<Components::Mesh> {
+  static constexpr bool needs_fixup = true;
+  static void fixup(entt::registry &, entt::entity, Components::Mesh &,
+                    const FixupContext &);
+};
+
+template <> struct ComponentFixup<AnimationState> {
+  static constexpr bool needs_fixup = true;
+  static void fixup(entt::registry &, entt::entity, AnimationState &,
+                    const FixupContext &);
 };
 
 } // namespace dy

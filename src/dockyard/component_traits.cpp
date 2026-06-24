@@ -6,6 +6,7 @@
 #include <functional>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 namespace dy {
 namespace {
@@ -238,10 +239,74 @@ void ComponentSerializer<Components::PointLight>::load(
   archive.reader.read(&value.radius, sizeof(float));
 }
 
-void ComponentSerializer<AnimationState>::save(auto &, const AnimationState &) {
+void ComponentSerializer<AnimationState>::save(auto &archive,
+                                               const AnimationState &s) {
+  write_safe_string(archive, s.clip ? s.clip->name : s.pending_clip_name);
+  archive.writer.write(&s.skeleton_index, sizeof(i32));
+  archive.writer.write(&s.time, sizeof(f32));
+  archive.writer.write(&s.loop, sizeof(bool));
 }
 
-void ComponentSerializer<AnimationState>::load(auto &, AnimationState &) {}
+void ComponentSerializer<AnimationState>::load(auto &archive,
+                                               AnimationState &s) {
+  s.pending_clip_name = read_safe_string(archive);
+  archive.reader.read(&s.skeleton_index, sizeof(i32));
+  archive.reader.read(&s.time, sizeof(f32));
+  archive.reader.read(&s.loop, sizeof(bool));
+  s.skeleton = nullptr;
+  s.clip = nullptr;
+}
+
+void ComponentFixup<Components::Mesh>::fixup(entt::registry &,
+                                             entt::entity,
+                                             Components::Mesh &mesh,
+                                             const FixupContext &ctx) {
+  if (!ctx.find_mesh || !mesh.source_path.path)
+    return;
+  auto [handle, asset] = ctx.find_mesh(mesh.source_path);
+  if (asset != nullptr)
+    mesh.handle = handle;
+}
+
+void ComponentFixup<AnimationState>::fixup(entt::registry &reg,
+                                           entt::entity entity,
+                                           AnimationState &anim,
+                                           const FixupContext &ctx) {
+  if (!ctx.find_mesh || anim.pending_clip_name.empty())
+    return;
+
+  const auto *mesh_comp = reg.try_get<Components::Mesh>(entity);
+  if (mesh_comp == nullptr)
+    return;
+
+  auto [handle, asset] = ctx.find_mesh(mesh_comp->source_path);
+  if (asset == nullptr)
+    return;
+
+  const Skeleton *skeleton = nullptr;
+  if (anim.skeleton_index >= 0 &&
+      std::cmp_less(anim.skeleton_index ,asset->skeletons.size()))
+    skeleton = &asset->skeletons[anim.skeleton_index];
+
+  const AnimationClip *clip = nullptr;
+  for (const auto &c : asset->animations) {
+    if (c.name == anim.pending_clip_name) {
+      clip = &c;
+      break;
+    }
+  }
+  if ((clip == nullptr) && !asset->animations.empty())
+    clip = asset->animations.data();
+
+  if ((skeleton == nullptr) || (clip == nullptr))
+    return;
+
+  const f32 saved_time = anim.time;
+  const bool saved_loop = anim.loop;
+  anim = AnimationState::create(skeleton, clip, anim.skeleton_index);
+  anim.time = saved_time;
+  anim.loop = saved_loop;
+}
 
 void ComponentSerializer<Components::MaterialOverride>::save(
     auto &archive, const Components::MaterialOverride &m) {

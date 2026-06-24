@@ -1,5 +1,7 @@
 #include "dockyard/scene_serialiser.hpp"
+#include <dockyard/animation.hpp>
 #include <dockyard/binary_stream.hpp>
+#include <dockyard/mesh.hpp>
 #include <dockyard/scene.hpp>
 #include <doctest/doctest.h>
 
@@ -411,3 +413,192 @@ TEST_CASE("Scene Serialization - High Volume Stress Test") {
   }
 }
 #endif
+
+TEST_CASE("Post-load fixup") {
+  using namespace dy;
+
+  // Shared asset: one skeleton (root joint) and two named clips.
+  MeshAsset fake_asset;
+  {
+    Skeleton skel;
+    SkeletonJoint joint;
+    joint.parent = -1;
+    joint.node_index = 0;
+    joint.name = "root";
+    joint.bind_translation = glm::vec3{0.F};
+    joint.bind_rotation = glm::quat{1.F, 0.F, 0.F, 0.F};
+    joint.bind_scale = glm::vec3{1.F};
+    joint.inverse_bind = glm::mat4{1.F};
+    skel.joints.push_back(joint);
+    fake_asset.skeletons.push_back(std::move(skel));
+
+    AnimationClip walk;
+    walk.name = "Walk";
+    walk.duration = 2.0F;
+    fake_asset.animations.push_back(std::move(walk));
+
+    AnimationClip run;
+    run.name = "Run";
+    run.duration = 1.0F;
+    fake_asset.animations.push_back(std::move(run));
+  }
+
+  const NullableVFSPath mesh_path =
+      NullableVFSPath::create("meshes://character.glb");
+  const MeshAssetHandle test_handle{1, 1};
+
+  auto make_context = [&]() -> FixupContext {
+    return FixupContext{
+        .find_mesh = [&](const NullableVFSPath &path)
+            -> std::pair<MeshAssetHandle, const MeshAsset *> {
+          if (path.valid() && path.view() == mesh_path.view())
+            return {test_handle, &fake_asset};
+          return {{}, nullptr};
+        }};
+  };
+
+  SUBCASE(
+      "Given_AnimationState_When_RoundTrip_Then_ScalarFieldsSurviveAndPointersAreNull") {
+    // Given: entity with Mesh + AnimationState playing clip "Walk" at t=1.5
+    Scene original;
+    auto ent = original.registry().create();
+    original.registry().emplace<Components::Mesh>(
+        ent, Components::Mesh{.handle = {}, .source_path = mesh_path});
+    AnimationState anim = AnimationState::create(
+        &fake_asset.skeletons[0], &fake_asset.animations[0], 0);
+    anim.time = 1.5F;
+    anim.loop = false;
+    original.registry().emplace<AnimationState>(ent, std::move(anim));
+
+    // When: serialize then deserialize (no fixup yet)
+    std::vector<u8> buf;
+    {
+      MemoryWriter writer{buf};
+      SceneSerializer::serialize(original, writer);
+    }
+    Scene loaded;
+    {
+      MemoryReader reader{buf};
+      SceneSerializer::deserialize(loaded, reader);
+    }
+
+    // Then: scalar fields preserved, pointers null
+    auto view = loaded.registry().view<AnimationState>();
+    REQUIRE(view.size() == 1);
+    const auto &result = view.get<AnimationState>(view.front());
+    CHECK(result.pending_clip_name == "Walk");
+    CHECK(result.time == doctest::Approx(1.5F));
+    CHECK(result.loop == false);
+    CHECK(result.skeleton_index == 0);
+    CHECK(result.skeleton == nullptr);
+    CHECK(result.clip == nullptr);
+  }
+
+  SUBCASE(
+      "Given_AnimationStateAfterDeserialize_When_PostLoadFixup_Then_PointersResolvedByName") {
+    // Given: deserialized scene with "Run" AnimationState
+    Scene original;
+    auto ent = original.registry().create();
+    original.registry().emplace<Components::Mesh>(
+        ent, Components::Mesh{.handle = {}, .source_path = mesh_path});
+    AnimationState anim = AnimationState::create(
+        &fake_asset.skeletons[0], &fake_asset.animations[1], 0); // "Run"
+    anim.time = 0.5F;
+    anim.loop = true;
+    original.registry().emplace<AnimationState>(ent, std::move(anim));
+
+    std::vector<u8> buf;
+    {
+      MemoryWriter writer{buf};
+      SceneSerializer::serialize(original, writer);
+    }
+    Scene loaded;
+    {
+      MemoryReader reader{buf};
+      SceneSerializer::deserialize(loaded, reader);
+    }
+
+    // When
+    SceneSerializer::post_load_fixup(loaded, make_context());
+
+    // Then: pointers point into fake_asset, scalars preserved
+    auto view = loaded.registry().view<AnimationState>();
+    REQUIRE(view.size() == 1);
+    const auto &result = view.get<AnimationState>(view.front());
+    CHECK(result.skeleton == &fake_asset.skeletons[0]);
+    REQUIRE(result.clip != nullptr);
+    CHECK(result.clip->name == "Run");
+    CHECK(result.time == doctest::Approx(0.5F));
+    CHECK(result.loop == true);
+  }
+
+  SUBCASE(
+      "Given_UnknownClipName_When_PostLoadFixup_Then_FallsBackToFirstClip") {
+    // Given: entity whose pending_clip_name doesn't exist in the asset
+    Scene scene;
+    auto ent = scene.registry().create();
+    scene.registry().emplace<Components::Mesh>(
+        ent, Components::Mesh{.handle = {}, .source_path = mesh_path});
+    AnimationState anim{};
+    anim.pending_clip_name = "Nonexistent";
+    anim.skeleton_index = 0;
+    scene.registry().emplace<AnimationState>(ent, std::move(anim));
+
+    // When
+    SceneSerializer::post_load_fixup(scene, make_context());
+
+    // Then: falls back to animations[0] ("Walk")
+    const auto &result = scene.registry().get<AnimationState>(ent);
+    REQUIRE(result.clip != nullptr);
+    CHECK(result.clip == &fake_asset.animations[0]);
+    CHECK(result.clip->name == "Walk");
+  }
+
+  SUBCASE(
+      "Given_AnimationStateWithNoMeshComponent_When_PostLoadFixup_Then_SkippedGracefully") {
+    // Given: entity with AnimationState but no Mesh component
+    Scene scene;
+    auto ent = scene.registry().create();
+    AnimationState anim{};
+    anim.pending_clip_name = "Walk";
+    anim.skeleton_index = 0;
+    scene.registry().emplace<AnimationState>(ent, std::move(anim));
+
+    // When / Then: no crash, pointers remain null
+    REQUIRE_NOTHROW(SceneSerializer::post_load_fixup(scene, make_context()));
+    const auto &result = scene.registry().get<AnimationState>(ent);
+    CHECK(result.skeleton == nullptr);
+    CHECK(result.clip == nullptr);
+  }
+
+  SUBCASE("Given_MeshWithPath_When_PostLoadFixup_Then_HandleIsSet") {
+    // Given: Mesh component with source_path set but empty handle
+    Scene scene;
+    auto ent = scene.registry().create();
+    scene.registry().emplace<Components::Mesh>(
+        ent, Components::Mesh{.handle = {}, .source_path = mesh_path});
+
+    // When
+    SceneSerializer::post_load_fixup(scene, make_context());
+
+    // Then: handle matches what the context returned
+    const auto &mesh = scene.registry().get<Components::Mesh>(ent);
+    CHECK(mesh.handle == test_handle);
+  }
+
+  SUBCASE(
+      "Given_MeshWithUnknownPath_When_PostLoadFixup_Then_HandleRemainsEmpty") {
+    // Given: Mesh with a path the context doesn't recognise
+    Scene scene;
+    auto ent = scene.registry().create();
+    scene.registry().emplace<Components::Mesh>(
+        ent, Components::Mesh{.handle = {},
+                              .source_path = NullableVFSPath::create(
+                                  "meshes://unknown.glb")});
+
+    // When / Then: no crash, handle stays empty
+    REQUIRE_NOTHROW(SceneSerializer::post_load_fixup(scene, make_context()));
+    const auto &mesh = scene.registry().get<Components::Mesh>(ent);
+    CHECK(mesh.handle.empty());
+  }
+}

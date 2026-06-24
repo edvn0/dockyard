@@ -114,6 +114,9 @@ private:
   auto pause() -> void;
   auto resume() -> void;
   auto stop() -> void;
+
+  void animation_state_update(float ts);
+
   auto step() -> void;
   auto load_script(const std::filesystem::path &) -> void;
   auto load_toolbar_icons() -> void;

@@ -140,7 +140,11 @@ static auto register_bindings(sol::state &lua) -> void {
       "index", &MeshAssetHandle::index,
       "valid", &MeshAssetHandle::valid);
 
+  // AnimationState — opaque from Lua; created via assets:make_animation_state()
+  lua.new_usertype<AnimationState>("AnimationState", sol::no_constructor);
+
   // IAssetLoader — load_mesh returns (handle, nil) or (nil, errmsg)
+  //              — make_animation_state returns (state, nil) or (nil, errmsg)
   lua.new_usertype<IAssetLoader>(
       "IAssetLoader",
       sol::no_constructor,
@@ -156,6 +160,22 @@ static auto register_bindings(sol::state &lua) -> void {
             } else {
               ret.push_back(sol::lua_nil);
               ret.push_back(sol::make_object(sv, result.error()));
+            }
+            return ret;
+          },
+      "make_animation_state",
+          [](sol::this_state L, IAssetLoader &loader, MeshAssetHandle handle,
+             u32 skel_idx, u32 clip_idx) -> sol::variadic_results {
+            sol::state_view sv{L};
+            auto result = loader.make_animation_state(handle, skel_idx, clip_idx);
+            sol::variadic_results ret;
+            if (result) {
+              ret.push_back(sol::make_object(sv, std::move(*result)));
+              ret.push_back(sol::lua_nil);
+            } else {
+              ret.push_back(sol::lua_nil);
+              ret.push_back(
+                  sol::make_object(sv, std::string("no skeleton/animation at given indices")));
             }
             return ret;
           },
@@ -249,6 +269,10 @@ static auto register_bindings(sol::state &lua) -> void {
       "add_point_light",
           [](Entity &e) -> Components::PointLight & {
             return e.emplace<Components::PointLight>();
+          },
+      "add_animation_state",
+          [](Entity &e, AnimationState anim) -> AnimationState & {
+            return e.emplace<AnimationState>(std::move(anim));
           });
 
   // Scene

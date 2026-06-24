@@ -78,6 +78,9 @@ struct AnimationState {
   f32 time = 0.0F;
   bool loop = true;
 
+  // Populated during deserialization; cleared after post_load_fixup resolves the clip pointer.
+  std::string pending_clip_name;
+
   std::vector<AnimationTransform> local_transforms;
   std::vector<glm::mat4> world_transforms;
   std::vector<glm::mat4> joint_palette;

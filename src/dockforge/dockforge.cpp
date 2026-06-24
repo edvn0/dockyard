@@ -1,4 +1,3 @@
-#include "dockyard/bindless_handle.hpp"
 #include <algorithm>
 #include <dockforge/dockforge.hpp>
 #include <dockforge/inspector_panel.hpp>
@@ -130,6 +129,21 @@ struct AssetLoader : dy::IAssetLoader {
     if (renderer.override_pool.free_slots.empty() &&
         renderer.override_pool.next >= renderer.override_pool.capacity)
       renderer.override_pool.needs_grow = true;
+  }
+
+  auto make_animation_state(dy::MeshAssetHandle handle, dy::u32 skel_idx,
+                             dy::u32 clip_idx)
+      -> std::optional<dy::AnimationState> override {
+    const auto *asset = renderer.get_mesh(handle);
+    if (!asset)
+      return std::nullopt;
+    if (skel_idx >= asset->skeletons.size())
+      return std::nullopt;
+    if (clip_idx >= asset->animations.size())
+      return std::nullopt;
+    return dy::AnimationState::create(&asset->skeletons[skel_idx],
+                                      &asset->animations[clip_idx],
+                                      static_cast<dy::i32>(skel_idx));
   }
 };
 
@@ -299,35 +313,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
   }
 
-  constexpr std::string_view fox_path = "meshes://fox/Fox.glb";
-
-  if (auto loaded_fox = asset_loader->load_mesh(VFSPath::create(fox_path))) {
-    const auto *asset = renderer->get_mesh(*loaded_fox);
-
-    if ((asset != nullptr) && !asset->skeletons.empty() &&
-        !asset->animations.empty()) {
-
-      for (int i = 0; i < 10; ++i) {
-        auto fox = active_scene->make("Fox_" + std::to_string(i));
-
-        auto &mc = fox.emplace<Components::Mesh>();
-        mc.handle = *loaded_fox;
-        mc.source_path = VFSPath::create(fox_path);
-
-        auto transform = fox.get<Components::Transform>().mut();
-        transform.scale = glm::vec3{0.01F};
-
-        transform.position = glm::linearRand(glm::vec3{-25.0F, 0.0F, -25.0F},
-                                             glm::vec3{25.0F, 0.0F, 25.0F});
-
-        AnimationState anim_state = AnimationState::create(
-            &asset->skeletons[0], &asset->animations[0], 0);
-
-        fox.emplace<AnimationState>(std::move(anim_state));
-      }
-    }
-  }
-
   editor_state.active_scene = active_scene;
   editor_state.renderer = renderer.get();
 
@@ -374,7 +359,7 @@ auto Dockforge::configure_window_hints() -> void {
 }
 
 auto Dockforge::draw_titlebar() -> void {
-  auto window = App::get_window();
+  auto glfw_window = App::get_window();
   const ImGuiViewport *vp = ImGui::GetMainViewport();
 
   ImGui::SetNextWindowPos(vp->Pos);
@@ -411,15 +396,15 @@ auto Dockforge::draw_titlebar() -> void {
     const ImVec2 delta = ImGui::GetIO().MouseDelta;
     int win_x = 0;
     int win_y = 0;
-    glfwGetWindowPos(window, &win_x, &win_y);
-    glfwSetWindowPos(window, win_x + static_cast<int>(delta.x),
+    glfwGetWindowPos(glfw_window, &win_x, &win_y);
+    glfwSetWindowPos(glfw_window, win_x + static_cast<int>(delta.x),
                      win_y + static_cast<int>(delta.y));
   }
 
   if (ImGui::IsItemHovered() &&
       ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-    const bool maximised = glfwGetWindowAttrib(window, GLFW_MAXIMIZED) != 0;
-    maximised ? glfwRestoreWindow(window) : glfwMaximizeWindow(window);
+    const bool maximised = glfwGetWindowAttrib(glfw_window, GLFW_MAXIMIZED) != 0;
+    maximised ? glfwRestoreWindow(glfw_window) : glfwMaximizeWindow(glfw_window);
   }
 
   // ── Visual content drawn over the drag region ─────────────────────────────
@@ -450,18 +435,18 @@ auto Dockforge::draw_titlebar() -> void {
 
   ImGui::SetCursorPos({right - btn_w * 3.0F, 0.0F});
   if (ImGui::Button("_##min", {btn_w, btn_h}))
-    glfwIconifyWindow(window);
+    glfwIconifyWindow(glfw_window);
 
   ImGui::SetCursorPos({right - btn_w * 2.0F, 0.0F});
-  const bool maximised = glfwGetWindowAttrib(window, GLFW_MAXIMIZED) != 0;
+  const bool maximised = glfwGetWindowAttrib(glfw_window, GLFW_MAXIMIZED) != 0;
   if (ImGui::Button(maximised ? "#r##max" : "#m##max", {btn_w, btn_h}))
-    maximised ? glfwRestoreWindow(window) : glfwMaximizeWindow(window);
+    maximised ? glfwRestoreWindow(glfw_window) : glfwMaximizeWindow(glfw_window);
 
   ImGui::SetCursorPos({right - btn_w, 0.0F});
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.85F, 0.18F, 0.18F, 1.0F});
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, {0.70F, 0.10F, 0.10F, 1.0F});
   if (ImGui::Button("x##close", {btn_w, btn_h}))
-    glfwSetWindowShouldClose(window, GLFW_TRUE);
+    glfwSetWindowShouldClose(glfw_window, GLFW_TRUE);
   ImGui::PopStyleColor(2);
 
   ImGui::PopStyleColor(3);
@@ -605,8 +590,8 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
 
   auto texture_row = [](const char *label, u32 index) {
     static constexpr u32 none = ~0U;
-    const float icon_size = ImGui::GetFrameHeight();
-    const ImVec2 icon_dim{icon_size, icon_size};
+    const float texture_icon_size = ImGui::GetFrameHeight();
+    const ImVec2 icon_dim{texture_icon_size, texture_icon_size};
     const ImVec2 p = ImGui::GetCursorScreenPos();
     auto *dl = ImGui::GetWindowDrawList();
 
@@ -615,14 +600,14 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
                    {1, 1, 1, 1}, ImGui::GetStyleColorVec4(ImGuiCol_Border));
     } else {
       // 2×2 checkerboard placeholder
-      const float h = icon_size * 0.5f;
-      dl->AddRectFilled(p, {p.x + icon_size, p.y + icon_size},
+      const float h = texture_icon_size * 0.5f;
+      dl->AddRectFilled(p, {p.x + texture_icon_size, p.y + texture_icon_size},
                         IM_COL32(40, 40, 40, 255));
       dl->AddRectFilled({p.x, p.y}, {p.x + h, p.y + h},
                         IM_COL32(65, 65, 65, 255));
-      dl->AddRectFilled({p.x + h, p.y + h}, {p.x + icon_size, p.y + icon_size},
+      dl->AddRectFilled({p.x + h, p.y + h}, {p.x + texture_icon_size, p.y + texture_icon_size},
                         IM_COL32(65, 65, 65, 255));
-      dl->AddRect(p, {p.x + icon_size, p.y + icon_size},
+      dl->AddRect(p, {p.x + texture_icon_size, p.y + texture_icon_size},
                   ImGui::GetColorU32(ImGuiCol_Border));
       ImGui::Dummy(icon_dim);
     }
@@ -630,7 +615,7 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
     ImGui::SameLine(0.0F, ImGui::GetStyle().ItemInnerSpacing.x);
     // vertically centre the InputInt against the icon
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                         ((icon_size - ImGui::GetFrameHeight()) * 0.5F));
+                         ((texture_icon_size - ImGui::GetFrameHeight()) * 0.5F));
     int idx = static_cast<int>(index);
     ImGui::InputInt(label, &idx, 0, 0, ImGuiInputTextFlags_ReadOnly);
   };
@@ -1225,6 +1210,7 @@ auto Dockforge::step() -> void {
       !script_engine->loaded())
     return;
   script_engine->update(active_scene, step_dt);
+    animation_state_update(step_dt);
 }
 
 auto Dockforge::play() -> void {
@@ -1241,22 +1227,28 @@ auto Dockforge::play() -> void {
     MemoryReader reader{snapshot_buf};
     SceneSerializer::deserialize(*runtime_scene, reader);
 
-    runtime_scene->registry().view<Components::Mesh>().each(
-        [&](Components::Mesh &mesh) {
-          if (mesh.source_path.valid()) {
-            if (auto result = asset_loader->load_mesh(mesh.source_path.value()))
-              mesh.handle = *result;
-            else
-              warn("Failed to resolve mesh '{}': {}", mesh.source_path.view(),
-                   result.error());
+    FixupContext fixup_ctx{
+        .find_mesh = [&](const NullableVFSPath &path)
+            -> std::pair<MeshAssetHandle, const MeshAsset *> {
+          if (!path.valid())
+            return {{}, nullptr};
+          auto result = asset_loader->load_mesh(path.value());
+          if (!result) {
+            warn("Failed to resolve mesh '{}': {}", path.view(),
+                 result.error());
+            return {{}, nullptr};
           }
-        });
+          MeshAssetHandle handle = *result;
+          return {handle, renderer->get_mesh(handle)};
+        }};
+    SceneSerializer::post_load_fixup(*runtime_scene, fixup_ctx);
 
     runtime_scene->group<Components::Transform, Components::LocalToWorld,
                          Components::Mesh>();
 
     active_scene = runtime_scene.get();
     editor_state.active_scene = active_scene;
+    editor_state.selected = entt::null;
     editor_state.hierarchy_dirty = true;
     script_engine->init(active_scene, *asset_loader);
     TracyMessage("Game started", 12);
@@ -1308,6 +1300,24 @@ auto Dockforge::stop() -> void {
   });
 }
 
+void Dockforge::animation_state_update(float ts) {
+  ZoneScopedNC("Animation state update", 0xFF6611);
+  PROFILE_SCOPE("Animation State");
+  if (ts <= 0.0F) return;
+
+  const auto view = active_scene->view<AnimationState>();
+  std::vector<std::function<void()>> funcs {};
+  funcs.reserve(view.size());
+
+  for (auto&& [entity, animation_state] : view.each()) {
+    funcs.emplace_back([t = ts, &anim = animation_state] {
+      anim.advance(t);
+    });
+  }
+
+  renderer->thread_pool.submit_bulk(funcs).wait();
+}
+
 auto Dockforge::update(float ts) -> void {
   ZoneScopedNC("Dockforge::update", 0x00BFFF);
   if (!sim_state.in<sim::S::Editing>() && script_engine &&
@@ -1327,19 +1337,9 @@ auto Dockforge::update(float ts) -> void {
     editor_camera->update(ts);
 
   {
-    ZoneScopedNC("Animation state update", 0xFF6611);
-    std::vector<std::future<void>> futures;
-    auto view = active_scene->view<AnimationState>();
-    futures.reserve(view->size());
-
-    for (auto &&[e, anim] : view.each()) {
-      futures.push_back(renderer->thread_pool.submit_task(
-          [&anim, ts]() { anim.advance(ts); }));
-    }
-
-    for (auto &f : futures) {
-      f.wait();
-    }
+    // Don't advance animations
+    const auto timestep = sim_state.in<sim::S::Playing>() ? ts : 0.0F;
+    animation_state_update(timestep);
   }
 
   update_local_to_world_matrices(active_scene->registry());
@@ -1409,11 +1409,10 @@ void Dockforge::patch_material_override_slots(u32 delta) {
 
 namespace {
 auto resolve_material_slot(Entity e) -> u32 {
-  constexpr u32 default_material = 0U;
   auto *ov = e.try_get<Components::MaterialOverride>();
   if (ov == nullptr ||
       ov->gpu_slot == Components::MaterialOverride::invalid_material)
-    return default_material;
+    return Components::MaterialOverride::invalid_material;
   return ov->gpu_slot;
 }
 } // namespace

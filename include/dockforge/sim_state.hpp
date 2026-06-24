@@ -6,7 +6,7 @@
 
 namespace sim {
 
-enum class S : uint8_t { Editing, Playing, Paused };
+enum class S : dy::u8 { Editing, Playing, Paused };
 
 using Editing = fsm::State<S::Editing>;
 using Playing = fsm::State<S::Playing>;
@@ -15,7 +15,6 @@ using AnyState = std::variant<Editing, Playing, Paused>;
 
 } // namespace sim
 
-// machine_traits must be defined before Machine is instantiated below.
 namespace fsm {
 template <> struct machine_traits<sim::S> {
   using edge_t = Edge<sim::S::Editing>;

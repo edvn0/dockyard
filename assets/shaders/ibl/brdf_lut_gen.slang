@@ -11,7 +11,7 @@ void computeMain(uint3 tid: SV_DispatchThreadID, uniform PushConstants pc)
 
     float ndotv = (float(tid.x) + 0.5) / float(pc.size);
 
-    float roughness = 1.0 - ((float(tid.y) + 0.5) / float(pc.size));
+    float roughness = (float(tid.y) + 0.5) / float(pc.size);
 
     float3 v = float3(sqrt(max(1.0 - ndotv * ndotv, 0.0)), 0.0, ndotv);
     float3 n = float3(0.0, 0.0, 1.0);

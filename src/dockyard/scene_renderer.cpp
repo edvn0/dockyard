@@ -139,7 +139,7 @@ auto grow_pool(SceneRenderer &renderer) -> u32 {
   if (renderer.override_pool.next > 0) {
     auto live = renderer.geometry_pool->get_materials(
         renderer.override_pool.base_slot, renderer.override_pool.next);
-    std::ranges::reverse_copy(live, new_data.begin());
+    std::ranges::copy(live, new_data.begin());
   }
 
   const auto new_offset =
@@ -545,8 +545,7 @@ auto SceneRenderer::initialise_bindless() -> void {
           .layout = VK_NULL_HANDLE,
       });
       if (!result) {
-        error("buffer reset initialization failed: {}",
-              result.error());
+        error("buffer reset initialization failed: {}", result.error());
         std::abort();
       }
       buffer_reset_pipeline = *result;
@@ -743,7 +742,7 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
     const glm::mat4 node_t = t * node.local_transform;
     for (const auto &prim : node.primitives) {
       const u32 resolved_mat =
-          material_id != 0 ? material_id : prim.material_id;
+          material_id != ~0u ? material_id : prim.material_id;
       const u64 key = (static_cast<u64>(pipeline_id) << 48) |
                       (static_cast<u64>(resolved_mat) << 32) |
                       static_cast<u64>(prim.flat_index & 0xFFFF'FFFFU);
@@ -781,7 +780,7 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
 
     for (const auto &prim : node.primitives) {
       const u32 resolved_mat =
-          material_id != 0 ? material_id : prim.material_id;
+          material_id != ~0u ? material_id : prim.material_id;
       const u64 key = (static_cast<u64>(pipeline_id) << 48) |
                       (static_cast<u64>(resolved_mat) << 32) |
                       static_cast<u64>(prim.flat_index & 0xFFFF'FFFFU);
@@ -875,16 +874,28 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
       process_pending_hdr_map();
   }
 
+  current_frame_index = info.frame_index;
+
   if (override_pool.needs_grow) [[unlikely]] {
     ZoneScopedNC("Grow Pool", 0xFF4500);
     const u32 delta = grow_pool(*this);
+    frame_submission.reset(0);
+    // No bake this frame: drop stale batches and instance data so the per-frame
+    // indirect buffers (which were not resized) are never drawn against.
+    depth_prepass.batches.clear();
+    forward_pass.batches.clear();
+    global_instance_data.clear();
+    // Drop skinning state for the same reason: palette buffer is not allocated
+    // for the new frame index yet, and skinning_pass() is called unconditionally.
+    frame_skin_dst_vertex = 0;
+    frame_palette_mat_count = 0;
+    pending_palette_data.clear();
+    pending_skin_jobs.clear();
     return {
         .status = PrepareResult::Status::SuccessMaterialPoolGrew,
         .material_pool_delta = delta,
     };
   }
-
-  current_frame_index = info.frame_index;
 
   // Reset skinning accumulators; upload any palette data queued by submit().
   {
@@ -901,6 +912,8 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
 
   auto &fs = frame_submission;
   if (fs.entries.empty()) {
+    depth_prepass.batches.clear();
+    forward_pass.batches.clear();
     return {
         .status = PrepareResult::Status::SuccessNoSubmissions,
     };
@@ -1061,12 +1074,13 @@ void SceneRenderer::depth_frustum_culling_pass(VkCommandBuffer cmd) {
   ZoneScopedNC("SceneRenderer::depth_frustum_culling_pass", 0x00BFFF);
   TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "depth_frustum_culling_pass", 0x00BFFF);
 
+
+
   auto geometry_count = global_instance_data.size();
   if (geometry_count == 0 || depth_prepass.batches.empty() ||
       forward_pass.batches.empty())
     return;
   auto &depth_ws = depth_prepass.frame_workspaces.at(current_frame_index);
-  reset_indirect_counts(cmd, forward_pass);
 
 
   std::array<VkBufferMemoryBarrier2, 1> clear_barriers = {
@@ -1877,7 +1891,8 @@ auto SceneRenderer::process_pending_hdr_map() -> void {
   bindless.mark_dirty();
 }
 
-void SceneRenderer::reset_indirect_counts(VkCommandBuffer cmd, RenderPass &pass) {
+void SceneRenderer::reset_indirect_counts(VkCommandBuffer cmd,
+                                          RenderPass &pass) {
   ZoneScopedNC("SceneRenderer::reset_indirect_counts", 0x708090);
   auto &ws = pass.frame_workspaces.at(current_frame_index);
   const u32 command_count = std::accumulate(
@@ -1886,16 +1901,16 @@ void SceneRenderer::reset_indirect_counts(VkCommandBuffer cmd, RenderPass &pass)
   if (command_count == 0)
     return;
 
-  reset_field<PaddedDrawCommand>(
-      cmd, *ws.indirect_buffer, command_count,
-      offsetof(PaddedDrawCommand, instance_count));
+  reset_field<PaddedDrawCommand>(cmd, *ws.indirect_buffer, command_count,
+                                 offsetof(PaddedDrawCommand, instance_count));
 
   VkBufferMemoryBarrier2 reset_barrier{
       .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
       .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
       .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstAccessMask =
+          VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
       .buffer = ws.indirect_buffer->get_buffer(),
       .size = VK_WHOLE_SIZE,
   };
@@ -1908,31 +1923,31 @@ void SceneRenderer::reset_indirect_counts(VkCommandBuffer cmd, RenderPass &pass)
 }
 
 void SceneRenderer::ensure_skinned_scratch(usize vertex_count) {
-  if (skinned_scratch_capacity >= vertex_count)
+  const u64 fi = current_frame_index;
+  auto &vs = skinned_vertex_scratch[fi];
+  auto &ps = skinned_position_scratch[fi];
+  if (vs && vs->size() >= vertex_count * sizeof(Vertex) && ps &&
+      ps->size() >= vertex_count * sizeof(PositionOnlyVertex))
     return;
   const usize new_cap =
-      std::max(vertex_count, skinned_scratch_capacity * 3 / 2 + 1);
-  for (u32 i = 0; i < frames_in_flight; ++i) {
-    skinned_vertex_scratch[i] = Buffer::create(
-        ctx.allocator, "skinned_vertex_scratch", new_cap * sizeof(Vertex),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    skinned_position_scratch[i] =
-        Buffer::create(ctx.allocator, "skinned_position_scratch",
-                       new_cap * sizeof(PositionOnlyVertex),
-                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  }
+      std::max(vertex_count, (skinned_scratch_capacity * 3 / 2) + 1);
+  vs = Buffer::create(ctx.allocator, "skinned_vertex_scratch",
+                      new_cap * sizeof(Vertex),
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+  ps = Buffer::create(ctx.allocator, "skinned_position_scratch",
+                      new_cap * sizeof(PositionOnlyVertex),
+                      VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   skinned_scratch_capacity = new_cap;
 }
 
 void SceneRenderer::ensure_joint_palette_capacity(usize mat_count) {
+  const u64 fi = current_frame_index;
+  auto &buf = joint_palette_buffers[fi];
   const auto byte_size = mat_count * sizeof(glm::mat4);
-  for (u32 i = 0; i < frames_in_flight; ++i) {
-    auto &buf = joint_palette_buffers[i];
-    if (buf && buf->size() >= byte_size)
-      continue;
-    buf = Buffer::create(ctx.allocator, "joint_palette", byte_size,
-                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-  }
+  if (buf && buf->size() >= byte_size)
+    return;
+  buf = Buffer::create(ctx.allocator, "joint_palette", byte_size,
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   joint_palette_capacity = std::max(joint_palette_capacity, mat_count);
 }
 

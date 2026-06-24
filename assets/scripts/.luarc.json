@@ -1,0 +1,20 @@
+{
+  "runtime.version": "Lua 5.4",
+  "workspace.library": ["."],
+  "diagnostics.globals": [
+    "vec3",
+    "vec4",
+    "quat",
+    "quat_from_euler",
+    "VFSPath",
+    "MeshAssetHandle",
+    "AnimationState",
+    "IAssetLoader",
+    "Mesh",
+    "Transform",
+    "MaterialOverride",
+    "PointLight",
+    "Entity",
+    "Scene"
+  ]
+}

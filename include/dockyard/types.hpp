@@ -74,7 +74,6 @@ struct NanoProfiler {
   std::string scope;
   std::chrono::high_resolution_clock::time_point start;
 
-  // Use string_view to avoid unnecessary string allocations
   explicit NanoProfiler(std::string_view name)
       : scope(name), start(std::chrono::high_resolution_clock::now()) {}
 

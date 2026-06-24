@@ -43,7 +43,7 @@ namespace dy {
 auto acquire_swapchain_image(const SwapchainResources &, const FrameSync &)
     -> std::optional<u32>;
 auto submit_to_queue(const VulkanContext &, VkCommandBuffer, const FrameSync &,
-                     const ImageSync &, u64) -> bool;
+                     const ImageSync &, u64) -> VkResult;
 auto glfw_error_logger() -> void;
 
 std::atomic_bool running{true};
@@ -224,6 +224,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   }
 
   TimeStep ts{};
+  int exit_code = 0;
   while (running && (glfwWindowShouldClose(window) != VK_TRUE)) {
     auto &frame = frames.frame_sync[frame_index];
 
@@ -283,8 +284,10 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
         .render_finished = image.render_finished_semaphore,
     };
 
-    if (!cb.begin())
-      return -1;
+    if (!cb.begin()) {
+      exit_code = -1;
+      break;
+    }
 
     u64 end_val;
     {
@@ -293,14 +296,22 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     }
     frame.last_value = end_val;
 
-    if (!cb.end())
-      return -1;
+    if (!cb.end()) {
+      exit_code = -1;
+      break;
+    }
 
     {
       ZoneScopedNC("App::submit_and_present", 0x9370DB);
       vkResetFences(ctx.device, 1, &frame.in_flight_fence);
-      if (!submit_to_queue(ctx, cb.command_buffer, frame, image, end_val))
-        return -1;
+      const auto submit_result =
+          submit_to_queue(ctx, cb.command_buffer, frame, image, end_val);
+      if (submit_result != VK_SUCCESS) {
+        if (submit_result == VK_ERROR_DEVICE_LOST)
+          error("Device lost during queue submit; shutting down cleanly");
+        exit_code = -1;
+        break;
+      }
 
       VkPresentInfoKHR present_info{};
       present_info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
@@ -326,7 +337,10 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
           present_result == VK_SUBOPTIMAL_KHR) {
         App::recreate_swapchain_manually(window, render_listener);
       } else if (present_result != VK_SUCCESS) {
-        return -1;
+        if (present_result == VK_ERROR_DEVICE_LOST)
+          error("Device lost during present; shutting down cleanly");
+        exit_code = -1;
+        break;
       }
 
       image_last_frame_id[index] = frame_id;
@@ -340,15 +354,11 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
   glfwPollEvents();
 
-  char *stats_json = nullptr;
-  vmaBuildStatsString(ctx.allocator, &stats_json, VK_TRUE);
-  std::ofstream f("vma_stats.json");
-  f << stats_json;
-  vmaFreeStatsString(ctx.allocator, stats_json);
-
   vkDeviceWaitIdle(ctx.device);
   destroy();
-  vkDeviceWaitIdle(ctx.device);
+  // Result intentionally ignored: on a lost device this returns
+  // VK_ERROR_DEVICE_LOST, which is fine — we only need it to drain pending work
+  // when the device is healthy before flushing deletions.
   DeletionQueue::the().flush_all();
 
   tracy::GetProfiler().RequestShutdown();
@@ -356,8 +366,11 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
-  info("Application exited successfully");
-  return 0;
+  if (exit_code == 0)
+    info("Application exited successfully");
+  else
+    error("Application exited after a fatal frame error (code {})", exit_code);
+  return exit_code;
 }
 
 auto App::on_swapchain_resized(const events::SwapchainResized &e) -> void {
@@ -367,7 +380,7 @@ auto App::on_swapchain_resized(const events::SwapchainResized &e) -> void {
 auto App::recreate_swapchain_manually(GLFWwindow *window,
                                       const RendererListener &render_listener)
     -> void {
-  TracyMessage("Swapchain recreated", 19);
+  TracyMessageL("Swapchain recreated");
   int w{};
   int h{};
   glfwGetFramebufferSize(window, &w, &h);
@@ -398,7 +411,7 @@ auto acquire_swapchain_image(const SwapchainResources &sc,
 
 auto submit_to_queue(const VulkanContext &ctx, VkCommandBuffer command_buffer,
                      const FrameSync &frame, const ImageSync &image,
-                     u64 signal_val) -> bool {
+                     u64 signal_val) -> VkResult {
 
   VkSemaphoreSubmitInfo wait_info{};
   wait_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
@@ -436,7 +449,7 @@ auto submit_to_queue(const VulkanContext &ctx, VkCommandBuffer command_buffer,
   submit_info.pSignalSemaphoreInfos = signals.data();
 
   return vkQueueSubmit2(ctx.graphics_queue(), 1, &submit_info,
-                        frame.in_flight_fence) == VK_SUCCESS;
+                        frame.in_flight_fence);
 }
 
 auto glfw_error_logger() -> void {
