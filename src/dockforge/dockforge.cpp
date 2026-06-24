@@ -475,11 +475,20 @@ auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
     editor_camera->use_path = !editor_camera->use_path;
     if (editor_camera->use_path) {
       editor_camera->path_controller.current_index = 0;
-      editor_camera->path_controller.segment_time = 0.0f;
+      editor_camera->path_controller.segment_time = 0.0F;
       editor_camera->path_controller.is_playing = true;
     }
   }
+
+  if (e.key == GLFW_KEY_F && e.mods == (GLFW_MOD_ALT | GLFW_MOD_SHIFT)) {
+    toggle_fullscreen(FullscreenMode::borderless);
+  }
+  if (e.key == GLFW_KEY_F &&
+      e.mods == (GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SHIFT)) {
+    toggle_fullscreen(FullscreenMode::exclusive);
+  }
 }
+
 [[nodiscard]] auto Dockforge::resolve_camera() const
     -> std::pair<glm::mat4, glm::mat4> {
   if (auto *cam = active_scene->primary_camera())
@@ -1942,4 +1951,95 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   }
 
   return ctx.next_frame_wait_value();
+}
+
+namespace {
+auto find_monitor_for_window(GLFWwindow *window) -> GLFWmonitor * {
+  int win_x = 0;
+  int win_y = 0;
+  int win_w = 0;
+  int win_h = 0;
+  glfwGetWindowPos(window, &win_x, &win_y);
+  glfwGetWindowSize(window, &win_w, &win_h);
+  const int center_x = win_x + win_w / 2;
+  const int center_y = win_y + win_h / 2;
+
+  int monitor_count = 0;
+  GLFWmonitor **monitors = glfwGetMonitors(&monitor_count);
+
+  for (int i = 0; i < monitor_count; ++i) {
+    int mon_x = 0;
+    int mon_y = 0;
+    const GLFWvidmode *mode = glfwGetVideoMode(monitors[i]);
+    glfwGetMonitorPos(monitors[i], &mon_x, &mon_y);
+    if (center_x >= mon_x && center_x < mon_x + mode->width &&
+        center_y >= mon_y && center_y < mon_y + mode->height)
+      return monitors[i];
+  }
+  return glfwGetPrimaryMonitor();
+}
+
+auto resolve_target_monitor(GLFWwindow *window, int monitor_index)
+    -> GLFWmonitor * {
+  if (monitor_index < 0)
+    return find_monitor_for_window(window);
+
+  int monitor_count = 0;
+  GLFWmonitor **monitors = glfwGetMonitors(&monitor_count);
+  if (monitor_index >= monitor_count) {
+    warn("Fullscreen: monitor index {} out of range ({} available), "
+         "falling back to current monitor",
+         monitor_index, monitor_count);
+    return find_monitor_for_window(window);
+  }
+  return monitors[monitor_index];
+}
+} // namespace
+
+auto Dockforge::list_monitors() -> std::vector<std::string> {
+  int count = 0;
+  GLFWmonitor **monitors = glfwGetMonitors(&count);
+  std::vector<std::string> names;
+  names.reserve(static_cast<size_t>(count));
+  for (int i = 0; i < count; ++i)
+    names.emplace_back(glfwGetMonitorName(monitors[i]));
+  return names;
+}
+
+auto Dockforge::toggle_fullscreen(FullscreenMode mode, int monitor_index)
+    -> void {
+  auto *window = App::get_window();
+
+  // Same mode requested while already in it -> drop back to windowed.
+  if (is_fullscreen && fullscreen_mode == mode) {
+    glfwSetWindowMonitor(window, nullptr, windowed_pos_x, windowed_pos_y,
+                         windowed_width, windowed_height, GLFW_DONT_CARE);
+    is_fullscreen = false;
+    return;
+  }
+
+  if (!is_fullscreen) {
+    glfwGetWindowPos(window, &windowed_pos_x, &windowed_pos_y);
+    glfwGetWindowSize(window, &windowed_width, &windowed_height);
+  }
+
+  GLFWmonitor *monitor = resolve_target_monitor(window, monitor_index);
+  const GLFWvidmode *vid_mode = glfwGetVideoMode(monitor);
+  int monitor_x = 0;
+  int monitor_y = 0;
+  glfwGetMonitorPos(monitor, &monitor_x, &monitor_y);
+
+  if (mode == FullscreenMode::exclusive) {
+    // Passing a real GLFWmonitor* triggers an actual display-mode switch
+    // (DEVMODE change on Win32, XRandR mode set on X11). Refresh rate
+    // doesn't need to be an exact match — GLFW snaps to the closest mode.
+    glfwSetWindowMonitor(window, monitor, 0, 0, vid_mode->width,
+                         vid_mode->height, vid_mode->refreshRate);
+  } else {
+    glfwSetWindowMonitor(window, nullptr, monitor_x, monitor_y, vid_mode->width,
+                         vid_mode->height, GLFW_DONT_CARE);
+  }
+
+  fullscreen_mode = mode;
+  is_fullscreen = true;
 }

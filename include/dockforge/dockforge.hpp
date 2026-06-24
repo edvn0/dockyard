@@ -67,6 +67,14 @@ struct Dockforge : App {
   EditorActions editor_actions;
   ShadowMapState shadow_map_state;
 
+  enum class FullscreenMode : u8 { borderless, exclusive };
+  bool is_fullscreen = false;
+  FullscreenMode fullscreen_mode = FullscreenMode::borderless;
+  int windowed_pos_x = 0;
+  int windowed_pos_y = 0;
+  int windowed_width = 0;
+  int windowed_height = 0;
+
   double last_resize_change_time = 0.0;
   static constexpr double resize_debounce_delay = 0.1;
   bool viewport_hovered = false;
@@ -86,6 +94,9 @@ struct Dockforge : App {
 
   ~Dockforge() override;
 
+  auto toggle_fullscreen(FullscreenMode mode = FullscreenMode::borderless,
+                         int monitor_index = -1) -> void;
+  auto list_monitors() -> std::vector<std::string>;
   auto on_changed_tag(entt::registry &, entt::entity) -> void {}
   auto init(const InitialisationContext &ctx) -> void override;
   auto on_mouse_moved(const events::MouseMoved &e) -> void override;

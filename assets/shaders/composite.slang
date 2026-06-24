@@ -25,7 +25,7 @@ void vertexMain(uint vertexID: SV_VertexID, out V2F output)
 float3 tonemap_amd_gt(float3 x)
 {
     // Tuning parameters
-    const float P = 1.0;  // Max brightness
+    const float P = 10.0; // Max brightness
     const float a = 1.0;  // Contrast
     const float m = 0.22; // Linear section start
     const float l = 0.4;  // Linear section length
@@ -59,12 +59,11 @@ float4 fragmentMain(V2F input, uniform CompositePushConstants pc) : SV_Target
     float3 hdr = sample_2d(pc.forward_output, pc.sampler, input.uv).rgb;
 
     // Adjust your exposure as needed for AgX
-    float exposure = 1;
+    float exposure = 1.0F;
     hdr *= exposure;
 
     float3 ldr = tonemap_aces(hdr);
-
-    // ldr = agx_look_punchy(ldr);
+    ldr = agx_look_punchy(ldr);
 
     // _SRGB swapchain target applies gamma automatically
     return float4(ldr, 1.0);

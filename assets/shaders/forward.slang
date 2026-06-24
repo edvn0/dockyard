@@ -143,6 +143,7 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
                              pc.frame_ubo.ibl_prefiltered_index)]
             .SampleLevel(samplers[pc.frame_ubo.ibl_sampler_index], r, env_mip)
             .rgb;
+    prefiltered = min(prefiltered, 10.0f); // Adjust this threshold (e.g., 5.0 - 20.0) based on your scene exposure
 
     float2 env_brdf =
         sampled_images[NonUniformResourceIndex(pc.frame_ubo.ibl_brdf_lut_index)]

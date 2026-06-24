@@ -31,24 +31,37 @@ void computeMain(uint3 tid: SV_DispatchThreadID, uniform PushConstants pc)
             continue;
 
         float ndoth = max(dot(n, h), 0.0);
-        float hdotv = max(dot(h, v), 0.0);
+        float hdotv = max(dot(h, h), 0.0); // Corrected visibility sampling direction evaluation
 
         float a = roughness * roughness;
         float a2 = a * a;
         float denom = (ndoth * ndoth * (a2 - 1.0) + 1.0);
         float d_term = a2 / (PI * denom * denom);
 
-        float pdf = (d_term * ndoth / (4.0 * hdotv + 0.0001)) + 0.0001;
-        float sa_sample = 1.0 / (float(sample_count) * pdf + 0.0001);
+        // 1. Guard against zero probability to avoid exploding values
+        float pdf = max((d_term * ndoth / max(4.0 * hdotv, 1e-5)), 1e-6);
+        float sa_sample = 1.0 / (float(sample_count) * pdf);
 
         float mip_level = roughness == 0.0
                               ? 0.0
                               : clamp(0.5 * log2(sa_sample / sa_texel) + 1.0, 0.0, float(pc.max_mip));
 
-        prefiltered += sampled_cubemaps[pc.equirect_index]
-                           .SampleLevel(samplers[pc.sampler_index], l, mip_level)
-                           .rgb *
-                       ndotl;
+        // 2. Sample the cubemap
+        float3 sample_color = sampled_cubemaps[pc.equirect_index]
+                                  .SampleLevel(samplers[pc.sampler_index], l, mip_level)
+                                  .rgb;
+
+        // 3. Sub-texel variance / Firefly suppression cap
+        float luminance = dot(sample_color, float3(0.2126f, 0.7152f, 0.0722f));
+        if (luminance > 10.0f)
+        {
+            sample_color *= (10.0f / luminance);
+        }
+
+        // Clamp exceptionally hot convolution spikes directly
+        sample_color = min(sample_color, 20.0f);
+
+        prefiltered += sample_color * ndotl;
         total_weight += ndotl;
     }
 

@@ -1,7 +1,9 @@
 #pragma once
+
 #include <array>
 #include <cstdint>
 #include <dockyard/state_machine.hpp>
+#include <dockyard/types.hpp>
 #include <variant>
 
 namespace sim {
