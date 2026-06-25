@@ -27,6 +27,25 @@ using namespace dy;
 
 struct EditorCamera;
 
+// Mirrors ImGuizmo::OPERATION bit values — cast to that type at call sites.
+enum class GizmoOp : u32 {
+  None         = 0,
+  TranslateX   = 0x001,
+  TranslateY   = 0x002,
+  TranslateZ   = 0x004,
+  RotateX      = 0x008,
+  RotateY      = 0x010,
+  RotateZ      = 0x020,
+  RotateScreen = 0x040,
+  ScaleX       = 0x080,
+  ScaleY       = 0x100,
+  ScaleZ       = 0x200,
+  Translate    = 0x007,
+  Rotate       = 0x078,
+  Scale        = 0x380,
+};
+MAKE_BITFIELD(GizmoOp)
+
 struct ShadowMapState {
   glm::mat4 last_view_matrix{1.0F};
   bool invalid = true;
@@ -52,7 +71,7 @@ struct Dockforge : App {
   ViewportResources viewport_resources;
 
   std::optional<glm::vec2> pending_pick;
-  u32 gizmo_op = 1U; // ImGuizmo::TRANSLATE
+  GizmoOp gizmo_op = GizmoOp::Translate;
   VkExtent2D viewport_panel_extent{};
   VkExtent2D viewport_panel_offset{};
   VkExtent2D last_ui_size{};

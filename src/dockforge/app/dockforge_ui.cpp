@@ -589,7 +589,7 @@ auto Dockforge::build_ui() -> void {
     }
 
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj),
-                         static_cast<ImGuizmo::OPERATION>(gizmo_op),
+                         static_cast<ImGuizmo::OPERATION>(std::to_underlying(gizmo_op)),
                          ImGuizmo::LOCAL, glm::value_ptr(world_matrix));
 
     if (ImGuizmo::IsUsing()) {
