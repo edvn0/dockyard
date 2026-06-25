@@ -10,7 +10,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtx/quaternion.hpp>
 
-#include <entt/entt.hpp>
+#include <entt/entity/entity.hpp>
 
 namespace dy::Components {
 

@@ -81,6 +81,7 @@ endif()
 target_compile_options(dockyard PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MP>)
 target_enable_native_arch(dockyard)
 target_precompile_headers(dockyard PRIVATE include/PCH.hpp)
+set_target_properties(dockyard PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE 8)
 
 target_include_directories(dockyard PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -127,6 +128,7 @@ target_compile_definitions(dockyard PRIVATE
 # Skip PCH to avoid the warning-level inconsistency MSVC raises when overriding /W4→/W3.
 set_source_files_properties(src/dockyard/script_engine.cpp PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON
+        SKIP_UNITY_BUILD_INCLUSION ON
 )
 if (MSVC)
   set_source_files_properties(src/dockyard/script_engine.cpp PROPERTIES
@@ -196,6 +198,7 @@ if(DOCKYARD_BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/test_animation.cpp
         )
   target_enable_native_arch(dockyard-testing)
+  target_precompile_headers(dockyard-testing REUSE_FROM dockyard)
   target_set_warnings(dockyard-testing)
   if(DOCKYARD_BUILD_SMOKE_TESTS)
     target_compile_definitions(dockyard-testing PRIVATE RUN_SERIALISATION_SMOKE_TESTS)

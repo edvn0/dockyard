@@ -10,8 +10,8 @@
 #include <volk.h>
 
 #include <VkBootstrap.h>
-#include <entt/entt.hpp>
 #include <vk_mem_alloc.h>
+#include <entt/fwd.hpp>
 
 namespace dy {
 

@@ -455,6 +455,43 @@ auto Dockforge::draw_toolbar() -> void {
 
   if (editing) {
     ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+
+    const float btn_h = icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F;
+    const ImVec2 op_sz{0.0F, btn_h};
+
+    auto op_button = [&](const char *label, GizmoOp op) {
+      if (gizmo_op == op)
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+      if (ImGui::Button(label, op_sz))
+        gizmo_op = op;
+      if (gizmo_op == op)
+        ImGui::PopStyleColor();
+    };
+
+    op_button("T##gizmo_op", GizmoOp::Translate);
+    ImGui::SameLine();
+    op_button("R##gizmo_op", GizmoOp::Rotate);
+    ImGui::SameLine();
+    op_button("S##gizmo_op", GizmoOp::Scale);
+
+    if (gizmo_op == GizmoOp::Translate) {
+      ImGui::SameLine();
+      const bool is_local = gizmo_mode == GizmoMode::Local;
+      if (is_local)
+        ImGui::PushStyleColor(ImGuiCol_Button,
+                              ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+      if (ImGui::Button(is_local ? "Local##mode" : "World##mode", op_sz))
+        gizmo_mode = is_local ? GizmoMode::World : GizmoMode::Local;
+      if (is_local)
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
 
     const auto dll_label = script_path.empty()
                                ? std::string{"No script loaded"}
@@ -588,9 +625,14 @@ auto Dockforge::build_ui() -> void {
       }
     }
 
+    // World mode only makes sense for translation; rotate/scale always use local.
+    const ImGuizmo::MODE mode =
+        (gizmo_op == GizmoOp::Translate)
+            ? static_cast<ImGuizmo::MODE>(std::to_underlying(gizmo_mode))
+            : ImGuizmo::LOCAL;
     ImGuizmo::Manipulate(glm::value_ptr(view), glm::value_ptr(proj),
                          static_cast<ImGuizmo::OPERATION>(std::to_underlying(gizmo_op)),
-                         ImGuizmo::LOCAL, glm::value_ptr(world_matrix));
+                         mode, glm::value_ptr(world_matrix));
 
     if (ImGuizmo::IsUsing()) {
       glm::mat4 local_matrix = world_matrix;

@@ -27,6 +27,9 @@ using namespace dy;
 
 struct EditorCamera;
 
+// Mirrors ImGuizmo::MODE — cast to that type at call sites.
+enum class GizmoMode : u8 { Local, World };
+
 // Mirrors ImGuizmo::OPERATION bit values — cast to that type at call sites.
 enum class GizmoOp : u32 {
   None         = 0,
@@ -72,6 +75,7 @@ struct Dockforge : App {
 
   std::optional<glm::vec2> pending_pick;
   GizmoOp gizmo_op = GizmoOp::Translate;
+  GizmoMode gizmo_mode = GizmoMode::Local; // only applied when gizmo_op == Translate
   VkExtent2D viewport_panel_extent{};
   VkExtent2D viewport_panel_offset{};
   VkExtent2D last_ui_size{};
