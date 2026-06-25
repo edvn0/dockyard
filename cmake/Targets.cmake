@@ -154,6 +154,7 @@ add_executable(dockforge
         src/dockforge/inspector_panel.cpp
 )
 target_enable_native_arch(dockforge)
+target_precompile_headers(dockforge PRIVATE include/dockforge/PCH.hpp)
 target_link_libraries(dockforge PRIVATE dockyard imgui)
 target_compile_options(dockforge PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/MP>)
 target_set_warnings(dockforge)
