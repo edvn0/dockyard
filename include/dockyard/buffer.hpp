@@ -104,6 +104,13 @@ public:
     vmaInvalidateAllocation(allocator, allocation, 0, allocation_info.size);
   }
 
+  auto set_zero() -> void {
+    if (mapped_data) {
+      std::memset(mapped_data, 0, allocation_info.size);
+      vmaFlushAllocation(allocator, allocation, 0, allocation_info.size);
+    }
+  }
+
   [[nodiscard]] auto get_mapped_pointer() const { return mapped_data; }
   [[nodiscard]] auto get_device_address() const { return address; }
   [[nodiscard]] auto get_allocation_info() const -> const auto & {

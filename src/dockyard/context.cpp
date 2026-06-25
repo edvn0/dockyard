@@ -317,6 +317,7 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   features.samplerAnisotropy = VK_TRUE;
   features.textureCompressionBC = VK_TRUE;
   features.wideLines = VK_TRUE;
+  features.shaderInt64 = VK_TRUE;
   features.drawIndirectFirstInstance = VK_TRUE;
 
   VkPhysicalDeviceVulkan11Features features_11{};
@@ -379,7 +380,7 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
               VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
           .pNext = nullptr,
           .pipelineExecutableInfo = VK_TRUE,
-      };
+  };
 
   auto selector = vkb::PhysicalDeviceSelector{ctx.instance}
                       .set_surface(ctx.surface)

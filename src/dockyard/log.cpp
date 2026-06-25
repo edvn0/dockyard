@@ -12,7 +12,7 @@ std::shared_ptr<spdlog::logger> logger;
 std::once_flag init_flag;
 } // namespace
 
-static spdlog::level::level_enum to_spdlolevel(LogLevel level) {
+static spdlog::level::level_enum to_spdlog_level(LogLevel level) {
   switch (level) {
   case LogLevel::Trace:
     return spdlog::level::trace;
@@ -52,7 +52,7 @@ void init_logging() {
 namespace detail {
 void private_log_message(LogLevel level, std::string_view message) {
   std::call_once(init_flag, init_logging);
-  logger->log(to_spdlolevel(level), message);
+  logger->log(to_spdlog_level(level), message);
 }
 } // namespace detail
 } // namespace dy

@@ -30,6 +30,19 @@ namespace shader {
 class ShaderWatcher;
 }
 
+// Cluster grid constants — must match include/clustering.slang
+static constexpr u32 cluster_tiles_x             = 16;
+static constexpr u32 cluster_tiles_y             = 9;
+static constexpr u32 cluster_depth_slices        = 24;
+static constexpr u32 cluster_total               = cluster_tiles_x * cluster_tiles_y * cluster_depth_slices;
+static constexpr u32 cluster_max_light_list_entries = 65536;
+
+struct ClusterEntry {
+  u32 offset;
+  u32 count;
+};
+static_assert(sizeof(ClusterEntry) == 8);
+
 struct GpuPushConstants {
   const DeviceAddress vertex_buffer_ptr;
   const DeviceAddress position_only_buffer_ptr;
@@ -39,9 +52,12 @@ struct GpuPushConstants {
   const DeviceAddress material_ptr;
   const DeviceAddress skinned_vertex_buffer_ptr;
   const DeviceAddress skinned_position_buffer_ptr;
+  const DeviceAddress cluster_list_ptr;
+  const DeviceAddress light_list_ptr;
   u32 cascade_index;
   u32 padding[3];
 };
+static_assert(sizeof(GpuPushConstants) == 96);
 
 struct CompositePushConstants {
   const TextureHandle forward_texture_index;
@@ -73,7 +89,7 @@ struct OcclusionCullingPushConstants {
   DeviceAddress instance_buffer;
   DeviceAddress frame_data;
 
-  DeviceAddress forward_original_remap_buffer;
+  DeviceAddress forward_max_instances;
   DeviceAddress forward_instance_to_command_buffer;
   DeviceAddress forward_indirect_commands;
   DeviceAddress forward_culled_remap;
@@ -87,6 +103,14 @@ struct OcclusionCullingPushConstants {
   // the mip count. See the shader struct for the rationale.
   glm::uvec4 hiz_mip_indices[4]{};
 };
+
+struct LightClusteringPushConstants {
+  DeviceAddress frame_data;
+  DeviceAddress cluster_list;
+  DeviceAddress light_list;
+  DeviceAddress light_list_counter;
+};
+static_assert(sizeof(LightClusteringPushConstants) == 32);
 
 struct HizPushConstants {
   u32 src_texture_idx;
@@ -172,6 +196,7 @@ struct RenderPass {
     std::unique_ptr<Buffer> instance_to_command_buffer;
     std::unique_ptr<Buffer> index_remapping_buffer;
     std::unique_ptr<Buffer> culled_index_remapping_buffer;
+    std::unique_ptr<Buffer> max_instances_per_cmd_buffer;
   };
   std::array<FrameWorkspace, frames_in_flight> frame_workspaces{};
 
@@ -258,6 +283,10 @@ struct FrameUBO {
   u32 pad0{};
   u32 pad1{};
   u32 pad2{};
+  u32 viewport_width{};
+  u32 viewport_height{};
+  u32 pad3{};
+  u32 pad4{};
 };
 static_assert(sizeof(FrameUBO) % 16 == 0);
 
@@ -363,6 +392,12 @@ struct SceneRenderer {
   PipelineHandle hiz_downsample_pipeline;
   PipelineHandle skinning_pipeline;
   PipelineHandle buffer_reset_pipeline;
+  PipelineHandle light_clustering_pipeline;
+
+  // Per-frame light clustering buffers.
+  FrameArray<std::unique_ptr<Buffer>> cluster_list_buffers;
+  FrameArray<std::unique_ptr<Buffer>> light_list_buffers;
+  FrameArray<std::unique_ptr<Buffer>> light_list_counter_buffers;
 
   // Per-frame buffers for GPU skinning.
   // joint_palette_buffers holds all joint matrices for all skinned entities,
@@ -423,6 +458,7 @@ struct SceneRenderer {
     glm::vec2 camera_near_far;
     glm::vec2 shadow_near_far;
     std::span<const GPUPointLight> point_lights;
+    glm::uvec2 viewport_size{};
   };
   auto prepare(const FrameRenderInfo &) -> PrepareResult;
 
@@ -454,6 +490,7 @@ struct SceneRenderer {
                                              TextureHandle output_pyramid);
   void forward_occlusion_culling_pass(VkCommandBuffer,
                                       TextureHandle hiz_target);
+  void light_clustering_pass(VkCommandBuffer);
   void reset_indirect_counts(VkCommandBuffer , RenderPass &);
   template <typename T>
   void reset_field(VkCommandBuffer cmd, Buffer &buf,

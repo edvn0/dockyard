@@ -108,7 +108,6 @@ static auto install_titlebar_hit_test(GLFWwindow *window) -> void {
 #endif
 
 namespace {
-
 struct AssetLoader : dy::IAssetLoader {
   dy::SceneRenderer &renderer;
   StringMap<dy::MeshAssetHandle> mesh_cache;
@@ -132,7 +131,7 @@ struct AssetLoader : dy::IAssetLoader {
   }
 
   auto make_animation_state(dy::MeshAssetHandle handle, dy::u32 skel_idx,
-                             dy::u32 clip_idx)
+                            dy::u32 clip_idx)
       -> std::optional<dy::AnimationState> override {
     const auto *asset = renderer.get_mesh(handle);
     if (!asset)
@@ -150,6 +149,7 @@ struct AssetLoader : dy::IAssetLoader {
 inline auto pack_normal(glm::vec3 n) {
   return glm::packSnorm4x8(glm::vec4(n, 0.0F));
 }
+
 inline auto pack_uv(glm::vec2 uv) { return glm::packHalf2x16(uv); }
 
 #include "./capsule_vertices.inl"
@@ -216,7 +216,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
   editor_camera = std::make_unique<EditorCamera>(
       get_window(), glm::vec3{0.F, 5.F, -6.F}, glm::vec3{0.F, 0.F, 0.F}, w, h);
-
   {
     imgui_renderer = std::make_unique<ImGuiRenderer>(
         get_window(), 16, *renderer,
@@ -232,7 +231,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     renderer->update_output_texture(viewport_resources.forward_target);
     renderer->initialise_bindless();
   }
-
   {
     auto cube =
         mesh::load_from_memory(*renderer, cube_verts, cube_indices,
@@ -253,7 +251,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   }
 
   auto &registry = *renderer->pipeline_registry;
-
   {
     auto result = registry.create_graphics({
         .shader_path = VFSPath::create("shaders://forward.slang"),
@@ -277,7 +274,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     }
     forward_pipeline = *result;
   }
-
   {
     auto result = registry.create_graphics({
         .shader_path = VFSPath::create("shaders://depth.slang"),
@@ -403,8 +399,10 @@ auto Dockforge::draw_titlebar() -> void {
 
   if (ImGui::IsItemHovered() &&
       ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-    const bool maximised = glfwGetWindowAttrib(glfw_window, GLFW_MAXIMIZED) != 0;
-    maximised ? glfwRestoreWindow(glfw_window) : glfwMaximizeWindow(glfw_window);
+    const bool maximised =
+        glfwGetWindowAttrib(glfw_window, GLFW_MAXIMIZED) != 0;
+    maximised ? glfwRestoreWindow(glfw_window)
+              : glfwMaximizeWindow(glfw_window);
   }
 
   // ── Visual content drawn over the drag region ─────────────────────────────
@@ -440,7 +438,8 @@ auto Dockforge::draw_titlebar() -> void {
   ImGui::SetCursorPos({right - btn_w * 2.0F, 0.0F});
   const bool maximised = glfwGetWindowAttrib(glfw_window, GLFW_MAXIMIZED) != 0;
   if (ImGui::Button(maximised ? "#r##max" : "#m##max", {btn_w, btn_h}))
-    maximised ? glfwRestoreWindow(glfw_window) : glfwMaximizeWindow(glfw_window);
+    maximised ? glfwRestoreWindow(glfw_window)
+              : glfwMaximizeWindow(glfw_window);
 
   ImGui::SetCursorPos({right - btn_w, 0.0F});
   ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.85F, 0.18F, 0.18F, 1.0F});
@@ -495,6 +494,7 @@ auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
     return {cam->view(), cam->projection()};
   return {editor_camera->view(), editor_camera->projection()};
 }
+
 [[nodiscard]] auto Dockforge::resolve_camera_with_position() const
     -> std::tuple<glm::mat4, glm::mat4, glm::vec3> {
   if (auto *cam = active_scene->primary_camera())
@@ -502,6 +502,7 @@ auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
   return {editor_camera->view(), editor_camera->projection(),
           editor_camera->position()};
 }
+
 auto Dockforge::resize(u32 w, u32 h) -> void {
   trace("Dockforge resized to {}x{}", w, h);
   viewport_resources.resize(*context, *renderer, w, h);
@@ -614,7 +615,8 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
                         IM_COL32(40, 40, 40, 255));
       dl->AddRectFilled({p.x, p.y}, {p.x + h, p.y + h},
                         IM_COL32(65, 65, 65, 255));
-      dl->AddRectFilled({p.x + h, p.y + h}, {p.x + texture_icon_size, p.y + texture_icon_size},
+      dl->AddRectFilled({p.x + h, p.y + h},
+                        {p.x + texture_icon_size, p.y + texture_icon_size},
                         IM_COL32(65, 65, 65, 255));
       dl->AddRect(p, {p.x + texture_icon_size, p.y + texture_icon_size},
                   ImGui::GetColorU32(ImGuiCol_Border));
@@ -623,8 +625,9 @@ auto Dockforge::try_pick_entity(glm::vec2 mouse_screen) -> void {
 
     ImGui::SameLine(0.0F, ImGui::GetStyle().ItemInnerSpacing.x);
     // vertically centre the InputInt against the icon
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                         ((texture_icon_size - ImGui::GetFrameHeight()) * 0.5F));
+    ImGui::SetCursorPosY(
+        ImGui::GetCursorPosY() +
+        ((texture_icon_size - ImGui::GetFrameHeight()) * 0.5F));
     int idx = static_cast<int>(index);
     ImGui::InputInt(label, &idx, 0, 0, ImGuiInputTextFlags_ReadOnly);
   };
@@ -711,6 +714,7 @@ struct SpanTelemetry {
                                                max_points);
   }
 };
+
 SpanTelemetry telemetry;
 } // namespace
 
@@ -727,7 +731,6 @@ auto draw_performance_overlay() -> void {
 
     if (ImPlot::BeginPlot("##FrametimeGraph", ImVec2(-1, 150),
                           ImPlotFlags_NoLegend)) {
-
       ImPlot::SetupAxis(ImAxis_X1, "Frames (History)", ImPlotAxisFlags_None);
       ImPlot::SetupAxis(ImAxis_Y1, "Frametime (ms)", ImPlotAxisFlags_None);
 
@@ -823,6 +826,7 @@ auto Dockforge::draw_hdr_selector() -> void {
 
   ImGui::End();
 }
+
 auto Dockforge::load_toolbar_icons() -> void {
   const std::array<std::pair<std::string_view, TextureHandle *>, 5> icons{{
       {"editor://icons/play_32.png", &icon_play},
@@ -1090,11 +1094,12 @@ auto Dockforge::build_ui() -> void {
                      10.0F, 1000.0F, "%.0f m");
     static bool always_invalidate_shadows = true;
     ImGui::Checkbox("Always invalidate", &always_invalidate_shadows);
-    if (always_invalidate_shadows || ImGui::IsItemDeactivatedAfterEdit())
+    if (always_invalidate_shadows || ImGui::IsItemDeactivatedAfterEdit()) {
       shadow_map_state.invalid = true;
+      editor_state.hierarchy_dirty = true;
+    }
   }
   ImGui::End();
-
   {
     ZoneScopedNC("draw_toolbar", 0x888888);
     draw_toolbar();
@@ -1219,7 +1224,7 @@ auto Dockforge::step() -> void {
       !script_engine->loaded())
     return;
   script_engine->update(active_scene, step_dt);
-    animation_state_update(step_dt);
+  animation_state_update(step_dt);
 }
 
 auto Dockforge::play() -> void {
@@ -1312,16 +1317,15 @@ auto Dockforge::stop() -> void {
 void Dockforge::animation_state_update(float ts) {
   ZoneScopedNC("Animation state update", 0xFF6611);
   PROFILE_SCOPE("Animation State");
-  if (ts <= 0.0F) return;
+  if (ts <= 0.0F)
+    return;
 
   const auto view = active_scene->view<AnimationState>();
-  std::vector<std::function<void()>> funcs {};
+  std::vector<std::function<void()>> funcs{};
   funcs.reserve(view.size());
 
-  for (auto&& [entity, animation_state] : view.each()) {
-    funcs.emplace_back([t = ts, &anim = animation_state] {
-      anim.advance(t);
-    });
+  for (auto &&[entity, animation_state] : view.each()) {
+    funcs.emplace_back([t = ts, &anim = animation_state] { anim.advance(t); });
   }
 
   renderer->thread_pool.submit_bulk(funcs).wait();
@@ -1344,7 +1348,6 @@ auto Dockforge::update(float ts) -> void {
   }
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
-
   {
     // Don't advance animations
     const auto timestep = sim_state.in<sim::S::Playing>() ? ts : 0.0F;
@@ -1533,6 +1536,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   TracyPlot("point_lights", static_cast<int64_t>(light_count));
   TracyPlot("mesh_entities", static_cast<int64_t>(render_view.size_hint()));
 
+  const VkExtent2D vp_extent = viewport_resources.extent();
   auto prepare_result = renderer->prepare({
       .frame_index = ctx.frame_index,
       .view = view,
@@ -1542,6 +1546,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       .shadow_near_far =
           glm::vec2(shadow_map_state.near_plane, shadow_map_state.far_plane),
       .point_lights = std::span(gpu_lights.data(), light_count),
+      .viewport_size = glm::uvec2(vp_extent.width, vp_extent.height),
   });
   if (prepare_result.failed()) {
     return ctx.next_frame_wait_value();
@@ -1574,7 +1579,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       .baseArrayLayer = 0U,
       .layerCount = 1U,
   };
-  const VkExtent2D vp_extent = viewport_resources.extent();
   const VkViewport viewport{
       .x = 0.0F,
       .y = static_cast<float>(vp_extent.height),
@@ -1596,11 +1600,9 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
       renderer->resolve(renderer->forward_target_handle);
   const auto &display_texture =
       renderer->resolve(viewport_resources.display_target);
-
   {
     renderer->skinning_pass(ctx.main_cb);
   }
-
   {
     renderer->depth_frustum_culling_pass(ctx.main_cb);
   }
@@ -1690,7 +1692,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     };
     emit_barrier(ctx.main_cb, csm_to_sampled);
   }
-
   {
     ZoneScopedNC("Dockforge::depth_prepass", 0xFF11AA);
     const auto &resolve_target =
@@ -1776,12 +1777,13 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     };
     emit_barrier(ctx.main_cb, hiz_barrier);
   }
-
   {
     renderer->forward_occlusion_culling_pass(
         ctx.main_cb, viewport_resources.hierarchical_depth_pyramid_target);
   }
-
+  {
+    renderer->light_clustering_pass(ctx.main_cb);
+  }
   {
     ZoneScopedNC("Dockforge::geometry_msaa_pass", 0xAA11FF);
 
@@ -1852,7 +1854,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     forward_to_composite.subresourceRange = color_range;
     emit_barrier(ctx.main_cb, forward_to_composite);
   }
-
   {
     ZoneScopedNC("Dockforge::tonemap_pass", 0xFFA07A);
     VkRenderingAttachmentInfo display_color{};
@@ -1886,7 +1887,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     composite_to_imgui.subresourceRange = color_range;
     emit_barrier(ctx.main_cb, composite_to_imgui);
   }
-
   {
     ZoneScopedNC("Dockforge::imgui_pass", 0xFFA500);
     const std::array<VkImageMemoryBarrier2, 1> swapchain_barriers{
@@ -1932,7 +1932,6 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     imgui_renderer->render(ctx.main_cb);
     vkCmdEndRendering(ctx.main_cb);
   }
-
   {
     VkImageMemoryBarrier2 present_barrier{};
     present_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -2008,22 +2007,22 @@ auto Dockforge::list_monitors() -> std::vector<std::string> {
 
 auto Dockforge::toggle_fullscreen(FullscreenMode mode, int monitor_index)
     -> void {
-  auto *window = App::get_window();
+  auto *glfw_window = App::get_window();
 
   // Same mode requested while already in it -> drop back to windowed.
   if (is_fullscreen && fullscreen_mode == mode) {
-    glfwSetWindowMonitor(window, nullptr, windowed_pos_x, windowed_pos_y,
+    glfwSetWindowMonitor(glfw_window, nullptr, windowed_pos_x, windowed_pos_y,
                          windowed_width, windowed_height, GLFW_DONT_CARE);
     is_fullscreen = false;
     return;
   }
 
   if (!is_fullscreen) {
-    glfwGetWindowPos(window, &windowed_pos_x, &windowed_pos_y);
-    glfwGetWindowSize(window, &windowed_width, &windowed_height);
+    glfwGetWindowPos(glfw_window, &windowed_pos_x, &windowed_pos_y);
+    glfwGetWindowSize(glfw_window, &windowed_width, &windowed_height);
   }
 
-  GLFWmonitor *monitor = resolve_target_monitor(window, monitor_index);
+  GLFWmonitor *monitor = resolve_target_monitor(glfw_window, monitor_index);
   const GLFWvidmode *vid_mode = glfwGetVideoMode(monitor);
   int monitor_x = 0;
   int monitor_y = 0;
@@ -2033,11 +2032,11 @@ auto Dockforge::toggle_fullscreen(FullscreenMode mode, int monitor_index)
     // Passing a real GLFWmonitor* triggers an actual display-mode switch
     // (DEVMODE change on Win32, XRandR mode set on X11). Refresh rate
     // doesn't need to be an exact match — GLFW snaps to the closest mode.
-    glfwSetWindowMonitor(window, monitor, 0, 0, vid_mode->width,
+    glfwSetWindowMonitor(glfw_window, monitor, 0, 0, vid_mode->width,
                          vid_mode->height, vid_mode->refreshRate);
   } else {
-    glfwSetWindowMonitor(window, nullptr, monitor_x, monitor_y, vid_mode->width,
-                         vid_mode->height, GLFW_DONT_CARE);
+    glfwSetWindowMonitor(glfw_window, nullptr, monitor_x, monitor_y,
+                         vid_mode->width, vid_mode->height, GLFW_DONT_CARE);
   }
 
   fullscreen_mode = mode;

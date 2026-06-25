@@ -552,6 +552,21 @@ auto SceneRenderer::initialise_bindless() -> void {
     }
 
     {
+      ZoneScopedNC("Light Clustering Pipeline", 0xFFD700);
+      auto result = pipeline_registry->create_compute({
+          .shader_path = VFSPath::create("shaders://light_clustering.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .layout = VK_NULL_HANDLE,
+      });
+      if (!result) {
+        error("light clustering pipeline initialization failed: {}",
+              result.error());
+        std::abort();
+      }
+      light_clustering_pipeline = *result;
+    }
+
+    {
       ZoneScopedNC("Depth-Only Culling Pipeline", 0x9370DB);
       auto result = pipeline_registry->create_compute({
           .shader_path = VFSPath::create("shaders://depth_only_culling.slang"),
@@ -689,6 +704,18 @@ auto SceneRenderer::resize() -> void {
     frame_ubo_buffers[i] =
         Buffer::create(ctx.allocator, "frame_ubo_buffer", sizeof(FrameUBO),
                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    cluster_list_buffers[i] =
+        Buffer::create(ctx.allocator, "cluster_list",
+                       cluster_total * sizeof(ClusterEntry),
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    cluster_list_buffers[i]->set_zero();
+    light_list_buffers[i] =
+        Buffer::create(ctx.allocator, "light_list",
+                       cluster_max_light_list_entries * sizeof(u32),
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    light_list_counter_buffers[i] =
+        Buffer::create(ctx.allocator, "light_list_counter", sizeof(u32),
+                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   }
 }
 
@@ -983,6 +1010,8 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
     ubo.point_light_count = static_cast<u32>(info.point_lights.size());
     std::copy_n(info.point_lights.data(), info.point_lights.size(),
                 ubo.point_lights.data());
+    ubo.viewport_width  = info.viewport_size.x;
+    ubo.viewport_height = info.viewport_size.y;
     frame_ubo_buffers.at(info.frame_index)->upload(std::span(&ubo, 1));
   }
 
@@ -1052,6 +1081,14 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
           skinned_position_scratch[fi]
               ? skinned_position_scratch[fi]->get_device_address()
               : DeviceAddress::Invalid,
+      .cluster_list_ptr =
+          DeviceAddress{
+              cluster_list_buffers[fi]->get_device_address(),
+          },
+      .light_list_ptr =
+          DeviceAddress{
+              light_list_buffers[fi]->get_device_address(),
+          },
   };
 
   for (const auto &batch : pass.batches) {
@@ -1083,23 +1120,25 @@ void SceneRenderer::depth_frustum_culling_pass(VkCommandBuffer cmd) {
   auto &depth_ws = depth_prepass.frame_workspaces.at(current_frame_index);
 
 
-  std::array<VkBufferMemoryBarrier2, 1> clear_barriers = {
-      VkBufferMemoryBarrier2{
-          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is
-                                                        // a mapped write
-          .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-          .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-          .dstAccessMask =
-              VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-          .buffer = depth_ws.indirect_buffer->get_buffer(),
-          .size = VK_WHOLE_SIZE,
-      },
+  auto make_host_to_compute = [](VkBuffer buf) -> VkBufferMemoryBarrier2 {
+    return {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is a mapped write
+        .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+        .buffer = buf,
+        .size = VK_WHOLE_SIZE,
+    };
+  };
+  std::array<VkBufferMemoryBarrier2, 2> clear_barriers = {
+      make_host_to_compute(depth_ws.indirect_buffer->get_buffer()),
+      make_host_to_compute(depth_ws.instance_to_command_buffer->get_buffer()),
   };
 
   VkDependencyInfo clear_dep{
       .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .bufferMemoryBarrierCount = 1U,
+      .bufferMemoryBarrierCount = static_cast<u32>(clear_barriers.size()),
       .pBufferMemoryBarriers = clear_barriers.data(),
   };
   vkCmdPipelineBarrier2(cmd, &clear_dep);
@@ -1365,20 +1404,26 @@ void SceneRenderer::forward_occlusion_culling_pass(
 
   reset_indirect_counts(cmd, forward_pass);
 
-  VkBufferMemoryBarrier2 clear_barrier{
-      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-      .srcStageMask =
-          VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is a mapped write
-      .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
-      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .dstAccessMask =
-          VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-      .buffer = forward_ws.indirect_buffer->get_buffer(),
-      .size = VK_WHOLE_SIZE,
+  auto make_host_to_compute = [](VkBuffer buf) -> VkBufferMemoryBarrier2 {
+    return {
+        .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is a mapped write
+        .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+        .buffer = buf,
+        .size = VK_WHOLE_SIZE,
+    };
   };
-  VkDependencyInfo clear_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-                             .bufferMemoryBarrierCount = 1,
-                             .pBufferMemoryBarriers = &clear_barrier};
+  std::array<VkBufferMemoryBarrier2, 2> clear_barriers = {
+      make_host_to_compute(forward_ws.indirect_buffer->get_buffer()),
+      make_host_to_compute(forward_ws.instance_to_command_buffer->get_buffer()),
+  };
+  VkDependencyInfo clear_dep{
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = static_cast<u32>(clear_barriers.size()),
+      .pBufferMemoryBarriers = clear_barriers.data(),
+  };
   vkCmdPipelineBarrier2(cmd, &clear_dep);
 
   const auto &resolved_pyramid = textures.get(hiz_target);
@@ -1389,8 +1434,8 @@ void SceneRenderer::forward_occlusion_culling_pass(
           global_instance_buffer[current_frame_index]->get_device_address(),
       .frame_data =
           frame_ubo_buffers.at(current_frame_index)->get_device_address(),
-      .forward_original_remap_buffer =
-          forward_ws.index_remapping_buffer->get_device_address(),
+      .forward_max_instances =
+          forward_ws.max_instances_per_cmd_buffer->get_device_address(),
       .forward_instance_to_command_buffer =
           forward_ws.instance_to_command_buffer->get_device_address(),
       .forward_indirect_commands =
@@ -1447,6 +1492,76 @@ void SceneRenderer::forward_occlusion_culling_pass(
       .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .bufferMemoryBarrierCount = 2U,
       .pBufferMemoryBarriers = post_cull_barriers.data(),
+  };
+  vkCmdPipelineBarrier2(cmd, &post_dep);
+}
+
+void SceneRenderer::light_clustering_pass(VkCommandBuffer cmd) {
+  ZoneScopedNC("SceneRenderer::light_clustering_pass", 0xFFD700);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "light_clustering_pass", 0xFFD700);
+
+  const auto fi = static_cast<u32>(current_frame_index);
+
+  // Reset the allocation counter via the existing compute reset shader
+  reset_field<u32>(cmd, *light_list_counter_buffers[fi], 1U, 0U, 0U);
+
+  // Barrier: counter COMPUTE_WRITE -> COMPUTE_READ/WRITE for the clustering pass
+  const VkBufferMemoryBarrier2 counter_barrier{
+      .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+      .buffer        = light_list_counter_buffers[fi]->get_buffer(),
+      .size          = VK_WHOLE_SIZE,
+  };
+  const VkDependencyInfo counter_dep{
+      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = 1U,
+      .pBufferMemoryBarriers    = &counter_barrier,
+  };
+  vkCmdPipelineBarrier2(cmd, &counter_dep);
+
+  const LightClusteringPushConstants push{
+      .frame_data         = frame_ubo_buffers.at(fi)->get_device_address(),
+      .cluster_list       = cluster_list_buffers[fi]->get_device_address(),
+      .light_list         = light_list_buffers[fi]->get_device_address(),
+      .light_list_counter = light_list_counter_buffers[fi]->get_device_address(),
+  };
+
+  const auto &entry = pipeline_registry->get_entry(light_clustering_pipeline);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
+                          0U, 1U, &bindless.set, 0U, nullptr);
+  vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                     sizeof(push), &push);
+  vkCmdDispatch(cmd, cluster_total, 1U, 1U);
+
+  // Barrier: cluster data COMPUTE_WRITE -> FRAGMENT_READ
+  std::array<VkBufferMemoryBarrier2, 2> post_cluster_barriers = {{
+      {
+          .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+          .buffer        = cluster_list_buffers[fi]->get_buffer(),
+          .size          = VK_WHOLE_SIZE,
+      },
+      {
+          .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+          .buffer        = light_list_buffers[fi]->get_buffer(),
+          .size          = VK_WHOLE_SIZE,
+      },
+  }};
+  const VkDependencyInfo post_dep{
+      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount = static_cast<u32>(post_cluster_barriers.size()),
+      .pBufferMemoryBarriers    = post_cluster_barriers.data(),
   };
   vkCmdPipelineBarrier2(cmd, &post_dep);
 }
@@ -1544,6 +1659,9 @@ auto RenderPass::ensure_capacity(usize command_count, usize instance_count,
                 "Index Remapping Buffer");
   ensure_buffer(ws.culled_index_remapping_buffer, instance_needed,
                 storage_flags, "Culled Index Remapping Buffer");
+  ensure_buffer(ws.max_instances_per_cmd_buffer,
+                command_count * sizeof(u32), storage_flags,
+                "Max Instances Per Cmd Buffer");
 
   return true;
 }
@@ -1556,6 +1674,7 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
   std::vector<PaddedDrawCommand> commands;
   std::vector<u32> remapped_indices;
   std::vector<u32> draw_counts;
+  std::vector<u32> max_instances;
   std::vector<u32> instance_to_commands(total_global_instances, 0xFFFF'FFFFu);
   batches.clear();
   u32 current_pipeline = ~0U;
@@ -1613,6 +1732,7 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
               .vertex_offset = m.vertex_offset,
               .first_instance = first_instance,
           });
+          max_instances.push_back(static_cast<u32>(i - run_start));
 
           batches.back().max_command_count++;
           draw_counts.back()++;
@@ -1637,6 +1757,7 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
     ws.count_buffer->upload_with_offset(draw_counts, 0);
     ws.index_remapping_buffer->upload_with_offset(remapped_indices, 0);
     ws.instance_to_command_buffer->upload_with_offset(instance_to_commands, 0);
+    ws.max_instances_per_cmd_buffer->upload_with_offset(max_instances, 0);
   }
 }
 
