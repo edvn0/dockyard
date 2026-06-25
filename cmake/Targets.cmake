@@ -144,7 +144,12 @@ set_target_properties(dockyard PROPERTIES FOLDER dockyard)
 
 add_executable(dockforge
         src/dockforge/main.cpp
-        src/dockforge/dockforge.cpp
+        src/dockforge/app/dockforge_init.cpp
+        src/dockforge/app/dockforge_ui.cpp
+        src/dockforge/app/dockforge_sim.cpp
+        src/dockforge/app/dockforge_update.cpp
+        src/dockforge/app/dockforge_render.cpp
+        src/dockforge/app/dockforge_window.cpp
         src/dockforge/free_camera_controller.cpp
         src/dockforge/path_camera_controller.cpp
         src/dockforge/editor_camera.cpp
