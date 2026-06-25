@@ -16,10 +16,6 @@
 #include <string>
 #include <vector>
 
-// Should be able to remove these includes if I wrap the gizmo operation
-#include <imgui.h>
-
-#include <ImGuizmo.h>
 
 namespace dy {
 class ImGuiRenderer;
@@ -56,7 +52,7 @@ struct Dockforge : App {
   ViewportResources viewport_resources;
 
   std::optional<glm::vec2> pending_pick;
-  ImGuizmo::OPERATION gizmo_op = ImGuizmo::TRANSLATE;
+  u32 gizmo_op = 1U; // ImGuizmo::TRANSLATE
   VkExtent2D viewport_panel_extent{};
   VkExtent2D viewport_panel_offset{};
   VkExtent2D last_ui_size{};
