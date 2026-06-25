@@ -36,15 +36,14 @@ auto Dockforge::update(float ts) -> void {
   if (!sim_state.in<sim::S::Editing>() && script_engine &&
       script_engine->loaded()) {
     if (script_engine->poll_reload()) {
-      script_engine->destroy(active_scene);
-      script_engine->pre_init(*asset_loader);
-      script_engine->init(active_scene, *asset_loader);
+      script_engine->end_play(active_scene);
+      script_engine->begin_play(active_scene);
       renderer->override_pool.needs_grow = true;
       info("Lua script hot reloaded");
       TracyMessage("Lua hot reloaded", 16);
     }
     if (sim_state.in<sim::S::Playing>())
-      script_engine->update(active_scene, ts);
+      script_engine->tick(active_scene, ts);
   }
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);

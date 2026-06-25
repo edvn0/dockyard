@@ -144,6 +144,8 @@ private:
   auto pause() -> void;
   auto resume() -> void;
   auto stop() -> void;
+  auto unload_scene() -> void;
+  auto reload_scene() -> void;
 
   void animation_state_update(float ts);
 

@@ -490,6 +490,15 @@ auto Dockforge::draw_toolbar() -> void {
     }
 
     ImGui::SameLine();
+    if (ImGui::Button("Unload Scene##scene", op_sz))
+      unload_scene();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!has_dll);
+    if (ImGui::Button("Reload Scene##scene", op_sz))
+      reload_scene();
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
     ImGui::TextDisabled("|");
     ImGui::SameLine();
 

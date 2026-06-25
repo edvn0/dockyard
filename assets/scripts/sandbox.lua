@@ -1,5 +1,5 @@
 -- sandbox.lua — port of src/sandbox/sandbox.cpp
--- State lives in this table (persists across init/update/destroy; rebuilt on reload).
+-- State lives in this table (persists across begin_play/tick/end_play; rebuilt on reload).
 local game = {
     helmet_mesh = nil,
     fox_mesh    = nil,
@@ -138,8 +138,6 @@ local function load_scene(scene, assets)
     assets:notify_material_overrides_added()
 end
 
--- ---------------------------------------------------------------------------
-
 local function make_foxes(scene, assets)
     if not (game.fox_mesh and game.fox_mesh:valid()) then return end
     for i = 0, 9 do
@@ -159,7 +157,9 @@ local function make_foxes(scene, assets)
     end
 end
 
-function game.pre_init(assets)
+-- ---------------------------------------------------------------------------
+
+function game.on_scene_load(scene, assets)
     local handle, err = assets:load_mesh(
         VFSPath.create("meshes://damaged_helmet/DamagedHelmet.glb"))
     if handle then
@@ -176,10 +176,6 @@ function game.pre_init(assets)
     else
         print("[Sandbox] Failed to preload fox mesh: " .. (fox_err or "?"))
     end
-end
-
-function game.init(scene, assets)
-    game.time = 0.0
 
     load_scene(scene, assets)
     make_foxes(scene, assets)
@@ -202,6 +198,10 @@ function game.init(scene, assets)
                 rand_range(-size, size))
         end
     end
+end
+
+function game.begin_play(scene)
+    game.time = 0.0
 
     -- Collect all entities with valid mesh handles into the orbit list
     game.helmets = {}
@@ -226,7 +226,7 @@ function game.init(scene, assets)
     end
 end
 
-function game.update(scene, dt)
+function game.tick(scene, dt)
     game.time    = game.time + dt
     local time   = game.time
     local radius = 5.0
@@ -245,10 +245,18 @@ function game.update(scene, dt)
     end
 end
 
-function game.destroy(scene)
+function game.end_play(scene)
     if game.player_id and scene:is_valid(game.player_id) then
         scene:destroy_entity(game.player_id)
     end
+end
+
+function game.on_scene_unload(scene)
+    game.helmet_mesh = nil
+    game.fox_mesh    = nil
+    game.helmets     = {}
+    game.player_id   = nil
+    game.time        = 0.0
 end
 
 return game

@@ -127,8 +127,10 @@ auto grow_pool(SceneRenderer &renderer) -> u32 {
   const u32 old_capacity = renderer.override_pool.capacity;
   const u32 new_capacity = old_capacity * 2;
 
-  info("MaterialOverridePool growing {} to {} slots", old_capacity,
-       new_capacity);
+  info("[Renderer] grow_pool(): {} -> {} slots, base_slot={} next={} free={}",
+       old_capacity, new_capacity,
+       renderer.override_pool.base_slot, renderer.override_pool.next,
+       renderer.override_pool.free_slots.size());
 
   vkDeviceWaitIdle(renderer.ctx.device);
 
@@ -154,6 +156,8 @@ auto grow_pool(SceneRenderer &renderer) -> u32 {
   renderer.override_pool.needs_grow = false;
   renderer.bindless.mark_dirty();
 
+  info("[Renderer] grow_pool(): done, new base_slot={} delta={}",
+       renderer.override_pool.base_slot, delta);
   return delta;
 }
 
@@ -203,6 +207,7 @@ auto create_main_pipeline_layout(VkDevice device,
 
 auto SceneRenderer::register_gltf(MeshAsset &&asset) -> MeshAssetHandle {
   ZoneScopedNC("SceneRenderer::register_gltf", 0x00BFFF);
+  const usize table_before = flat_prim_table.size();
   for (auto &node : asset.nodes) {
     for (auto &prim : node.primitives) {
       prim.flat_index = static_cast<u32>(flat_prim_table.size());
@@ -225,6 +230,8 @@ auto SceneRenderer::register_gltf(MeshAsset &&asset) -> MeshAssetHandle {
     }
   }
 
+  info("[Renderer] register_gltf(): handle={} flat_prim_table {} -> {} entries",
+       handle.index(), table_before, flat_prim_table.size());
   return handle;
 }
 
@@ -762,12 +769,19 @@ auto SceneRenderer::destroy() -> void {
 void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
                            u32 pipeline_id, u32 material_id) {
   auto *asset = get_mesh(handle);
-  if (asset == nullptr) [[unlikely]]
+  if (asset == nullptr) [[unlikely]] {
+    error("[Renderer] submit(): null mesh asset for handle={}", handle.index());
     return;
+  }
 
   for (const auto &node : asset->nodes) {
     const glm::mat4 node_t = t * node.local_transform;
     for (const auto &prim : node.primitives) {
+      if (prim.flat_index >= static_cast<u32>(flat_prim_table.size())) [[unlikely]] {
+        error("[Renderer] submit(): flat_index {} out of bounds (table={}), handle={}",
+              prim.flat_index, flat_prim_table.size(), handle.index());
+        continue;
+      }
       const u32 resolved_mat =
           material_id != ~0u ? material_id : prim.material_id;
       const u64 key = (static_cast<u64>(pipeline_id) << 48) |
@@ -790,8 +804,10 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
                            std::span<const glm::mat4> joint_palette,
                            u32 pipeline_id, u32 material_id) {
   auto *asset = get_mesh(handle);
-  if (asset == nullptr) [[unlikely]]
+  if (asset == nullptr) [[unlikely]] {
+    error("[Renderer] submit(skinned): null mesh asset for handle={}", handle.index());
     return;
+  }
 
   for (const auto &node : asset->nodes) {
     const glm::mat4 node_t = t * node.local_transform;
@@ -806,6 +822,11 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
     }
 
     for (const auto &prim : node.primitives) {
+      if (prim.flat_index >= static_cast<u32>(flat_prim_table.size())) [[unlikely]] {
+        error("[Renderer] submit(skinned): flat_index {} out of bounds (table={}), handle={}",
+              prim.flat_index, flat_prim_table.size(), handle.index());
+        continue;
+      }
       const u32 resolved_mat =
           material_id != ~0u ? material_id : prim.material_id;
       const u64 key = (static_cast<u64>(pipeline_id) << 48) |
@@ -962,18 +983,30 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
     global_instance_data.resize(fs.entries.size());
     for (u32 i = 0; i < static_cast<u32>(fs.sort_order.size()); ++i) {
       const auto &e = fs.entries[fs.sort_order[i]];
+      if (e.mesh_prim_flat_index >= static_cast<u32>(flat_prim_table.size())) [[unlikely]] {
+        error("[Renderer] prepare(): mesh_prim_flat_index {} out of bounds (table={}), entry skipped",
+              e.mesh_prim_flat_index, flat_prim_table.size());
+        global_instance_data[i] = {};
+        continue;
+      }
+      const auto *lod_group = flat_prim_table[e.mesh_prim_flat_index].lod_group;
+      if (lod_group == nullptr) [[unlikely]] {
+        error("[Renderer] prepare(): null lod_group at flat_index {}, entry skipped",
+              e.mesh_prim_flat_index);
+        global_instance_data[i] = {};
+        continue;
+      }
       const auto half = (e.aabb.get_max() - e.aabb.get_min()) * 0.5F;
       global_instance_data[i] = CompressedInstanceData{
           e.transform,
           static_cast<u16>(e.material_id),
           glm::length(half),
-          flat_prim_table[e.mesh_prim_flat_index].lod_group->lod_count,
+          lod_group->lod_count,
       };
       if (e.skinned_base != ~0u) {
         global_instance_data[i].padding0 = std::bit_cast<float>(e.skinned_base);
-        global_instance_data[i]
-            .padding1 = std::bit_cast<float>(static_cast<u32>(
-            flat_prim_table[e.mesh_prim_flat_index].lod_group->vertex_offset));
+        global_instance_data[i].padding1 =
+            std::bit_cast<float>(static_cast<u32>(lod_group->vertex_offset));
       }
     }
     global_instance_buffer[current_frame_index]->upload(global_instance_data);

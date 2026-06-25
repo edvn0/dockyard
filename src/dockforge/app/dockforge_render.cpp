@@ -93,6 +93,9 @@ static void compute_world_matrices(entt::registry &registry) {
 
 void Dockforge::flush_material_overrides() {
   ZoneScopedNC("Dockforge::flush_material_overrides", 0xFF8C00);
+  u32 newly_alloc = 0;
+  u32 alloc_fail = 0;
+  u32 dirty_flush = 0;
   auto view = active_scene->registry().view<Components::MaterialOverride>();
   for (auto &&[e, override_slot] : view.each()) {
     if (override_slot.gpu_slot ==
@@ -100,8 +103,12 @@ void Dockforge::flush_material_overrides() {
       if (auto slot = renderer->override_pool.alloc()) {
         override_slot.gpu_slot = *slot;
         override_slot.dirty = true;
+        ++newly_alloc;
       } else {
-        warn("MaterialOverridePool full - override skipped this frame");
+        ++alloc_fail;
+        warn("[Render] flush_material_overrides(): pool full (next={} cap={} free={}) - override skipped",
+             renderer->override_pool.next, renderer->override_pool.capacity,
+             renderer->override_pool.free_slots.size());
       }
     }
     if (override_slot.dirty &&
@@ -111,20 +118,27 @@ void Dockforge::flush_material_overrides() {
           override_slot.material;
       renderer->geometry_pool->flush_material(override_slot.gpu_slot);
       override_slot.dirty = false;
+      ++dirty_flush;
     }
   }
+  if (newly_alloc > 0 || alloc_fail > 0)
+    info("[Render] flush_material_overrides(): alloc_new={} dirty={} fail={}",
+         newly_alloc, dirty_flush, alloc_fail);
 }
 
 void Dockforge::patch_material_override_slots(u32 delta) {
   ZoneScopedNC("Dockforge::patch_material_override_slots", 0xFF8C00);
+  u32 patched = 0;
   auto view = active_scene->registry().view<Components::MaterialOverride>();
   for (auto &&[e, override_slot] : view.each()) {
     if (override_slot.gpu_slot !=
         Components::MaterialOverride::invalid_material) {
       override_slot.gpu_slot += delta;
       override_slot.dirty = true;
+      ++patched;
     }
   }
+  info("[Render] patch_material_override_slots(): patched={} delta={}", patched, delta);
 }
 
 auto Dockforge::render(RenderContext &ctx) -> u64 {

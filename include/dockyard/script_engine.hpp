@@ -24,10 +24,11 @@ public:
   auto load(const VFSPath &path) -> std::expected<void, std::string>;
   [[nodiscard]] auto loaded() const -> bool;
 
-  auto pre_init(IAssetLoader &) -> void;
-  auto init(Scene *, IAssetLoader &) -> void;
-  auto update(Scene *, float dt) -> void;
-  auto destroy(Scene *) -> void;
+  auto on_scene_load(Scene *, IAssetLoader &) -> void;
+  auto on_scene_unload(Scene *) -> void;
+  auto begin_play(Scene *) -> void;
+  auto tick(Scene *, float dt) -> void;
+  auto end_play(Scene *) -> void;
 
   // Returns true if the script was successfully hot-reloaded this tick.
   auto poll_reload() -> bool;

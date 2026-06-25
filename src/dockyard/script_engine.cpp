@@ -353,28 +353,34 @@ auto ScriptEngine::loaded() const -> bool {
   return impl && impl->game_table.valid();
 }
 
-auto ScriptEngine::pre_init(IAssetLoader &assets) -> void {
+auto ScriptEngine::on_scene_load(Scene *scene, IAssetLoader &assets) -> void {
   if (!loaded())
     return;
-  call_game_fn(impl->game_table, "pre_init", assets);
+  call_game_fn(impl->game_table, "on_scene_load", scene, assets);
 }
 
-auto ScriptEngine::init(Scene *scene, IAssetLoader &assets) -> void {
+auto ScriptEngine::on_scene_unload(Scene *scene) -> void {
   if (!loaded())
     return;
-  call_game_fn(impl->game_table, "init", scene, assets);
+  call_game_fn(impl->game_table, "on_scene_unload", scene);
 }
 
-auto ScriptEngine::update(Scene *scene, float dt) -> void {
+auto ScriptEngine::begin_play(Scene *scene) -> void {
   if (!loaded())
     return;
-  call_game_fn(impl->game_table, "update", scene, dt);
+  call_game_fn(impl->game_table, "begin_play", scene);
 }
 
-auto ScriptEngine::destroy(Scene *scene) -> void {
+auto ScriptEngine::tick(Scene *scene, float dt) -> void {
   if (!loaded())
     return;
-  call_game_fn(impl->game_table, "destroy", scene);
+  call_game_fn(impl->game_table, "tick", scene, dt);
+}
+
+auto ScriptEngine::end_play(Scene *scene) -> void {
+  if (!loaded())
+    return;
+  call_game_fn(impl->game_table, "end_play", scene);
 }
 
 auto ScriptEngine::poll_reload() -> bool {

@@ -264,6 +264,9 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
   }
 
+  if (script_engine && script_engine->loaded())
+    script_engine->on_scene_load(editor_scene.get(), *asset_loader);
+
   editor_state.active_scene = active_scene;
   editor_state.renderer = renderer.get();
 
@@ -311,7 +314,8 @@ auto Dockforge::load_script(const std::filesystem::path &path) -> void {
   if (auto result = script_engine->load(vfs_path)) {
     script_path = path;
     script_engine->start_watching();
-    script_engine->pre_init(*asset_loader);
+    if (editor_scene)
+      script_engine->on_scene_load(editor_scene.get(), *asset_loader);
   } else {
     warn("[ScriptEngine] {}", result.error());
   }
