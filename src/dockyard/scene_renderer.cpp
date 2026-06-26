@@ -1,5 +1,6 @@
 #include "dockyard/texture.hpp"
 #include <algorithm>
+#include <dockyard/crash_reporter.hpp>
 #include <dockyard/scene_renderer.hpp>
 
 #include <imgui.h>
@@ -723,6 +724,7 @@ auto SceneRenderer::upload_texture(std::span<const std::byte> data,
                                    std::string_view name, u32 w, u32 h,
                                    VkFormat fmt, bool gen_mips, bool storage)
     -> TextureHandle {
+  breadcrumb("upload_texture");
   ZoneScopedNC("SceneRenderer::upload_texture", 0x00CED1);
   auto tex = Texture::from_bytes(ctx, name,
                                  {
@@ -742,6 +744,7 @@ auto SceneRenderer::upload_texture(std::span<const std::byte> data,
 }
 
 auto SceneRenderer::resize() -> void {
+  breadcrumb("renderer_resize");
   ZoneScopedNC("SceneRenderer::resize", 0xFFA500);
   for (u32 i = 0U; i < frames_in_flight; ++i) {
     if (frame_ubo_buffers[i]) {
@@ -2217,8 +2220,8 @@ auto SceneRenderer::create_ibl_probe_from_hdr(SceneRenderer &renderer,
     return std::unexpected(probe.error());
 
   if (auto *entry = renderer.textures.get(equirect)) {
-    entry->texture.destroy(renderer.ctx, &renderer.textures);
     entry->texture.destroy(renderer.ctx, &renderer.subimages);
+    entry->texture.destroy(renderer.ctx, &renderer.textures);
   }
   renderer.textures.destroy(equirect);
 
@@ -2230,6 +2233,7 @@ auto SceneRenderer::set_hdr_map(VFSPath path) -> void {
 }
 
 auto SceneRenderer::process_pending_hdr_map() -> void {
+  breadcrumb("hdr_map_process");
   ZoneScopedNC("SceneRenderer::process_pending_hdr_map", 0xFFD700);
   auto hdr_map = std::move(pending_hdr_map.value());
   pending_hdr_map.reset();
@@ -2316,6 +2320,7 @@ void SceneRenderer::ensure_skinned_scratch(usize vertex_count) {
   if (vs && vs->size() >= vertex_count * sizeof(Vertex) && ps &&
       ps->size() >= vertex_count * sizeof(PositionOnlyVertex))
     return;
+  breadcrumb("skinned_scratch_alloc");
   const usize new_cap =
       std::max(vertex_count, (skinned_scratch_capacity * 3 / 2) + 1);
   if (vs) {
@@ -2341,6 +2346,7 @@ void SceneRenderer::ensure_joint_palette_capacity(usize mat_count) {
   const auto byte_size = mat_count * sizeof(glm::mat4);
   if (buf && buf->size() >= byte_size)
     return;
+  breadcrumb("joint_palette_alloc");
   if (buf) {
     DeletionQueue::the().push([b = buf->get_buffer(), a = buf->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
     buf->detach();

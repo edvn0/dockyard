@@ -1,5 +1,6 @@
 #include <csignal>
 #include <dockyard/app.hpp>
+#include <dockyard/crash_reporter.hpp>
 #include <dockyard/context.hpp>
 #include <dockyard/event_callbacks.hpp>
 #include <dockyard/imgui_renderer.hpp>
@@ -46,6 +47,35 @@ auto submit_to_queue(const VulkanContext &, VkCommandBuffer, const FrameSync &,
                      const ImageSync &, u64) -> VkResult;
 auto glfw_error_logger() -> void;
 
+auto report_device_fault(const VulkanContext &ctx) -> void {
+  if (!ctx.caps.device_fault)
+    return;
+
+  VkDeviceFaultCountsEXT counts{.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+  vkGetDeviceFaultInfoEXT(ctx.device, &counts, nullptr);
+
+  std::vector<VkDeviceFaultAddressInfoEXT> addr_info(counts.addressInfoCount);
+  std::vector<VkDeviceFaultVendorInfoEXT>  vendor_info(counts.vendorInfoCount);
+  VkDeviceFaultInfoEXT fault{
+      .sType        = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT,
+      .pAddressInfos = addr_info.data(),
+      .pVendorInfos  = vendor_info.data(),
+  };
+  vkGetDeviceFaultInfoEXT(ctx.device, &counts, &fault);
+
+  error("GPU fault: {}", fault.description);
+  for (const auto &addr : addr_info) {
+    if (addr.addressType != VK_DEVICE_FAULT_ADDRESS_TYPE_NONE_EXT)
+      error("  fault address type={} reported=0x{:016x} precision=0x{:x}",
+            static_cast<int>(addr.addressType),
+            static_cast<u64>(addr.reportedAddress),
+            static_cast<u64>(addr.addressPrecision));
+  }
+  for (const auto &v : vendor_info)
+    error("  vendor: {} code=0x{:x} data=0x{:x}", v.description,
+          v.vendorFaultCode, v.vendorFaultData);
+}
+
 std::atomic_bool running{true};
 static auto handler(auto) -> void {
   warn("Interrupted - exiting");
@@ -54,6 +84,7 @@ static auto handler(auto) -> void {
 
 auto App::run(i32 argc, char *argv[]) -> i32 {
   std::signal(SIGINT, handler);
+  install_crash_handler();
 
 #ifdef ASSETS_ROOT_PATH
   VFS::get().initialize(ASSETS_ROOT_PATH);
@@ -227,6 +258,8 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
   int exit_code = 0;
   while (running && (glfwWindowShouldClose(window) != VK_TRUE)) {
     auto &frame = frames.frame_sync[frame_index];
+    set_crash_frame(frame_id);
+    breadcrumb("wait_for_fence");
 
     if (ctx.caps.present_wait && frame.past_presentation_id > 0) {
       vkWaitForPresentKHR(ctx.device, sc.swapchain.swapchain,
@@ -236,6 +269,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
                       UINT64_MAX);
     }
     {
+      breadcrumb("poll_events");
       ZoneScopedNC("poll_events", 0xAAAAAA);
       glfwPollEvents();
       poll_pending_events();
@@ -243,6 +277,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     }
 
     {
+      breadcrumb("app_update");
       ZoneScopedNC("App::update", 0x00BFFF);
       update(ts.step());
     }
@@ -251,6 +286,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
       continue;
 
     if (render_listener.needs_recreation) {
+      breadcrumb("swapchain_recreate");
       vkDeviceWaitIdle(ctx.device);
       App::recreate_swapchain_manually(window, render_listener);
       continue;
@@ -258,6 +294,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
     DeletionQueue::the().begin_frame(frame_index);
 
+    breadcrumb("acquire_swapchain");
     auto maybe_index = acquire_swapchain_image(sc, frame);
     if (!maybe_index.has_value()) {
       App::recreate_swapchain_manually(window, render_listener);
@@ -284,6 +321,7 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
         .render_finished = image.render_finished_semaphore,
     };
 
+    breadcrumb("begin_cmd");
     if (!cb.begin()) {
       exit_code = -1;
       break;
@@ -291,11 +329,13 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
     u64 end_val;
     {
+      breadcrumb("app_render");
       ZoneScopedNC("App::render", 0xFF6347);
       end_val = render(r_ctx);
     }
     frame.last_value = end_val;
 
+    breadcrumb("end_cmd");
     if (!cb.end()) {
       exit_code = -1;
       break;
@@ -303,12 +343,15 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
     {
       ZoneScopedNC("App::submit_and_present", 0x9370DB);
+      breadcrumb("queue_submit");
       vkResetFences(ctx.device, 1, &frame.in_flight_fence);
       const auto submit_result =
           submit_to_queue(ctx, cb.command_buffer, frame, image, end_val);
       if (submit_result != VK_SUCCESS) {
-        if (submit_result == VK_ERROR_DEVICE_LOST)
+        if (submit_result == VK_ERROR_DEVICE_LOST) {
           error("Device lost during queue submit; shutting down cleanly");
+          report_device_fault(ctx);
+        }
         exit_code = -1;
         break;
       }
@@ -331,14 +374,17 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
       frame.past_presentation_id = ctx.caps.present_wait ? frame_id : 0;
 
+      breadcrumb("queue_present");
       const auto present_result =
           vkQueuePresentKHR(ctx.present_queue(), &present_info);
       if (present_result == VK_ERROR_OUT_OF_DATE_KHR ||
           present_result == VK_SUBOPTIMAL_KHR) {
         App::recreate_swapchain_manually(window, render_listener);
       } else if (present_result != VK_SUCCESS) {
-        if (present_result == VK_ERROR_DEVICE_LOST)
+        if (present_result == VK_ERROR_DEVICE_LOST) {
           error("Device lost during present; shutting down cleanly");
+          report_device_fault(ctx);
+        }
         exit_code = -1;
         break;
       }

@@ -55,4 +55,10 @@ void private_log_message(LogLevel level, std::string_view message) {
   logger->log(to_spdlog_level(level), message);
 }
 } // namespace detail
+
+void flush_log() {
+  if (logger)
+    logger->flush();
+}
+
 } // namespace dy

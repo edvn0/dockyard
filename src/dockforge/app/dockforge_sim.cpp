@@ -128,7 +128,8 @@ auto Dockforge::stop() -> void {
         ++invalidated;
       }
     }
-    info("[Sim] stop(): invalidated {} editor override slots, pool reset (base_slot={})",
+    info("[Sim] stop(): invalidated {} editor override slots, pool reset "
+         "(base_slot={})",
          invalidated, renderer->override_pool.base_slot);
 
     TracyMessage("Game stopped", 12);
@@ -151,10 +152,11 @@ auto Dockforge::unload_scene() -> void {
   if (!sim_state.in<sim::S::Editing>())
     return;
 
-  info("[Sim] unload_scene(): override_pool next={} cap={} free={} base_slot={}",
-       renderer->override_pool.next, renderer->override_pool.capacity,
-       renderer->override_pool.free_slots.size(),
-       renderer->override_pool.base_slot);
+  info(
+      "[Sim] unload_scene(): override_pool next={} cap={} free={} base_slot={}",
+      renderer->override_pool.next, renderer->override_pool.capacity,
+      renderer->override_pool.free_slots.size(),
+      renderer->override_pool.base_slot);
 
   if (script_engine && script_engine->loaded()) {
     info("[Sim] unload_scene(): calling on_scene_unload");
@@ -197,7 +199,6 @@ auto Dockforge::reload_scene() -> void {
 
 void Dockforge::animation_state_update(float ts) {
   ZoneScopedNC("Animation state update", 0xFF6611);
-  PROFILE_SCOPE("Animation State");
   if (ts <= 0.0F)
     return;
 

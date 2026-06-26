@@ -324,9 +324,13 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR,
       .pNext = &avail_unified,
   };
+  VkPhysicalDeviceFaultFeaturesEXT avail_fault{
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT,
+      .pNext = &avail_pipeline_exec,
+  };
   VkPhysicalDeviceFeatures2 avail2{
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-      .pNext = &avail_pipeline_exec,
+      .pNext = &avail_fault,
   };
   vkGetPhysicalDeviceFeatures2(phys_handle, &avail2);
 
@@ -339,6 +343,7 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   ctx.caps.unified_image_layouts = avail_unified.unifiedImageLayouts == VK_TRUE;
   ctx.caps.executable_properties =
       avail_pipeline_exec.pipelineExecutableInfo == VK_TRUE;
+  ctx.caps.device_fault = avail_fault.deviceFault == VK_TRUE;
 
   {
     VkPhysicalDeviceMemoryProperties mem_props{};
@@ -354,11 +359,11 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
 
   info("Caps: maintenance5={} maintenance6={} smooth_lines={} "
        "stippled_smooth_lines={} push_descriptor={} present_wait={} "
-       "unified_image_layouts={} transient_attachments={}",
+       "unified_image_layouts={} transient_attachments={} device_fault={}",
        ctx.caps.maintenance5, ctx.caps.maintenance6, ctx.caps.smooth_lines,
        ctx.caps.stippled_smooth_lines, ctx.caps.push_descriptor,
        ctx.caps.present_wait, ctx.caps.unified_image_layouts,
-       ctx.caps.transient_attachments);
+       ctx.caps.transient_attachments, ctx.caps.device_fault);
 
   VkPhysicalDeviceFeatures features{};
   features.multiDrawIndirect = VK_TRUE;
@@ -462,6 +467,16 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
             .add_required_extensions({
                 VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME,
             });
+  }
+  VkPhysicalDeviceFaultFeaturesEXT fault_features{
+      .sType       = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT,
+      .deviceFault = VK_TRUE,
+  };
+  if (ctx.caps.device_fault) {
+    selector = selector.add_required_extension_features(fault_features)
+                   .add_required_extensions({
+                       VK_EXT_DEVICE_FAULT_EXTENSION_NAME,
+                   });
   }
 
   auto phys_ret = selector.select();
@@ -1131,8 +1146,8 @@ auto IblProbe::destroy(const VulkanContext &ctx, SceneRenderer &renderer)
       return;
 
     if (auto *entry = renderer.textures.get(handle)) {
-      entry->texture.destroy(ctx, &renderer.textures);
       entry->texture.destroy(ctx, &renderer.subimages);
+      entry->texture.destroy(ctx, &renderer.textures);
     }
 
     renderer.textures.destroy(handle);

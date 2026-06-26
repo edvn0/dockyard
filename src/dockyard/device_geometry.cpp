@@ -2,6 +2,7 @@
 
 #include <dockyard/app.hpp>
 #include <dockyard/buffer.hpp>
+#include <dockyard/crash_reporter.hpp>
 
 #include <glm/gtc/packing.hpp>
 
@@ -65,6 +66,7 @@ auto GeometryPool::create(VmaAllocator allocator, usize v_size,
 
 auto resize_buffer(VmaAllocator allocator, std::string_view name,
                    std::unique_ptr<Buffer> &old_buffer, usize required_size) {
+  breadcrumb("geometry_buf_resize");
   usize new_size = old_buffer->size() * 2;
   while (new_size < required_size)
     new_size *= 2;
@@ -82,6 +84,7 @@ auto resize_buffer(VmaAllocator allocator, std::string_view name,
 
 auto GeometryPool::allocate(std::span<const Vertex> vertices,
                             std::span<const u32> indices) -> AllocatedOffset {
+  breadcrumb("geometry_alloc");
 
   const usize v_bytes = vertices.size_bytes();
   const usize i_bytes = indices.size_bytes();

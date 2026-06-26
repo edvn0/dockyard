@@ -1,5 +1,6 @@
 #include "dockyard/texture.hpp"
 #include <dockyard/bindless_descriptor.hpp>
+#include <dockyard/crash_reporter.hpp>
 #include <dockyard/vk_check.hpp>
 
 namespace dy {
@@ -110,6 +111,7 @@ auto BindlessSet::grow_if_needed(u32 req_textures, u32 req_samplers,
        max_cubemaps, max_3d_images, max_accel_structs, max_2d_arrays,
        max_sub_images);
 
+  breadcrumb("bindless_grow");
   destroy();
   need_repopulate = true;
   recreate();
@@ -257,6 +259,7 @@ auto BindlessSet::repopulate_if_needed(
                max_sub_images),
   }};
 
+  breadcrumb("bindless_repopulate");
   vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(),
                          0U, nullptr);
   need_repopulate = false;
@@ -264,6 +267,7 @@ auto BindlessSet::repopulate_if_needed(
 }
 
 auto BindlessSet::recreate() -> void {
+  breadcrumb("bindless_recreate");
   const bool accel_enabled = max_accel_structs > 0U;
 
   std::vector<VkDescriptorSetLayoutBinding> bindings{{

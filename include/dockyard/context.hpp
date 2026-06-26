@@ -38,6 +38,7 @@ struct VulkanContext {
     bool push_descriptor = false; // promoted in 1.4, but guard anyway
     bool transient_attachments =
         false; // lazily-allocated memory exists (mobile/tiled GPUs)
+    bool device_fault = false; // VK_EXT_device_fault
   } caps;
 
   auto graphics_queue() const -> VkQueue;

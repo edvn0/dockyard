@@ -14,6 +14,7 @@ void private_log_message(LogLevel, std::string_view);
 }
 
 bool is_level_enabled(LogLevel);
+void flush_log();
 
 template <typename... Args>
 auto info(std::format_string<Args...> fmt, Args &&...args) {

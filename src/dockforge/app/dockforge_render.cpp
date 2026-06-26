@@ -4,6 +4,7 @@
 
 #include <dockyard/animation.hpp>
 #include <dockyard/components.hpp>
+#include <dockyard/crash_reporter.hpp>
 #include <dockyard/imgui_renderer.hpp>
 #include <dockyard/scene_renderer.hpp>
 
@@ -211,6 +212,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   TracyPlot("mesh_entities", static_cast<int64_t>(render_view.size_hint()));
 
   const VkExtent2D vp_extent = viewport_resources.extent();
+  breadcrumb("renderer_prepare");
   auto prepare_result = renderer->prepare({
       .frame_index = ctx.frame_index,
       .view = view,
@@ -275,13 +277,16 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   const auto &display_texture =
       renderer->resolve(viewport_resources.display_target);
   {
+    breadcrumb("skinning_pass");
     renderer->skinning_pass(ctx.main_cb);
   }
   {
+    breadcrumb("depth_cull_pass");
     renderer->depth_frustum_culling_pass(ctx.main_cb);
   }
 
   if (shadow_map_state.invalid) {
+    breadcrumb("shadow_cascades");
     ZoneScopedNC("Dockforge::shadow_cascades", 0xB8860B);
     TracyMessage("CSM invalidated", 15);
     const VkExtent2D shadow_extent{
@@ -367,6 +372,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     emit_barrier(ctx.main_cb, csm_to_sampled);
   }
   {
+    breadcrumb("depth_prepass");
     ZoneScopedNC("Dockforge::depth_prepass", 0xFF11AA);
     const auto &resolve_target =
         renderer->resolve(viewport_resources.depth_resolved_target);
@@ -423,6 +429,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
 
   // Occlusion culling pass
   {
+    breadcrumb("hiz_build");
     ZoneScopedNC("Dockforge::hiz_build", 0xDDA0DD);
     renderer->blit_depth_to_pre_hiz_pass(
         ctx.main_cb, viewport_resources.depth_resolved_target,
@@ -452,13 +459,16 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     emit_barrier(ctx.main_cb, hiz_barrier);
   }
   {
+    breadcrumb("forward_cull_pass");
     renderer->forward_occlusion_culling_pass(
         ctx.main_cb, viewport_resources.hierarchical_depth_pyramid_target);
   }
   {
+    breadcrumb("light_cluster_pass");
     renderer->light_clustering_pass(ctx.main_cb);
   }
   {
+    breadcrumb("geometry_pass");
     ZoneScopedNC("Dockforge::geometry_msaa_pass", 0xAA11FF);
 
     VkRenderingAttachmentInfo forward_color{};
@@ -528,9 +538,11 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         forward_texture.image; // resolved target, not MSAA
     forward_to_composite.subresourceRange = color_range;
     emit_barrier(ctx.main_cb, forward_to_composite);
+    breadcrumb("bloom_pass");
     renderer->bloom_pass(ctx.main_cb);
   }
   {
+    breadcrumb("composite_pass");
     ZoneScopedNC("Dockforge::tonemap_pass", 0xFFA07A);
     VkRenderingAttachmentInfo display_color{};
     display_color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -564,6 +576,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     emit_barrier(ctx.main_cb, composite_to_imgui);
   }
   {
+    breadcrumb("imgui_pass");
     ZoneScopedNC("Dockforge::imgui_pass", 0xFFA500);
     const std::array<VkImageMemoryBarrier2, 1> swapchain_barriers{
         VkImageMemoryBarrier2{

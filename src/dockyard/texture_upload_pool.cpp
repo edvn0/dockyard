@@ -1,5 +1,6 @@
 #include <dockyard/texture_upload_pool.hpp>
 
+#include <dockyard/crash_reporter.hpp>
 #include <dockyard/scene_renderer.hpp>
 
 namespace dy::pool {
@@ -40,6 +41,7 @@ void TextureUploadPool::poll_n(SceneRenderer &renderer, usize n) {
 
   bool marked_dirty = false;
 
+  breadcrumb("texture_upload_commit");
   for (auto &entry : batch) {
     auto data = entry.cpu_work.get();
 

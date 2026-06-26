@@ -130,6 +130,26 @@ set_source_files_properties(src/dockyard/script_engine.cpp PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON
         SKIP_UNITY_BUILD_INCLUSION ON
 )
+
+# Crash reporter: platform-neutral ring buffer + OS-specific handler in separate TUs.
+target_sources(dockyard PRIVATE src/dockyard/crash_reporter_common.cpp)
+if (WIN32)
+  target_sources(dockyard PRIVATE src/dockyard/crash_reporter_win32.cpp)
+  target_link_libraries(dockyard PRIVATE DbgHelp)
+else ()
+  target_sources(dockyard PRIVATE src/dockyard/crash_reporter_linux.cpp)
+endif ()
+# Keep all three out of the unity batch and PCH: platform-specific headers are
+# incompatible with batch compilation, and relative includes in unity files
+# would resolve against the build-dir batch file, not the source directory.
+set_source_files_properties(
+        src/dockyard/crash_reporter_common.cpp
+        src/dockyard/crash_reporter_win32.cpp
+        src/dockyard/crash_reporter_linux.cpp
+        PROPERTIES
+          SKIP_UNITY_BUILD_INCLUSION ON
+          SKIP_PRECOMPILE_HEADERS ON
+)
 if (MSVC)
   set_source_files_properties(src/dockyard/script_engine.cpp PROPERTIES
           COMPILE_OPTIONS "/W3;/bigobj"

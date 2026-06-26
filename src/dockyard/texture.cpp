@@ -8,6 +8,7 @@
 
 #include <dockyard/app.hpp>
 #include <dockyard/context.hpp>
+#include <dockyard/crash_reporter.hpp>
 #include <dockyard/texture_upload_pool.hpp>
 #include <dockyard/vfs.hpp>
 
@@ -467,6 +468,7 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
                      u32 height, VkFormat format, VkImageUsageFlags usage,
                      VkImageAspectFlags aspect, VkSampleCountFlagBits samples,
                      u32 mips, bool dedicated_memory) -> Texture {
+  breadcrumb("texture_create");
   Texture rt{};
   rt.format = format;
   rt.extent = {.width = width, .height = height};
@@ -554,6 +556,7 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
 
 auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
                          const CreateInfo &ci) -> Texture {
+  breadcrumb("texture_from_bytes");
   assert((!ci.bytes.empty() || !ci.mips.empty()) && ci.width > 0 &&
          ci.height > 0);
 
