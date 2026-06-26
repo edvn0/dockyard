@@ -373,6 +373,14 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
 auto SceneRenderer::initialise_settings() -> void {
   settings_registry.add(
       "Skybox", [this] { ImGui::SliderFloat("LOD", &skybox_lod, 0.0F, 8.0F); });
+  settings_registry.add("Bloom", [this] {
+    ImGui::Checkbox("Enabled", &bloom_enabled);
+    ImGui::BeginDisabled(!bloom_enabled);
+    ImGui::SliderFloat("Threshold", &bloom_threshold, 0.0F, 4.0F);
+    ImGui::SliderFloat("Strength", &bloom_strength, 0.0F, 0.5F);
+    ImGui::SliderFloat("Scatter", &bloom_scatter, 0.0F, 1.0F);
+    ImGui::EndDisabled();
+  });
 }
 
 auto SceneRenderer::initialise_bindless() -> void {
@@ -521,6 +529,34 @@ auto SceneRenderer::initialise_bindless() -> void {
         std::abort();
       }
       composite_pipeline = *result;
+    }
+
+    {
+      ZoneScopedNC("Bloom Downsample Pipeline", 0xFF69B4);
+      auto result = pipeline_registry->create_compute({
+          .shader_path = VFSPath::create("shaders://bloom_downsample.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .layout = VK_NULL_HANDLE,
+      });
+      if (!result) {
+        error("bloom_downsample pipeline initialization failed: {}", result.error());
+        std::abort();
+      }
+      bloom_downsample_pipeline = *result;
+    }
+
+    {
+      ZoneScopedNC("Bloom Blur Pipeline", 0xFF69B4);
+      auto result = pipeline_registry->create_compute({
+          .shader_path = VFSPath::create("shaders://bloom_blur.slang"),
+          .descriptor_set_layout = bindless.layout,
+          .layout = VK_NULL_HANDLE,
+      });
+      if (!result) {
+        error("bloom_blur pipeline initialization failed: {}", result.error());
+        std::abort();
+      }
+      bloom_blur_pipeline = *result;
     }
 
     {
@@ -708,26 +744,34 @@ auto SceneRenderer::upload_texture(std::span<const std::byte> data,
 auto SceneRenderer::resize() -> void {
   ZoneScopedNC("SceneRenderer::resize", 0xFFA500);
   for (u32 i = 0U; i < frames_in_flight; ++i) {
-    DeletionQueue::the().push([b = frame_ubo_buffers[i]->get_buffer(), a = frame_ubo_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
-    frame_ubo_buffers[i]->detach();
+    if (frame_ubo_buffers[i]) {
+      DeletionQueue::the().push([b = frame_ubo_buffers[i]->get_buffer(), a = frame_ubo_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      frame_ubo_buffers[i]->detach();
+    }
     frame_ubo_buffers[i] =
         Buffer::create(ctx.allocator, "frame_ubo_buffer", sizeof(FrameUBO),
                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
-    DeletionQueue::the().push([b = cluster_list_buffers[i]->get_buffer(), a = cluster_list_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
-    cluster_list_buffers[i]->detach();
+    if (cluster_list_buffers[i]) {
+      DeletionQueue::the().push([b = cluster_list_buffers[i]->get_buffer(), a = cluster_list_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      cluster_list_buffers[i]->detach();
+    }
     cluster_list_buffers[i] =
         Buffer::create(ctx.allocator, "cluster_list",
                        cluster_total * sizeof(ClusterEntry),
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     cluster_list_buffers[i]->set_zero();
-    DeletionQueue::the().push([b = light_list_buffers[i]->get_buffer(), a = light_list_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
-    light_list_buffers[i]->detach();
+    if (light_list_buffers[i]) {
+      DeletionQueue::the().push([b = light_list_buffers[i]->get_buffer(), a = light_list_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      light_list_buffers[i]->detach();
+    }
     light_list_buffers[i] =
         Buffer::create(ctx.allocator, "light_list",
                        cluster_max_light_list_entries * sizeof(u32),
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-    DeletionQueue::the().push([b = light_list_counter_buffers[i]->get_buffer(), a = light_list_counter_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
-    light_list_counter_buffers[i]->detach();
+    if (light_list_counter_buffers[i]) {
+      DeletionQueue::the().push([b = light_list_counter_buffers[i]->get_buffer(), a = light_list_counter_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      light_list_counter_buffers[i]->detach();
+    }
     light_list_counter_buffers[i] =
         Buffer::create(ctx.allocator, "light_list_counter", sizeof(u32),
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -1646,6 +1690,181 @@ void SceneRenderer::skybox_pass(VkCommandBuffer cmd) {
   vkCmdDraw(cmd, 3u, 1u, 0u, 0u);
 }
 
+void SceneRenderer::bloom_pass(VkCommandBuffer cmd) {
+  ZoneScopedNC("SceneRenderer::bloom_pass", 0xFF69B4);
+  TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "bloom_pass", 0xFF69B4);
+
+  if (!bloom_enabled || !bloom_chain_handle.valid())
+    return;
+
+  const auto *bloom_entry = textures.get(bloom_chain_handle);
+  const u32 mip_count = bloom_entry->texture.mip_levels;
+  const u32 sampler_idx = hiz_sampler_handle.index();
+
+  auto mip_extent = [&](u32 mip) -> glm::uvec2 {
+    return {
+        std::max(1U, bloom_entry->texture.extent.width >> mip),
+        std::max(1U, bloom_entry->texture.extent.height >> mip),
+    };
+  };
+
+  auto compute_barrier = [&](u32 base_mip, u32 level_count) {
+    const VkImageMemoryBarrier2 barrier{
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .image = bloom_entry->texture.image,
+        .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                             .baseMipLevel = base_mip,
+                             .levelCount = level_count,
+                             .layerCount = 1},
+    };
+    const VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                               .imageMemoryBarrierCount = 1,
+                               .pImageMemoryBarriers = &barrier};
+    vkCmdPipelineBarrier2(cmd, &dep);
+  };
+
+  // ---- Downsample chain ----
+  {
+    const auto &entry = pipeline_registry->get_entry(bloom_downsample_pipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
+                            0U, 1U, &bindless.set, 0U, nullptr);
+
+    // First pass: forward_target → bloom mip 0
+    {
+      const glm::uvec2 dst = mip_extent(0);
+      const glm::uvec2 src = dst * 2U; // forward_target is 2× bloom mip 0
+      const BloomDownsamplePushConstants pc{
+          .src_texture_idx = forward_target_handle.index(),
+          .dst_texture_idx = bloom_entry->texture.mip_layer_handle(0, 0).index(),
+          .sampler_idx = sampler_idx,
+          .is_first_pass = 1U,
+          .src_size = src,
+          .threshold = bloom_threshold,
+      };
+      vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                         sizeof(pc), &pc);
+      vkCmdDispatch(cmd, (dst.x + 7U) / 8U, (dst.y + 7U) / 8U, 1U);
+      compute_barrier(0, 1);
+    }
+
+    // Subsequent passes: mip N-1 → mip N
+    for (u32 mip = 1; mip < mip_count; ++mip) {
+      const glm::uvec2 src = mip_extent(mip - 1);
+      const glm::uvec2 dst = mip_extent(mip);
+      const BloomDownsamplePushConstants pc{
+          .src_texture_idx = bloom_entry->texture.mip_layer_handle(mip - 1, 0).index(),
+          .dst_texture_idx = bloom_entry->texture.mip_layer_handle(mip, 0).index(),
+          .sampler_idx = sampler_idx,
+          .is_first_pass = 0U,
+          .src_size = src,
+          .threshold = bloom_threshold,
+      };
+      vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                         sizeof(pc), &pc);
+      vkCmdDispatch(cmd, (dst.x + 7U) / 8U, (dst.y + 7U) / 8U, 1U);
+      compute_barrier(mip, 1);
+    }
+  }
+
+  // ---- Separable upsample chain ----
+  // For each level: H blur (bloom mip+1 → scratch mip), then V blur + accumulate (scratch mip → bloom mip)
+  {
+    const auto *scratch_entry = textures.get(bloom_scratch_handle);
+
+    const auto &entry = pipeline_registry->get_entry(bloom_blur_pipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
+                            0U, 1U, &bindless.set, 0U, nullptr);
+
+    auto scratch_barrier = [&](u32 base_mip) {
+      const VkImageMemoryBarrier2 barrier{
+          .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
+          .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+          .image = scratch_entry->texture.image,
+          .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                               .baseMipLevel = base_mip,
+                               .levelCount = 1,
+                               .layerCount = 1},
+      };
+      const VkDependencyInfo dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                                 .imageMemoryBarrierCount = 1,
+                                 .pImageMemoryBarriers = &barrier};
+      vkCmdPipelineBarrier2(cmd, &dep);
+    };
+
+    for (i32 mip = static_cast<i32>(mip_count) - 2; mip >= 0; --mip) {
+      const auto umip = static_cast<u32>(mip);
+      const glm::uvec2 dst = mip_extent(umip);
+
+      // H blur: bloom_chain mip+1 → scratch mip
+      {
+        const BloomBlurPushConstants pc{
+            .src_texture_idx = bloom_entry->texture.mip_layer_handle(umip + 1, 0).index(),
+            .dst_texture_idx = scratch_entry->texture.mip_layer_handle(umip, 0).index(),
+            .sampler_idx = sampler_idx,
+            .is_vertical = 0U,
+            .dst_size = dst,
+            .scatter = bloom_scatter,
+            .accumulate = 0U,
+        };
+        vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                           sizeof(pc), &pc);
+        vkCmdDispatch(cmd, (dst.x + 7U) / 8U, (dst.y + 7U) / 8U, 1U);
+        scratch_barrier(umip);
+      }
+
+      // V blur + accumulate: scratch mip → bloom_chain mip
+      {
+        const BloomBlurPushConstants pc{
+            .src_texture_idx = scratch_entry->texture.mip_layer_handle(umip, 0).index(),
+            .dst_texture_idx = bloom_entry->texture.mip_layer_handle(umip, 0).index(),
+            .sampler_idx = sampler_idx,
+            .is_vertical = 1U,
+            .dst_size = dst,
+            .scatter = bloom_scatter,
+            .accumulate = 1U,
+        };
+        vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
+                           sizeof(pc), &pc);
+        vkCmdDispatch(cmd, (dst.x + 7U) / 8U, (dst.y + 7U) / 8U, 1U);
+        compute_barrier(umip, 1);
+      }
+    }
+  }
+
+  // Bloom mip 0 compute write → fragment read (for composite)
+  const VkImageMemoryBarrier2 bloom_to_composite{
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
+      .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+      .dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+      .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+      .image = bloom_entry->texture.image,
+      .subresourceRange = {.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                           .baseMipLevel = 0,
+                           .levelCount = 1,
+                           .layerCount = 1},
+  };
+  const VkDependencyInfo final_dep{.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                                   .imageMemoryBarrierCount = 1,
+                                   .pImageMemoryBarriers = &bloom_to_composite};
+  vkCmdPipelineBarrier2(cmd, &final_dep);
+}
+
 void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
   ZoneScopedNC("SceneRenderer::composite_pass", 0xFFA07A);
   TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "composite_pass", 0xFFA07A);
@@ -1657,6 +1876,8 @@ void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
   const CompositePushConstants push{
       .forward_texture_index = forward_target_handle,
       .sampler = dummy_sampler_handle,
+      .bloom_texture_index = bloom_enabled ? bloom_chain_handle : TextureHandle{},
+      .bloom_strength = bloom_strength,
   };
   vkCmdPushConstants(cmd, entry.layout,
                      VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

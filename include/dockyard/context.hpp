@@ -131,6 +131,8 @@ struct ViewportResources {
   TextureHandle display_target{};
 
   TextureHandle hierarchical_depth_pyramid_target{};
+  TextureHandle bloom_chain{};
+  TextureHandle bloom_scratch{};
 
   [[nodiscard]] auto extent() const { return forward_target_msaa.extent; }
 

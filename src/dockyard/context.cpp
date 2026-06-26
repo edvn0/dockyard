@@ -201,6 +201,54 @@ auto ViewportResources::resize(const VulkanContext &ctx,
         VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
   });
 
+  {
+    const u32 bloom_w = std::max(1U, w / 2);
+    const u32 bloom_h = std::max(1U, h / 2);
+    if (bloom_chain.valid()) {
+      renderer.textures.get(bloom_chain)->texture.destroy(ctx, &renderer.textures);
+      auto new_bloom = Texture::create(
+          ctx, "bloom_chain", bloom_w, bloom_h, VK_FORMAT_R16G16B16A16_SFLOAT,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+          VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT,
+          SceneRenderer::bloom_mip_count, true);
+      new_bloom.register_sub_views(ctx, renderer.textures, renderer.bindless);
+      renderer.textures.get(bloom_chain)->texture = std::move(new_bloom);
+    } else {
+      auto tex = Texture::create(
+          ctx, "bloom_chain", bloom_w, bloom_h, VK_FORMAT_R16G16B16A16_SFLOAT,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+          VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT,
+          SceneRenderer::bloom_mip_count, true);
+      tex.register_sub_views(ctx, renderer.textures, renderer.bindless);
+      bloom_chain = renderer.textures.create(TextureEntry{
+          .texture = std::move(tex),
+          .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+      });
+    }
+
+    if (bloom_scratch.valid()) {
+      renderer.textures.get(bloom_scratch)->texture.destroy(ctx, &renderer.textures);
+      auto new_scratch = Texture::create(
+          ctx, "bloom_scratch", bloom_w, bloom_h, VK_FORMAT_R16G16B16A16_SFLOAT,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+          VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT,
+          SceneRenderer::bloom_mip_count, true);
+      new_scratch.register_sub_views(ctx, renderer.textures, renderer.bindless);
+      renderer.textures.get(bloom_scratch)->texture = std::move(new_scratch);
+    } else {
+      auto tex = Texture::create(
+          ctx, "bloom_scratch", bloom_w, bloom_h, VK_FORMAT_R16G16B16A16_SFLOAT,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+          VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT,
+          SceneRenderer::bloom_mip_count, true);
+      tex.register_sub_views(ctx, renderer.textures, renderer.bindless);
+      bloom_scratch = renderer.textures.create(TextureEntry{
+          .texture = std::move(tex),
+          .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+      });
+    }
+  }
+
   resize_or_create(display_target, [&] {
     return Texture::create(
         ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,

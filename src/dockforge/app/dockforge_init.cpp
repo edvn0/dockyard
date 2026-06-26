@@ -184,6 +184,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 
     viewport_resources = ViewportResources::create(*context, *renderer, w, h);
     renderer->update_output_texture(viewport_resources.forward_target);
+    renderer->update_bloom_chain(viewport_resources.bloom_chain);
+    renderer->update_bloom_scratch(viewport_resources.bloom_scratch);
     renderer->initialise_bindless();
   }
   {

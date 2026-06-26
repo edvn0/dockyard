@@ -545,6 +545,7 @@ auto Dockforge::draw_toolbar() -> void {
     ImGui::SameLine();
     if (icon_button("##reload", icon_reload, has_dll)) {
       PROFILE_SCOPE("Reload script");
+      unload_scene();
       load_script(script_path);
     }
   }

@@ -60,9 +60,33 @@ struct GpuPushConstants {
 static_assert(sizeof(GpuPushConstants) == 96);
 
 struct CompositePushConstants {
-  const TextureHandle forward_texture_index;
-  const SamplerHandle sampler;
+  TextureHandle forward_texture_index;
+  SamplerHandle sampler;
+  TextureHandle bloom_texture_index;
+  f32 bloom_strength;
 };
+
+struct BloomDownsamplePushConstants {
+  u32 src_texture_idx;
+  u32 dst_texture_idx;
+  u32 sampler_idx;
+  u32 is_first_pass;
+  glm::uvec2 src_size;
+  f32 threshold;
+  f32 _pad{};
+};
+static_assert(sizeof(BloomDownsamplePushConstants) == 32);
+
+struct BloomBlurPushConstants {
+  u32 src_texture_idx;
+  u32 dst_texture_idx;
+  u32 sampler_idx;
+  u32 is_vertical;
+  glm::uvec2 dst_size;
+  f32 scatter;
+  u32 accumulate;
+};
+static_assert(sizeof(BloomBlurPushConstants) == 32);
 
 struct CullingPushConstants {
   DeviceAddress instance_buffer;
@@ -346,7 +370,11 @@ struct SceneRenderer {
   TextureHandle black_texture;
 
   TextureHandle forward_target_handle;
+  TextureHandle bloom_chain_handle;
+  TextureHandle bloom_scratch_handle;
   auto update_output_texture(TextureHandle h) { forward_target_handle = h; }
+  auto update_bloom_chain(TextureHandle h) { bloom_chain_handle = h; }
+  auto update_bloom_scratch(TextureHandle h) { bloom_scratch_handle = h; }
 
   VkSampler dummy_sampler_vk = VK_NULL_HANDLE;
   VkSampler comparison_sampler_vk = VK_NULL_HANDLE;
@@ -381,10 +409,19 @@ struct SceneRenderer {
 
   f32 skybox_lod = 0.7F;
 
+  f32 bloom_threshold = 1.0F;
+  f32 bloom_strength = 0.04F;
+  f32 bloom_scatter = 0.7F;
+  bool bloom_enabled = true;
+
+  static constexpr u32 bloom_mip_count = 5;
+
   RendererSettingsRegistry settings_registry;
 
   PipelineHandle shadow_pipeline;
   PipelineHandle composite_pipeline;
+  PipelineHandle bloom_downsample_pipeline;
+  PipelineHandle bloom_blur_pipeline;
   PipelineHandle skybox_pipeline;
   PipelineHandle depth_only_culling_pipeline;
   PipelineHandle depth_to_r32_pipeline;
@@ -474,6 +511,7 @@ struct SceneRenderer {
   void render_pass(VkCommandBuffer, RenderPass &,
                    VkPipeline override_pipeline = VK_NULL_HANDLE);
   void composite_pass(VkCommandBuffer);
+  void bloom_pass(VkCommandBuffer);
   void skybox_pass(VkCommandBuffer);
   void depth_frustum_culling_pass(VkCommandBuffer);
   // Dispatches one compute job per pending SkinJob; inserts a compute→vertex

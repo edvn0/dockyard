@@ -519,7 +519,8 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     forward_to_composite.srcStageMask =
         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     forward_to_composite.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    forward_to_composite.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    forward_to_composite.dstStageMask =
+        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     forward_to_composite.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     forward_to_composite.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
     forward_to_composite.newLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -527,6 +528,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         forward_texture.image; // resolved target, not MSAA
     forward_to_composite.subresourceRange = color_range;
     emit_barrier(ctx.main_cb, forward_to_composite);
+    renderer->bloom_pass(ctx.main_cb);
   }
   {
     ZoneScopedNC("Dockforge::tonemap_pass", 0xFFA07A);
