@@ -45,6 +45,8 @@ Buffer::~Buffer() {
     vmaDestroyBuffer(allocator, buffer, allocation);
 }
 
+auto Buffer::detach() -> void { buffer = VK_NULL_HANDLE; }
+
 auto Buffer::set_name(const std::string_view name) const -> void {
   VmaAllocatorInfo info{};
   vmaGetAllocatorInfo(allocator, &info);

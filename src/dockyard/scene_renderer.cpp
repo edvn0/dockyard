@@ -708,18 +708,26 @@ auto SceneRenderer::upload_texture(std::span<const std::byte> data,
 auto SceneRenderer::resize() -> void {
   ZoneScopedNC("SceneRenderer::resize", 0xFFA500);
   for (u32 i = 0U; i < frames_in_flight; ++i) {
+    DeletionQueue::the().push([b = frame_ubo_buffers[i]->get_buffer(), a = frame_ubo_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    frame_ubo_buffers[i]->detach();
     frame_ubo_buffers[i] =
         Buffer::create(ctx.allocator, "frame_ubo_buffer", sizeof(FrameUBO),
                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
+    DeletionQueue::the().push([b = cluster_list_buffers[i]->get_buffer(), a = cluster_list_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    cluster_list_buffers[i]->detach();
     cluster_list_buffers[i] =
         Buffer::create(ctx.allocator, "cluster_list",
                        cluster_total * sizeof(ClusterEntry),
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     cluster_list_buffers[i]->set_zero();
+    DeletionQueue::the().push([b = light_list_buffers[i]->get_buffer(), a = light_list_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    light_list_buffers[i]->detach();
     light_list_buffers[i] =
         Buffer::create(ctx.allocator, "light_list",
                        cluster_max_light_list_entries * sizeof(u32),
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    DeletionQueue::the().push([b = light_list_counter_buffers[i]->get_buffer(), a = light_list_counter_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    light_list_counter_buffers[i]->detach();
     light_list_counter_buffers[i] =
         Buffer::create(ctx.allocator, "light_list_counter", sizeof(u32),
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -898,6 +906,10 @@ void SceneRenderer::ensure_global_capacity(usize instance_count) {
   auto &current = global_instance_buffer[current_frame_index];
   if (const auto size = instance_count * sizeof(CompressedInstanceData);
       !current || current->size() < size) {
+    if (current) {
+      DeletionQueue::the().push([b = current->get_buffer(), a = current->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      current->detach();
+    }
     current = Buffer::create(ctx.allocator, "global_instance_buffer", size,
                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   }
@@ -2085,6 +2097,14 @@ void SceneRenderer::ensure_skinned_scratch(usize vertex_count) {
     return;
   const usize new_cap =
       std::max(vertex_count, (skinned_scratch_capacity * 3 / 2) + 1);
+  if (vs) {
+    DeletionQueue::the().push([b = vs->get_buffer(), a = vs->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    vs->detach();
+  }
+  if (ps) {
+    DeletionQueue::the().push([b = ps->get_buffer(), a = ps->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    ps->detach();
+  }
   vs = Buffer::create(ctx.allocator, "skinned_vertex_scratch",
                       new_cap * sizeof(Vertex),
                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -2100,6 +2120,10 @@ void SceneRenderer::ensure_joint_palette_capacity(usize mat_count) {
   const auto byte_size = mat_count * sizeof(glm::mat4);
   if (buf && buf->size() >= byte_size)
     return;
+  if (buf) {
+    DeletionQueue::the().push([b = buf->get_buffer(), a = buf->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    buf->detach();
+  }
   buf = Buffer::create(ctx.allocator, "joint_palette", byte_size,
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
   joint_palette_capacity = std::max(joint_palette_capacity, mat_count);

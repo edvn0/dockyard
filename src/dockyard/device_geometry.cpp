@@ -75,8 +75,8 @@ auto resize_buffer(VmaAllocator allocator, std::string_view name,
   std::memcpy(new_buffer->get_mapped_pointer(),
               old_buffer->get_mapped_pointer(), old_buffer->size());
 
-  DeletionQueue::the().push(
-      [allocator = allocator, buf = old_buffer->get_buffer(), alloc = old_buffer->get_allocation()]{ vmaDestroyBuffer(allocator, buf, alloc); });
+  DeletionQueue::the().push([b = old_buffer->get_buffer(), a = old_buffer->get_allocation(), alloc = allocator] { vmaDestroyBuffer(alloc, b, a); });
+  old_buffer->detach();
   old_buffer = std::move(new_buffer);
 }
 

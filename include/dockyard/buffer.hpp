@@ -125,6 +125,8 @@ public:
     return usage_flags;
   }
 
+  auto detach() -> void;
+
   static auto create(VmaAllocator allocator, std::string_view,
                      VkDeviceSize size, VkBufferUsageFlags usage)
       -> std::unique_ptr<Buffer>;
