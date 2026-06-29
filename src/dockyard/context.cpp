@@ -76,9 +76,9 @@ auto SwapchainResources::rebuild(const VulkanContext &ctx, VkSurfaceKHR surface,
           .set_desired_extent(width, height)
           .set_old_swapchain(swapchain)
           .use_default_format_selection()
-          .set_desired_present_mode(VK_PRESENT_MODE_FIFO_RELAXED_KHR)
+          .set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
           .add_fallback_present_mode(VK_PRESENT_MODE_FIFO_KHR)
-          .set_desired_min_image_count(frames_in_flight + 1) // 3
+          .set_desired_min_image_count(frames_in_flight + 5) // 3
           .set_image_usage_flags(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
           .build();
 
@@ -343,7 +343,7 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   ctx.caps.unified_image_layouts = avail_unified.unifiedImageLayouts == VK_TRUE;
   ctx.caps.executable_properties =
       avail_pipeline_exec.pipelineExecutableInfo == VK_TRUE;
-  ctx.caps.device_fault = avail_fault.deviceFault == VK_TRUE;
+  // ctx.caps.device_fault = avail_fault.deviceFault == VK_TRUE;
 
   {
     VkPhysicalDeviceMemoryProperties mem_props{};

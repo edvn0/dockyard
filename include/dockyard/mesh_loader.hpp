@@ -5,14 +5,10 @@
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
+#include <dockyard/types.hpp>
 #include <dockyard/vfs_path.hpp>
 
 #include <glm/glm.hpp>
-
-#include <expected>
-#include <filesystem>
-#include <string>
-#include <vector>
 
 namespace dy::mesh {
 

@@ -1175,13 +1175,16 @@ struct PrimLods {
   std::vector<std::vector<u32>> extra;
 };
 
+namespace {
+fastgltf::Parser parser{
+    fastgltf::Extensions::KHR_lights_punctual |
+        fastgltf::Extensions::KHR_materials_specular,
+};
+}
+
 static auto parse_gltf_file(const std::filesystem::path &fs_path,
                             const std::filesystem::path &gltf_dir)
     -> std::expected<fastgltf::Asset, std::string> {
-  fastgltf::Parser parser{
-      fastgltf::Extensions::KHR_lights_punctual |
-          fastgltf::Extensions::KHR_materials_specular,
-  };
   auto data = fastgltf::GltfDataBuffer::FromPath(fs_path);
   auto result = parser.loadGltf(data.get(), gltf_dir,
                                 fastgltf::Options::GenerateMeshIndices);
@@ -1195,7 +1198,6 @@ static auto parse_gltf_file(const std::filesystem::path &fs_path,
 
 static auto parse_gltf_memory(std::span<const std::byte> bytes)
     -> std::expected<fastgltf::Asset, std::string> {
-  fastgltf::Parser parser;
   auto data = fastgltf::GltfDataBuffer::FromBytes(bytes.data(), bytes.size());
   if (!data)
     return std::unexpected(

@@ -148,8 +148,8 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
   float3 n = normalize(mul(sampled_n, tbn));
 
   float4 mr = sample_material_tex(mat.metallic_roughness_index, input.uv);
-  float roughness = clamp(mr.g * mat.roughness_factor, 0.04f, 1.0f);
-  float metallic = clamp(mr.b * mat.metallic_factor, 0.0f, 1.0f);
+  float roughness = clamp(mr.b * mat.roughness_factor, 0.0f, 1.0f);
+  float metallic = clamp(mr.g * mat.metallic_factor, 0.04f, 0.1f);
 
   float3 emissive = sample_material_tex(mat.emissive_index, input.uv).rgb *
                     mat.emissive_factor.xyz * mat.emissive_factor.a;

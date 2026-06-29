@@ -84,9 +84,16 @@ struct AssetLoader : dy::IAssetLoader {
 
   auto load_mesh(const dy::VFSPath &path)
       -> std::expected<dy::MeshAssetHandle, std::string> override {
-    if (auto it = mesh_cache.find(path.view()); it != mesh_cache.end())
+    if (auto it = mesh_cache.find(path.view()); it != mesh_cache.end()) {
       return it->second;
-    auto result = dy::mesh::load_from_path(path, renderer);
+    }
+
+    std::expected<MeshAssetHandle, std::string> result{};
+    if (path.extension() == ".gz" || path.extension() == ".zip") {
+      result = dy::mesh::load_from_compressed(path, renderer);
+    } else {
+      result = dy::mesh::load_from_path(path, renderer);
+    }
     if (result)
       mesh_cache.emplace(std::string{path.view()}, *result);
     return result;

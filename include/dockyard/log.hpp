@@ -1,6 +1,5 @@
 #pragma once
 
-#include <filesystem>
 #include <format>
 #include <string_view>
 #include <vector>
@@ -48,7 +47,6 @@ void debug(std::format_string<Args...> fmt, Args &&...args) {
 } // namespace dy
 
 namespace std {
-
 template <typename T> struct formatter<vector<T>> {
   formatter<T> element_formatter;
 
@@ -66,12 +64,6 @@ template <typename T> struct formatter<vector<T>> {
       }
     }
     return format_to(out, "]");
-  }
-};
-
-template <> struct formatter<filesystem::path> : formatter<string_view> {
-  auto format(const filesystem::path &p, format_context &ctx) const {
-    return formatter<string_view>::format(p.string(), ctx);
   }
 };
 } // namespace std

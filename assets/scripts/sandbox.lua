@@ -202,15 +202,17 @@ function game.on_scene_load(scene, assets)
     --]]
 
     local bistro_handle, err = assets:load_mesh(
-        VFSPath.create("meshes://Bistro_v5_2/BistroExterior.glb"))
+        VFSPath.create("meshes://Bistro/BistroCompressed.tar.gz"))
     if bistro_handle then
         local e   = scene:make("Bistro")
         local mc  = e:add_mesh()
         mc.handle = bistro_handle
-        mc:set_source_path("meshes://Bistro_v5_2/BistroExterior.glb")
+        mc:set_source_path("meshes://Bistro/BistroCompressed.tar.gz")
 
         local tf = e:get_transform()
         tf.scale = vec3(0.01, 0.01, 0.01)
+        local pi = 3.1415925358
+        tf.rotation = quat_from_euler(pi/2, 0, 0)
     else
         print("[sandbox] bistro load error: " .. (err or "?"))
     end

@@ -30,8 +30,8 @@ void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID,
                            pc.frame_data.camera_pos.xyz,
                            pc.frame_data.camera_far * pc.frame_data.camera_far);
 
-  if (!cull.visible)
-    return;
+  // if (!cull.visible)
+  //   return;
 
   uint depth_base_cmd_id = pc.depth_instance_to_command[item_idx];
   if (depth_base_cmd_id != 0xFFFFFFFF) {
@@ -40,7 +40,7 @@ void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID,
         cmd_ptr = pc.depth_indirect_commands + depth_lod_cmd_id;
 
     uint depth_slot;
-    InterlockedAdd((*cmd_ptr).instanceCount, 1, depth_slot);
-    pc.depth_culled_remap[(*cmd_ptr).firstInstance + depth_slot] = item_idx;
+    InterlockedAdd(cmd_ptr->instanceCount, 1, depth_slot);
+    pc.depth_culled_remap[cmd_ptr->firstInstance + depth_slot] = item_idx;
   }
 }

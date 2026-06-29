@@ -263,6 +263,49 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     init(init_context);
   }
 
+  // --- present telemetry: non-blocking VK_KHR_present_wait polling ---
+  // Tracks when frames actually hit glass, without gating the loop on it.
+  struct PresentRecord {
+    u64 present_id{};
+    u64 frame_id{};
+    std::chrono::steady_clock::time_point submitted_at{};
+  };
+  std::deque<PresentRecord> pending_presents;
+  const usize max_pending_presents = static_cast<usize>(frames_in_flight) * 2;
+
+  auto drain_present_telemetry = [&] {
+    if (!ctx.caps.present_wait)
+      return;
+
+    while (!pending_presents.empty()) {
+      const auto &rec = pending_presents.front();
+      const auto result = vkWaitForPresentKHR(
+          ctx.device, sc.swapchain.swapchain, rec.present_id, 0);
+
+      if (result == VK_SUCCESS) {
+        const auto latency_ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - rec.submitted_at)
+                .count();
+        TracyPlot("PresentLatencyMs", latency_ms);
+        pending_presents.pop_front();
+      } else if (result == VK_TIMEOUT) {
+        // Presents resolve in submission order, so nothing further back
+        // in the queue can be ready yet either - stop checking this frame.
+        break;
+      } else {
+        // VK_ERROR_DEVICE_LOST etc - the main submit/present path will
+        // surface and handle this; just stop draining here.
+        break;
+      }
+    }
+
+    // In mailbox mode some submitted frames get superseded and never
+    // present, so their entries would otherwise never clear out.
+    while (pending_presents.size() > max_pending_presents)
+      pending_presents.pop_front();
+  };
+
   TimeStep ts{};
   int exit_code = 0;
   while (running && (glfwWindowShouldClose(window) != VK_TRUE)) {
@@ -270,19 +313,14 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
     set_crash_frame(frame_id);
     breadcrumb("wait_for_fence");
 
-    if (ctx.caps.present_wait && frame.past_presentation_id > 0) {
-      vkWaitForPresentKHR(ctx.device, sc.swapchain.swapchain,
-                          frame.past_presentation_id, UINT64_MAX);
-    } else {
-      vkWaitForFences(ctx.device, 1, &frame.in_flight_fence, VK_TRUE,
-                      UINT64_MAX);
-    }
+    vkWaitForFences(ctx.device, 1, &frame.in_flight_fence, VK_TRUE, UINT64_MAX);
     {
       breadcrumb("poll_events");
       ZoneScopedNC("poll_events", 0xAAAAAA);
       glfwPollEvents();
       poll_pending_events();
       dispatcher.update();
+      drain_present_telemetry();
     }
 
     {
@@ -381,8 +419,6 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
         present_info.pNext = &present_id_info;
       }
 
-      frame.past_presentation_id = ctx.caps.present_wait ? frame_id : 0;
-
       breadcrumb("queue_present");
       const auto present_result =
           vkQueuePresentKHR(ctx.present_queue(), &present_info);
@@ -396,11 +432,17 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
         }
         exit_code = -1;
         break;
+      } else if (ctx.caps.present_wait) {
+        pending_presents.push_back({
+            .present_id = frame_id,
+            .frame_id = frame_id,
+            .submitted_at = std::chrono::steady_clock::now(),
+        });
       }
 
       image_last_frame_id[index] = frame_id;
       frame_id++;
-    } // submit_and_present
+    }
     last_frame_index = frame_index;
     frame_index = (frame_index + 1) % frames_in_flight;
 
@@ -411,9 +453,6 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
 
   vkDeviceWaitIdle(ctx.device);
   destroy();
-  // Result intentionally ignored: on a lost device this returns
-  // VK_ERROR_DEVICE_LOST, which is fine — we only need it to drain pending work
-  // when the device is healthy before flushing deletions.
   DeletionQueue::the().flush_all();
 
   tracy::GetProfiler().RequestShutdown();

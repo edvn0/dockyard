@@ -45,7 +45,7 @@ void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID,
                instance.transform[2][3]);
     float3 view_pos = mul(pc.frame_data.view, float4(world_pos, 1.0f)).xyz;
 
-    if (view_pos.z - instance.bounding_radius > 0.0f) {
+    if (view_pos.z - instance.bounding_radius < 0.0F) {
       float3 min_box = view_pos - float3(instance.bounding_radius);
       float3 max_box = view_pos + float3(instance.bounding_radius);
 
@@ -112,10 +112,8 @@ void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID,
   uint forward_lod_cmd_id = forward_base_cmd_id + cull.lod_idx;
   Ptr<VkDrawIndexedIndirectCommand, Access.ReadWrite, AddressSpace.Device>
       cmd_ptr = pc.forward_indirect_commands + forward_lod_cmd_id;
-  if (visible && cmd_ptr != nullptr) {
     uint forward_slot;
     InterlockedAdd(cmd_ptr->instanceCount, 1, forward_slot);
     pc.forward_culled_remap[cmd_ptr->firstInstance + forward_slot] =
         item_idx | (cull.lod_idx << 28u);
-  }
 }

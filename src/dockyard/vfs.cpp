@@ -52,9 +52,9 @@ void VFS::initialize(const std::filesystem::path &assets_root) {
   mounts["meshes"] = root / "meshes";
   mounts["binary"] = root / "binary";
 
-  info("[VFS] Initialized with root: {}", root);
+  info("[VFS] Initialized with root: {}", root.string());
   for (auto &&[k, v] : mounts) {
-    info("\t[VFS]: Mount {} -> {}", k, v);
+    info("\t[VFS]: Mount {} -> {}", k, v.string());
   }
 }
 

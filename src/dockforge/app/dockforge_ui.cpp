@@ -257,11 +257,9 @@ auto Dockforge::draw_hdr_selector() -> void {
   }
 
   if (ImGui::Button("Browse HDR...")) {
-    NFD::Guard nfd_guard;
-
-    constexpr std::array<nfdfilteritem_t, 3> filters = {
-        nfdfilteritem_t{"Valid images", "ktx2,hdr,exr"},
-        nfdfilteritem_t{"All files", "*"},
+    constexpr std::array<nfdfilteritem_t, 2> filters = {
+        nfdfilteritem_t{.name = "Valid images", .spec = "ktx2,hdr,exr"},
+        nfdfilteritem_t{.name = "All files", .spec = "*"},
     };
 
     NFD::UniquePath out_path;
