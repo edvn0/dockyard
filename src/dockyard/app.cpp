@@ -48,6 +48,9 @@ auto submit_to_queue(const VulkanContext &, VkCommandBuffer, const FrameSync &,
 auto glfw_error_logger() -> void;
 
 auto report_device_fault(const VulkanContext &ctx) -> void {
+  // Always dump CPU breadcrumbs so we know which pass was in-flight.
+  report_crash("VK_ERROR_DEVICE_LOST");
+
   if (!ctx.caps.device_fault)
     return;
 
@@ -162,6 +165,12 @@ auto App::run(i32 argc, char *argv[]) -> i32 {
           .require_api_version(1, 4, 0)
           .enable_validation_layers(enable_validation_layers)
           .request_validation_layers(enable_validation_layers)
+          // GPU-assisted validation catches OOB shader accesses (bindless,
+          // buffer device address) that the CPU-side validator misses.
+          // VkValidationFeaturesEXT is silently ignored when no validation
+          // layer is loaded, so this is safe to add unconditionally.
+          .add_validation_feature_enable(
+              VK_VALIDATION_FEATURE_ENABLE_GPU_ASSISTED_EXT)
           .set_debug_callback(
               [](VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                  VkDebugUtilsMessageTypeFlagsEXT,

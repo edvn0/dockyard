@@ -515,7 +515,7 @@ auto PipelineRegistry::poll_and_update_dirty_pipelines() -> void {
 
     std::string path_str{shader_path};
     if (!dirty_paths.contains(path_str)) {
-      if (shader::Compiler::the().is_dirty(shader_path)) {
+      if (shader::Compiler::the().is_dirty(VFSPath::create(shader_path))) {
         dirty_paths.insert(path_str);
       }
     }

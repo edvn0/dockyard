@@ -113,7 +113,6 @@ struct OcclusionCullingPushConstants {
   DeviceAddress instance_buffer;
   DeviceAddress frame_data;
 
-  DeviceAddress forward_max_instances;
   DeviceAddress forward_instance_to_command_buffer;
   DeviceAddress forward_indirect_commands;
   DeviceAddress forward_culled_remap;
@@ -187,6 +186,7 @@ struct FrameSubmission {
     u32 pipeline_id;
     glm::mat4 transform;
     AABB aabb;
+    MaterialFlags flags{};
     u32 skinned_base = ~0u; // dst_vertex_offset in scratch; ~0u = not skinned
   };
 
@@ -211,6 +211,7 @@ struct RenderPass {
     u32 max_command_count;
     u32 first_command_index;
     u32 count_buffer_offset;
+    VkCompareOp depth_compare = VK_COMPARE_OP_MAX_ENUM; // MAX_ENUM = use outer dynamic state
   };
   std::vector<Batch> batches;
 
@@ -500,10 +501,11 @@ struct SceneRenderer {
   auto prepare(const FrameRenderInfo &) -> PrepareResult;
 
   void submit(MeshAssetHandle handle, const glm::mat4 &, u32 pipeline_id = 0U,
-              u32 material_id = 0U);
+              u32 material_id = 0U, u32 blend_pipeline_id = ~0U);
   void submit(MeshAssetHandle handle, const glm::mat4 &,
               std::span<const glm::mat4> joint_palette,
-              u32 pipeline_id = 0U, u32 material_id = 0U);
+              u32 pipeline_id = 0U, u32 material_id = 0U,
+              u32 blend_pipeline_id = ~0U);
 
   void update_csm(const glm::mat4 &view, const glm::mat4 &proj,
                   float camera_near, float camera_far);

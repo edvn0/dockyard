@@ -29,12 +29,8 @@ public:
       std::abort();
     }
 
-    const auto rest = raw.substr(sep + 3);
-    if (rest.empty()) {
-      error("Only specified a scheme, no path: {} ({})", rest, raw);
-      std::abort();
-    }
-
+    // An empty relative part (scheme-only, e.g. "shaders://") is permitted: it
+    // denotes a mount root and resolves to the mount's physical directory.
     if (sep > 255) {
       error("Scheme too long (max 255 chars): {} ({})", scheme, raw);
       std::abort();

@@ -1,16 +1,16 @@
 #include <chrono>
 #include <dockyard/shader_watcher.hpp>
+#include <dockyard/vfs.hpp>
 #include <format>
 
 namespace dy::shader {
 
-ShaderWatcher::ShaderWatcher(std::filesystem::path real_path,
-                             std::string_view mount, ChangeCallback on_change)
-    : real_path(std::move(real_path)), mount(mount),
+ShaderWatcher::ShaderWatcher(const VFSPath &watch_root, ChangeCallback on_change)
+    : real_path(VFS::get().resolve(watch_root)), mount(watch_root.scheme()),
       on_change(std::move(on_change)) {
 
   info("ShaderWatcher initialized for mount '{}', watching '{}'", mount,
-       this->real_path.string());
+       real_path.string());
 }
 
 ShaderWatcher::~ShaderWatcher() { stop(); }

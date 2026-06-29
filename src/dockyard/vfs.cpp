@@ -60,15 +60,7 @@ void VFS::initialize(const std::filesystem::path &assets_root) {
 
 auto VFS::resolve_to_output_stream(const VFSPath &path)
     -> std::expected<std::ofstream, std::string> {
-  return resolve_to_output_stream(path.view());
-}
-auto VFS::resolve_to_input_stream(const VFSPath &path)
-    -> std::expected<std::ifstream, std::string> {
-  return resolve_to_input_stream(path.view());
-}
-auto VFS::resolve_to_output_stream(std::string_view p)
-    -> std::expected<std::ofstream, std::string> {
-  auto real_path = resolve(p);
+  auto real_path = resolve(path);
   std::ofstream f{real_path.string()};
   if (!f.is_open())
     return std::unexpected(
@@ -76,9 +68,9 @@ auto VFS::resolve_to_output_stream(std::string_view p)
   return f;
 }
 
-auto VFS::resolve_to_input_stream(std::string_view p)
+auto VFS::resolve_to_input_stream(const VFSPath &path)
     -> std::expected<std::ifstream, std::string> {
-  auto real_path = resolve(p);
+  auto real_path = resolve(path);
   std::ifstream f{real_path.string()};
   if (!f.is_open())
     return std::unexpected(
@@ -99,30 +91,20 @@ auto VFS::last_write_time(const VFSPath &path)
 }
 
 auto VFS::resolve(const VFSPath &virtual_path) -> std::filesystem::path {
-  return resolve(virtual_path.view());
-}
-
-auto VFS::resolve(std::string_view virtual_path) -> std::filesystem::path {
   ensure_initialised();
 
-  std::string path_str(virtual_path);
-  size_t sep = path_str.find("://");
-
-  if (sep == std::string::npos)
-    return root / path_str;
-
-  std::string prefix = path_str.substr(0, sep);
-  std::string relative = path_str.substr(sep + 3);
+  const std::string prefix{virtual_path.scheme()};
+  const std::string_view relative = virtual_path.relative_path();
 
   std::scoped_lock lock(mutex);
   if (auto it = mounts.find(prefix); it != mounts.end()) {
-    return it->second / relative;
+    return relative.empty() ? it->second : it->second / relative;
   }
 
-  return root / relative;
+  return relative.empty() ? root : root / relative;
 }
 
-auto VFS::read_binary(std::string_view virtual_path)
+auto VFS::read_binary(const VFSPath &virtual_path)
     -> std::expected<std::vector<u32>, std::string> {
   std::filesystem::path physical = resolve(virtual_path);
 
@@ -146,15 +128,10 @@ auto VFS::read_binary(std::string_view virtual_path)
   return buffer;
 }
 
-auto VFS::read_binary(const VFSPath &p)
-    -> std::expected<std::vector<u32>, std::string> {
-  return read_binary(p.view());
-}
-
-auto VFS::list(std::string_view virtual_path, const Filter &filter)
-    -> std::vector<std::filesystem::path> {
+auto VFS::list(const VFSPath &virtual_path, const Filter &filter)
+    -> std::vector<VFSPath> {
   const std::filesystem::path physical = resolve(virtual_path);
-  std::vector<std::filesystem::path> paths;
+  std::vector<VFSPath> paths;
 
   if (!std::filesystem::exists(physical) ||
       !std::filesystem::is_directory(physical)) {
@@ -162,6 +139,9 @@ auto VFS::list(std::string_view virtual_path, const Filter &filter)
          physical.string());
     return paths;
   }
+
+  const auto scheme = virtual_path.scheme();
+  const auto base = virtual_path.relative_path();
 
   for (auto it = std::filesystem::recursive_directory_iterator(physical);
        it != std::filesystem::recursive_directory_iterator{}; ++it) {
@@ -183,7 +163,11 @@ auto VFS::list(std::string_view virtual_path, const Filter &filter)
         !filter.included_extensions.contains(it->path().extension().string()))
       continue;
 
-    paths.push_back(rel);
+    if (base.empty())
+      paths.push_back(VFSPath::create("{}://{}", scheme, rel.generic_string()));
+    else
+      paths.push_back(
+          VFSPath::create("{}://{}/{}", scheme, base, rel.generic_string()));
   }
 
   return paths;
@@ -191,7 +175,7 @@ auto VFS::list(std::string_view virtual_path, const Filter &filter)
 
 auto VFS::read_bytes(const VFSPath &p)
     -> std::expected<std::vector<u8>, std::string> {
-  const std::filesystem::path physical = resolve(p.view());
+  const std::filesystem::path physical = resolve(p);
 
   std::ifstream file(physical, std::ios::binary | std::ios::ate);
   if (!file.is_open())
@@ -208,12 +192,10 @@ auto VFS::read_bytes(const VFSPath &p)
   return buf;
 }
 
-auto VFS::read_binary_async(std::string_view virtual_path)
+auto VFS::read_binary_async(const VFSPath &virtual_path)
     -> std::future<std::expected<std::vector<u32>, std::string>> {
   std::packaged_task<std::expected<std::vector<u32>, std::string>()> task(
-      [this, path = std::string(virtual_path)] {
-        return this->read_binary(path);
-      });
+      [this, path = virtual_path] { return this->read_binary(path); });
   auto fut = task.get_future();
   std::thread(std::move(task)).detach();
   return fut;

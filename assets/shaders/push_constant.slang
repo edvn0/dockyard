@@ -11,14 +11,15 @@ struct InstanceData {
 
 enum class MaterialFlags {
   none = 0,
-  depth_prepass = 1 << 0,    // Render in depth prepass (opaque/masked)
-  alpha_mask = 1 << 1,       // Alpha testing enabled
+  depth_prepass = 1 << 0,    // Render in depth prepass (opaque only)
+  alpha_mask = 1 << 1,       // AlphaMode::Mask — discard on cutoff
   has_transmission = 1 << 2, // Shader: check before sampling transmission
   has_anisotropy = 1 << 3,   // Shader: check before using anisotropy
   two_sided = 1 << 4,        // Backface rendering enabled
   combined_orm = 1 << 5, // Shader: occlusion packed in ORM (XYZ=ORM, W=unused)
   no_occlusion = 1
       << 6, // Shader: skip occlusion sampling, use occlusion_strength only
+  alpha_blend = 1 << 7, // AlphaMode::Blend — sorted translucency, no depth write
 };
 
 struct GPUMaterial {

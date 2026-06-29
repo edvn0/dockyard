@@ -32,6 +32,7 @@ set_target_properties(dockyard-compiler PROPERTIES FOLDER dockyard)
 # ---- dockyard ----------------------------------------------------------------
 
 add_library(dockyard STATIC
+        src/dockyard/archive.cpp
         src/dockyard/context.cpp
         src/dockyard/app.cpp
         src/dockyard/log.cpp
@@ -120,6 +121,8 @@ target_link_libraries(dockyard
         ktx
         lua_static
         sol2::sol2
+        miniz
+        libzstd_static
 )
 target_compile_definitions(dockyard PRIVATE
         $<$<CONFIG:Debug>:SOL_ALL_SAFETIES_ON=1>
@@ -143,6 +146,7 @@ endif ()
 # incompatible with batch compilation, and relative includes in unity files
 # would resolve against the build-dir batch file, not the source directory.
 set_source_files_properties(
+        src/dockyard/archive.cpp
         src/dockyard/crash_reporter_common.cpp
         src/dockyard/crash_reporter_win32.cpp
         src/dockyard/crash_reporter_linux.cpp
@@ -219,6 +223,9 @@ if(DOCKYARD_BUILD_TESTING)
         )
   target_enable_native_arch(dockyard-testing)
   target_precompile_headers(dockyard-testing REUSE_FROM dockyard)
+  # The reused dockyard PCH is compiled with /utf-8 (inherited from a PRIVATE
+  # dependency); MSVC raises C2855 unless the consuming TUs use it too.
+  target_compile_options(dockyard-testing PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
   target_set_warnings(dockyard-testing)
   if(DOCKYARD_BUILD_SMOKE_TESTS)
     target_compile_definitions(dockyard-testing PRIVATE RUN_SERIALISATION_SMOKE_TESTS)

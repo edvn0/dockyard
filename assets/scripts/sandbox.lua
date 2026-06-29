@@ -160,6 +160,7 @@ end
 -- ---------------------------------------------------------------------------
 
 function game.on_scene_load(scene, assets)
+    --[[
     local handle, err = assets:load_mesh(
         VFSPath.create("meshes://damaged_helmet/DamagedHelmet.glb"))
     if handle then
@@ -197,6 +198,21 @@ function game.on_scene_load(scene, assets)
                 rand_range(-size, size),
                 rand_range(-size, size))
         end
+    end
+    --]]
+
+    local bistro_handle, err = assets:load_mesh(
+        VFSPath.create("meshes://Bistro_v5_2/BistroExterior.glb"))
+    if bistro_handle then
+        local e   = scene:make("Bistro")
+        local mc  = e:add_mesh()
+        mc.handle = bistro_handle
+        mc:set_source_path("meshes://Bistro_v5_2/BistroExterior.glb")
+
+        local tf = e:get_transform()
+        tf.scale = vec3(0.01, 0.01, 0.01)
+    else
+        print("[sandbox] bistro load error: " .. (err or "?"))
     end
 end
 

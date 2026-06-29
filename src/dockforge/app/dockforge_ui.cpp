@@ -260,8 +260,7 @@ auto Dockforge::draw_hdr_selector() -> void {
     NFD::Guard nfd_guard;
 
     constexpr std::array<nfdfilteritem_t, 3> filters = {
-        nfdfilteritem_t{"HDR images", "hdr,exr"},
-        nfdfilteritem_t{"Ktx2 images", "ktx2"},
+        nfdfilteritem_t{"Valid images", "ktx2,hdr,exr"},
         nfdfilteritem_t{"All files", "*"},
     };
 
@@ -502,16 +501,18 @@ auto Dockforge::draw_toolbar() -> void {
     ImGui::TextDisabled("|");
     ImGui::SameLine();
 
-    const auto dll_label = script_path.empty()
-                               ? std::string{"No script loaded"}
-                               : script_path.filename().string();
+    const auto dll_label =
+        script_path.valid()
+            ? std::string{script_path.value().relative_path()}
+            : std::string{"No script loaded"};
     const float button_h =
         icon_size.y + ImGui::GetStyle().FramePadding.y * 2.0F;
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
                          (button_h - ImGui::GetTextLineHeight()) * 0.5F);
     ImGui::TextDisabled("%s", dll_label.c_str());
-    if (!script_path.empty() && ImGui::IsItemHovered())
-      ImGui::SetTooltip("%s", script_path.string().c_str());
+    if (script_path.valid() && ImGui::IsItemHovered())
+      ImGui::SetTooltip(
+          "%s", VFS::get().resolve(script_path.value()).string().c_str());
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() -
                          (button_h - ImGui::GetTextLineHeight()) * 0.5F);
 
@@ -536,17 +537,17 @@ auto Dockforge::draw_toolbar() -> void {
       if (NFD::OpenDialog(out, &filter, 1, nullptr, parent) == NFD_OKAY) {
         const std::filesystem::path chosen{out};
         NFD::FreePath(out);
-        load_script(chosen);
+        load_script(VFS::get().mount_file("script", chosen));
         if (std::ofstream ofs{script_settings_path}; ofs)
           ofs << chosen.string();
       }
     }
 
     ImGui::SameLine();
-    if (icon_button("##reload", icon_reload, has_dll)) {
+    if (icon_button("##reload", icon_reload, has_dll) && script_path.valid()) {
       PROFILE_SCOPE("Reload script");
       unload_scene();
-      load_script(script_path);
+      load_script(script_path.value());
     }
   }
 

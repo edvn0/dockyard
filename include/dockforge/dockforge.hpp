@@ -10,8 +10,8 @@
 #include <dockyard/freelist_pool.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/script_engine.hpp>
+#include <dockyard/vfs_path.hpp>
 
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -64,6 +64,7 @@ struct Dockforge : App {
   GLFWwindow *main_window = nullptr;
 
   PipelineHandle forward_pipeline{};
+  PipelineHandle forward_blend_pipeline{};
   PipelineHandle depth_pipeline{};
 
   VulkanContext *context{};
@@ -101,7 +102,7 @@ struct Dockforge : App {
   std::unique_ptr<dy::ScriptEngine> script_engine;
   std::unique_ptr<dy::IAssetLoader> asset_loader;
   sim::Machine sim_state{sim::Editing{}};
-  std::filesystem::path script_path;
+  NullableVFSPath script_path;
 
   TextureHandle icon_play;
   TextureHandle icon_pause;
@@ -150,7 +151,7 @@ private:
   void animation_state_update(float ts);
 
   auto step() -> void;
-  auto load_script(const std::filesystem::path &) -> void;
+  auto load_script(const VFSPath &) -> void;
   auto load_toolbar_icons() -> void;
   auto draw_toolbar() -> void;
   auto draw_titlebar() -> void;

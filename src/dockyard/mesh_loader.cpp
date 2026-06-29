@@ -1,5 +1,6 @@
 #include <dockyard/mesh_loader.hpp>
 
+#include <dockyard/archive.hpp>
 #include <dockyard/log.hpp>
 #include <dockyard/mesh.hpp>
 #include <dockyard/scene_renderer.hpp>
@@ -18,6 +19,7 @@
 
 #include <mikktspace.h>
 #include <stb_image.h>
+#include <stb_image_resize2.h>
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -423,8 +425,7 @@ constexpr u32 fb_emissive = 4u;
 
   gpu.albedo_index =
       resolve_tex(asset, handles, pbr.baseColorTexture, fb_albedo);
-  gpu.normal_index =
-      resolve_tex(asset, handles, mat.normalTexture, fb_normal);
+  gpu.normal_index = resolve_tex(asset, handles, mat.normalTexture, fb_normal);
   gpu.metallic_roughness_index =
       resolve_tex(asset, handles, pbr.metallicRoughnessTexture, fb_mr);
   gpu.emissive_index =
@@ -435,6 +436,8 @@ constexpr u32 fb_emissive = 4u;
   gpu.flags = MaterialFlags::depth_prepass;
   if (mat.alphaMode == fastgltf::AlphaMode::Mask)
     set_flag(gpu.flags, MaterialFlags::alpha_mask);
+  if (mat.alphaMode == fastgltf::AlphaMode::Blend)
+    set_flag(gpu.flags, MaterialFlags::alpha_blend);
   if (mat.doubleSided)
     set_flag(gpu.flags, MaterialFlags::two_sided);
 
@@ -584,9 +587,9 @@ constexpr u32 fb_emissive = 4u;
       accum[i2] += face_n;
     }
     for (usize i = 0; i < vtx_count; ++i) {
-      const glm::vec3 n =
-          glm::length(accum[i]) > 0.f ? glm::normalize(accum[i])
-                                      : glm::vec3{0.f, 1.f, 0.f};
+      const glm::vec3 n = glm::length(accum[i]) > 0.f
+                              ? glm::normalize(accum[i])
+                              : glm::vec3{0.f, 1.f, 0.f};
       out.vertices[i].normal = glm::packSnorm4x8(glm::vec4(n, 0.f));
     }
   }
@@ -607,7 +610,7 @@ constexpr u32 fb_emissive = 4u;
 
   // Progressively lower target ratios
   static constexpr std::array<f32, 5> lod_targets = {0.50F, 0.25F, 0.125F,
-                                                       0.0625F, 0.03125F};
+                                                     0.0625F, 0.03125F};
 
   std::vector<std::vector<u32>> result;
   thread_local std::vector<u32> tl_simplified;
@@ -763,9 +766,9 @@ constexpr u32 fb_emissive = 4u;
   return skeletons;
 }
 
-[[nodiscard]] auto
-read_sampler_output(const fastgltf::Asset &asset,
-                    const fastgltf::Accessor &acc) -> std::vector<glm::vec4> {
+[[nodiscard]] auto read_sampler_output(const fastgltf::Asset &asset,
+                                       const fastgltf::Accessor &acc)
+    -> std::vector<glm::vec4> {
   std::vector<glm::vec4> out(acc.count, glm::vec4{0.0F});
   if (acc.type == fastgltf::AccessorType::Vec4) {
     fastgltf::iterateAccessorWithIndex<glm::vec4>(
@@ -1175,12 +1178,34 @@ struct PrimLods {
 static auto parse_gltf_file(const std::filesystem::path &fs_path,
                             const std::filesystem::path &gltf_dir)
     -> std::expected<fastgltf::Asset, std::string> {
-  fastgltf::Parser parser;
+  fastgltf::Parser parser{
+      fastgltf::Extensions::KHR_lights_punctual |
+          fastgltf::Extensions::KHR_materials_specular,
+  };
   auto data = fastgltf::GltfDataBuffer::FromPath(fs_path);
   auto result = parser.loadGltf(data.get(), gltf_dir,
                                 fastgltf::Options::GenerateMeshIndices);
+  if (!result) {
+    auto message = result.error();
+    return std::unexpected(
+        std::format("Parse error: {}", std::to_underlying(message)));
+  }
+  return std::move(result.get());
+}
+
+static auto parse_gltf_memory(std::span<const std::byte> bytes)
+    -> std::expected<fastgltf::Asset, std::string> {
+  fastgltf::Parser parser;
+  auto data = fastgltf::GltfDataBuffer::FromBytes(bytes.data(), bytes.size());
+  if (!data)
+    return std::unexpected(
+        std::format("GltfDataBuffer from memory failed: {}",
+                    fastgltf::getErrorMessage(data.error())));
+  auto result =
+      parser.loadGltf(data.get(), {}, fastgltf::Options::GenerateMeshIndices);
   if (!result)
-    return std::unexpected("Parse error");
+    return std::unexpected(std::format(
+        "glTF parse error: {}", fastgltf::getErrorMessage(result.error())));
   return std::move(result.get());
 }
 
@@ -1200,7 +1225,6 @@ sidecar_path_for(const std::filesystem::path &gltf_dir,
     return indexed;
   }
 
-  info("No suitable image source found for image {}", image_idx);
   return std::nullopt;
 }
 
@@ -1421,13 +1445,44 @@ static auto launch_texture_futures(std::vector<ImageSource> &sources,
                                     : ":linear")
                   : src.cache_key;
 
-          // Single mip entry — upload path will generate the rest
+          // Generate all mips on CPU with alpha-weighted (premultiplied) filtering
+          // to prevent transparent-texel colors from bleeding into leaf/foliage edges.
+          const u32 level_count = static_cast<u32>(
+              std::bit_width(static_cast<u32>(std::max(w, h))));
+          const bool is_srgb = (src.format == VK_FORMAT_R8G8B8A8_SRGB);
+
           std::vector<pool::MipData> mips;
+          mips.reserve(level_count);
           mips.push_back({
               .pixels = std::move(pixels),
               .width = static_cast<u32>(w),
               .height = static_cast<u32>(h),
           });
+
+          for (u32 level = 1; level < level_count; ++level) {
+            const auto &prev = mips.back();
+            const u32 nw = std::max(1u, prev.width / 2);
+            const u32 nh = std::max(1u, prev.height / 2);
+            std::vector<std::byte> dst(nw * nh * 4);
+
+            if (is_srgb) {
+              stbir_resize_uint8_srgb(
+                  reinterpret_cast<const unsigned char *>(prev.pixels.data()),
+                  static_cast<int>(prev.width), static_cast<int>(prev.height),
+                  0,
+                  reinterpret_cast<unsigned char *>(dst.data()),
+                  static_cast<int>(nw), static_cast<int>(nh), 0, STBIR_RGBA);
+            } else {
+              stbir_resize_uint8_linear(
+                  reinterpret_cast<const unsigned char *>(prev.pixels.data()),
+                  static_cast<int>(prev.width), static_cast<int>(prev.height),
+                  0,
+                  reinterpret_cast<unsigned char *>(dst.data()),
+                  static_cast<int>(nw), static_cast<int>(nh), 0, STBIR_RGBA);
+            }
+
+            mips.push_back({.pixels = std::move(dst), .width = nw, .height = nh});
+          }
 
           return pool::CpuTextureData{
               .mips = std::move(mips),
@@ -1436,7 +1491,7 @@ static auto launch_texture_futures(std::vector<ImageSource> &sources,
               .width = static_cast<u32>(w),
               .height = static_cast<u32>(h),
               .format = src.format,
-              .generate_mips = true,
+              .generate_mips = false,
           };
         });
 
@@ -1857,8 +1912,7 @@ auto build_patch_list(const fastgltf::Asset &asset, usize image_idx,
 }
 
 auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
-                      std::span<const u32> indices,
-                      NullableVFSPath source_path)
+                      std::span<const u32> indices, NullableVFSPath source_path)
     -> std::expected<MeshAssetHandle, std::string> {
   auto &pool = *renderer.geometry_pool;
 
@@ -1904,31 +1958,32 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
   return renderer.register_gltf(std::move(result));
 }
 
-auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
-                    const LoadOptions &opts)
+// Shared mesh-building pipeline called by both load_from_path and
+// load_from_compressed after the glTF asset has already been parsed.
+// gltf_dir  — directory used to resolve sidecar KTX2 files and external image
+// URIs;
+//             pass an empty path for GLB loaded from memory (no external
+//             files).
+// debug_path — used only in log messages.
+static auto build_mesh_from_parsed(fastgltf::Asset &asset,
+                                   const std::filesystem::path &gltf_dir,
+                                   const std::filesystem::path &debug_path,
+                                   SceneRenderer &renderer,
+                                   const LoadOptions &opts,
+                                   NullableVFSPath source_path)
     -> std::expected<MeshAssetHandle, std::string> {
   auto &pool = *renderer.geometry_pool;
-  const auto fs_path = VFS::get().resolve(path);
-  const auto gltf_dir = fs_path.parent_path();
-
-  if (!std::filesystem::exists(fs_path))
-    return std::unexpected("File not found");
-
-  auto asset_result = parse_gltf_file(fs_path, gltf_dir);
-  if (!asset_result)
-    return std::unexpected(asset_result.error());
-  auto &asset = *asset_result;
 
   auto result =
       std::make_unique<MeshAsset>(MeshAsset{.mesh_aabb = AABB::create()});
-  result->source_path = NullableVFSPath{path};
+  result->source_path = source_path;
   result->texture_handles.resize(asset.images.size(),
                                  renderer.dummy_texture_handle);
   result->material_slots.resize(asset.materials.size(), 0u);
 
   const auto color_spaces = classify_images(asset);
   auto image_sources =
-      collect_image_sources(asset, gltf_dir, fs_path, color_spaces);
+      collect_image_sources(asset, gltf_dir, debug_path, color_spaces);
   auto pending = launch_texture_futures(image_sources, renderer, *result);
 
   // -------------------------------------------------------------------------
@@ -1939,7 +1994,7 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
     lod_groups = detect_lod_groups(asset, opts.lod_base_name_filter);
     if (!lod_groups.empty()) {
       info("load_gltf: '{}' — detected {} explicit LOD group(s):",
-           fs_path.filename().string(), lod_groups.size());
+           debug_path.filename().string(), lod_groups.size());
       for (const auto &g : lod_groups) {
         info("  '{}': {} LOD level(s) ({} → {})", g.base_name, g.members.size(),
              g.members.front().first, g.members.back().first);
@@ -2082,12 +2137,61 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
 
   info("load_gltf: '{}' - {} image(s), {} material(s), {} mesh(es), {} "
        "node(s), {} LOD level(s)",
-       fs_path.filename().string(), asset.images.size(), asset.materials.size(),
-       asset.meshes.size(), result->nodes.size(), max_lod_count);
+       debug_path.filename().string(), asset.images.size(),
+       asset.materials.size(), asset.meshes.size(), result->nodes.size(),
+       max_lod_count);
 
   auto handle = renderer.register_gltf(std::move(*result));
   submit_texture_uploads(pending, renderer, handle);
   return handle;
+}
+
+auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
+                    const LoadOptions &opts)
+    -> std::expected<MeshAssetHandle, std::string> {
+  const auto fs_path = VFS::get().resolve(path);
+  const auto gltf_dir = fs_path.parent_path();
+
+  if (!std::filesystem::exists(fs_path))
+    return std::unexpected("File not found");
+
+  auto asset = parse_gltf_file(fs_path, gltf_dir);
+  if (!asset)
+    return std::unexpected(asset.error());
+
+  return build_mesh_from_parsed(*asset, gltf_dir, fs_path, renderer, opts,
+                                NullableVFSPath{path});
+}
+
+auto load_from_compressed(const VFSPath &archive_path, SceneRenderer &renderer,
+                          const LoadOptions &opts)
+    -> std::expected<MeshAssetHandle, std::string> {
+  auto bundle = archive::extract_to_memory(archive_path);
+  if (!bundle)
+    return std::unexpected(
+        std::format("archive extraction failed: {}", bundle.error()));
+
+  // Find the first .glb entry in the bundle.
+  const std::string *glb_key = nullptr;
+  for (const auto &[key, _] : *bundle) {
+    if (key.size() >= 4 && key.compare(key.size() - 4, 4, ".glb") == 0) {
+      glb_key = &key;
+      break;
+    }
+  }
+  if (!glb_key)
+    return std::unexpected(
+        "no .glb found in archive — repack as GLB (self-contained) or use "
+        "archive::extract() + load_from_path() for .gltf with external files");
+
+  auto asset = parse_gltf_memory(bundle->at(*glb_key));
+  if (!asset)
+    return std::unexpected(asset.error());
+
+  const std::filesystem::path debug_path =
+      std::format("{}/{}", archive_path.view(), *glb_key);
+  return build_mesh_from_parsed(*asset, {}, debug_path, renderer, opts,
+                               NullableVFSPath{archive_path});
 }
 
 } // namespace mesh

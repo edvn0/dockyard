@@ -94,4 +94,11 @@ void report(const char* reason, const Snapshot& snap) {
 }
 
 } // namespace crash
+
+void report_crash(const char *reason) {
+    const auto snap = crash::capture();
+    crash::flush_log();
+    crash::report(reason, snap);
+}
+
 } // namespace dy

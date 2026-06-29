@@ -39,27 +39,16 @@ public:
   /**
    * @brief Maps "prefix://path" to an absolute physical path.
    */
-  auto resolve(std::string_view virtual_path) -> std::filesystem::path;
-  /**
-   * @brief Maps "prefix://path" to an absolute physical path.
-   */
   auto resolve(const VFSPath &virtual_path) -> std::filesystem::path;
 
   auto resolve_to_output_stream(const VFSPath &)
       -> std::expected<std::ofstream, std::string>;
-  auto resolve_to_output_stream(std::string_view)
-      -> std::expected<std::ofstream, std::string>;
   auto resolve_to_input_stream(const VFSPath &)
-      -> std::expected<std::ifstream, std::string>;
-  auto resolve_to_input_stream(std::string_view)
       -> std::expected<std::ifstream, std::string>;
 
   /**
    * @brief Synchronous binary read.
    */
-  auto read_binary(std::string_view virtual_path)
-      -> std::expected<std::vector<u32>, std::string>;
-
   auto read_binary(const VFSPath &)
       -> std::expected<std::vector<u32>, std::string>;
 
@@ -69,7 +58,7 @@ public:
   /**
    * @brief Asynchronous binary read.
    */
-  auto read_binary_async(std::string_view virtual_path)
+  auto read_binary_async(const VFSPath &)
       -> std::future<std::expected<std::vector<u32>, std::string>>;
 
   /**
@@ -130,10 +119,10 @@ public:
     std::unordered_set<std::string_view> included_extensions;
     u32 depth = static_cast<u32>(~0); // No depth
   };
-  auto list(std::string_view virtual_path,
+  auto list(const VFSPath &virtual_path,
             const Filter &filter = {
                 .depth = static_cast<u32>(~0),
-            }) -> std::vector<std::filesystem::path>;
+            }) -> std::vector<VFSPath>;
 
   auto last_write_time(const VFSPath &)
       -> std::expected<std::filesystem::file_time_type, std::error_code>;

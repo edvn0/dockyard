@@ -156,7 +156,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     path_to_load =
         std::filesystem::path(ASSETS_ROOT_PATH) / "scripts" / "sandbox.lua";
   }
-  load_script(path_to_load);
+  load_script(VFS::get().mount_file("script", path_to_load));
 
   editor_scene = std::make_shared<Scene>();
   active_scene = editor_scene.get();
@@ -230,6 +230,32 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       std::abort();
     }
     forward_pipeline = *result;
+  }
+  {
+    // Alpha blend: same shader, alpha blending enabled, no culling (foliage/glass
+    // is two-sided), depth test only (no write — opaque prepass owns the depth buffer).
+    // VK_CULL_MODE_NONE is static (not dynamic) so it overrides the global dynamic
+    // cull-mode set before the opaque forward pass.
+    auto result = registry.create_graphics({
+        .shader_path = VFSPath::create("shaders://forward.slang"),
+        .layout = renderer->pipeline_layout,
+        .render_targets = {.color_formats = {VK_FORMAT_R16G16B16A16_SFLOAT},
+                           .depth_format = VK_FORMAT_D32_SFLOAT},
+        .cull_mode = VK_CULL_MODE_NONE,
+        .samples = VK_SAMPLE_COUNT_4_BIT,
+        .depth = {.test = true,
+                  .write = false,
+                  .compare_op = VK_COMPARE_OP_GREATER_OR_EQUAL},
+        .blending = {BlendMode::alpha()},
+        .extra_dynamic_states = {VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
+                                 VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
+                                 VK_DYNAMIC_STATE_FRONT_FACE},
+    });
+    if (!result) {
+      error("forward blend pipeline: {}", result.error());
+      std::abort();
+    }
+    forward_blend_pipeline = *result;
   }
   {
     auto result = registry.create_graphics({
@@ -310,10 +336,9 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
 #endif
 }
 
-auto Dockforge::load_script(const std::filesystem::path &path) -> void {
+auto Dockforge::load_script(const VFSPath &path) -> void {
   script_engine->stop_watching();
-  const auto vfs_path = VFS::get().mount_file("script", path);
-  if (auto result = script_engine->load(vfs_path)) {
+  if (auto result = script_engine->load(path)) {
     script_path = path;
     script_engine->start_watching();
     if (editor_scene)

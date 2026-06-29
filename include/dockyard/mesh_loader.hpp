@@ -1,6 +1,7 @@
 #pragma once
 
 #include <dockyard/app.hpp>
+#include <dockyard/archive.hpp>
 #include <dockyard/bindless_handle.hpp>
 #include <dockyard/device_geometry.hpp>
 #include <dockyard/mesh.hpp>
@@ -9,6 +10,7 @@
 #include <glm/glm.hpp>
 
 #include <expected>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -40,6 +42,16 @@ struct LoadOptions {
 // Unchanged signature for the no-options case — zero cost, zero noise.
 auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
                     const LoadOptions &opts = {})
+    -> std::expected<MeshAssetHandle, std::string>;
+
+// Load a mesh from a compressed archive (ZIP, .tar.gz, .tar.zst) without
+// extracting to disk.  The archive must contain exactly one .glb file;
+// self-contained GLB is required because fastgltf has no in-memory file
+// callback for external .bin / texture references.
+// For .gltf archives with external files use archive::extract() + load_from_path().
+auto load_from_compressed(const VFSPath& archive_path,
+                          SceneRenderer& renderer,
+                          const LoadOptions& opts = {})
     -> std::expected<MeshAssetHandle, std::string>;
 
 auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,

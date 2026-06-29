@@ -121,7 +121,7 @@ private:
 
   auto include_dirs() -> const std::vector<std::string> & {
     std::call_once(include_dirs_flag, [this] {
-      const auto root = VFS::get().resolve("shaders://");
+      const auto root = VFS::get().resolve(VFSPath::create("shaders://"));
       std::error_code ec;
       for (const auto &entry : std::filesystem::directory_iterator{root, ec}) {
         if (entry.is_directory()) {
@@ -371,12 +371,6 @@ auto Compiler::the() -> Compiler & {
   return instance;
 }
 
-auto Compiler::compile(const std::string_view path)
-    -> std::expected<CompiledShader, CompilationError> {
-  auto vfs_path = VFSPath::create(path);
-  return compile(vfs_path);
-}
-
 auto Compiler::compile(const VFSPath &vfs_path)
     -> std::expected<CompiledShader, CompilationError> {
   using enum CompilationError::Type;
@@ -529,8 +523,8 @@ auto Compiler::compile(const VFSPath &vfs_path)
   return result;
 }
 
-auto Compiler::is_dirty(const std::string_view vfs_path) -> bool {
-  const std::string cache_key{vfs_path};
+auto Compiler::is_dirty(const VFSPath &vfs_path) -> bool {
+  const std::string cache_key{vfs_path.view()};
   const std::string path_str = VFS::get().resolve(vfs_path).string();
 
   std::error_code ec{};
@@ -573,10 +567,11 @@ auto Compiler::precache_shaders(Badge<App>) -> std::future<void> {
 
   return std::async(std::launch::async, [this] {
     auto shader_paths = VFS::get().list(
-        "shaders://", {
-                          .ignored_dirs = {"include"sv, "includes"sv},
-                          .included_extensions = {".slang"sv},
-                      });
+        VFSPath::create("shaders://"),
+        {
+            .ignored_dirs = {"include"sv, "includes"sv},
+            .included_extensions = {".slang"sv},
+        });
 
     std::vector<std::future<void>> futures;
     futures.reserve(shader_paths.size());
@@ -586,16 +581,14 @@ auto Compiler::precache_shaders(Badge<App>) -> std::future<void> {
         continue;
       }
 
-      const auto shader_name = path.filename();
-
-      futures.emplace_back(std::async(std::launch::async, [this, shader_name] {
-        auto result = compile(VFSPath::create("shaders://{}", shader_name));
+      futures.emplace_back(std::async(std::launch::async, [this, path] {
+        auto result = compile(path);
 
         if (!result) {
-          error("Failed to compile shader {}: {}", shader_name,
+          error("Failed to compile shader {}: {}", path.view(),
                 result.error().message);
         } else {
-          info("Precompiled shader: {}", shader_name);
+          info("Precompiled shader: {}", path.view());
         }
       }));
     }

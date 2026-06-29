@@ -17,8 +17,9 @@ class ShaderWatcher : efsw::FileWatchListener {
 public:
   using ChangeCallback = std::function<void(dy::VFSPath)>;
 
-  ShaderWatcher(std::filesystem::path real_path, std::string_view mount,
-                ChangeCallback on_change);
+  // watch_root is a VFS mount root, e.g. VFSPath::create("shaders://"). Its
+  // scheme is reused when reporting changed files back through on_change.
+  ShaderWatcher(const VFSPath &watch_root, ChangeCallback on_change);
   ~ShaderWatcher() override;
 
   ShaderWatcher(const ShaderWatcher &) = delete;

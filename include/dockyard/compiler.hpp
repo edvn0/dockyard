@@ -67,14 +67,11 @@ public:
 
   auto compile(const VFSPath &vfs_path)
       -> std::expected<CompiledShader, CompilationError>;
-  auto compile(std::string_view)
-      -> std::expected<CompiledShader, CompilationError>;
 
   [[nodiscard]] auto precache_shaders(Badge<App>) -> std::future<void>;
   auto invalidate(const VFSPath &) -> void;
   auto clear_cache() -> void;
-  auto is_dirty(std::string_view) -> bool;
-  auto is_dirty(const VFSPath &path) -> bool { return is_dirty(path.view()); }
+  auto is_dirty(const VFSPath &path) -> bool;
 
   ~Compiler();
 

@@ -129,9 +129,8 @@ auto grow_pool(SceneRenderer &renderer) -> u32 {
   const u32 new_capacity = old_capacity * 2;
 
   info("[Renderer] grow_pool(): {} -> {} slots, base_slot={} next={} free={}",
-       old_capacity, new_capacity,
-       renderer.override_pool.base_slot, renderer.override_pool.next,
-       renderer.override_pool.free_slots.size());
+       old_capacity, new_capacity, renderer.override_pool.base_slot,
+       renderer.override_pool.next, renderer.override_pool.free_slots.size());
 
   vkDeviceWaitIdle(renderer.ctx.device);
 
@@ -231,8 +230,11 @@ auto SceneRenderer::register_gltf(MeshAsset &&asset) -> MeshAssetHandle {
     }
   }
 
-  info("[Renderer] register_gltf(): handle={} flat_prim_table {} -> {} entries",
-       handle.index(), table_before, flat_prim_table.size());
+  const auto name = asset.source_path.view();
+  info("[Renderer] register_gltf({}): handle={} flat_prim_table {} -> {} "
+       "entries",
+       name.empty() ? "Missing" : name, handle.index(), table_before,
+       flat_prim_table.size());
   return handle;
 }
 
@@ -540,7 +542,8 @@ auto SceneRenderer::initialise_bindless() -> void {
           .layout = VK_NULL_HANDLE,
       });
       if (!result) {
-        error("bloom_downsample pipeline initialization failed: {}", result.error());
+        error("bloom_downsample pipeline initialization failed: {}",
+              result.error());
         std::abort();
       }
       bloom_downsample_pipeline = *result;
@@ -748,23 +751,31 @@ auto SceneRenderer::resize() -> void {
   ZoneScopedNC("SceneRenderer::resize", 0xFFA500);
   for (u32 i = 0U; i < frames_in_flight; ++i) {
     if (frame_ubo_buffers[i]) {
-      DeletionQueue::the().push([b = frame_ubo_buffers[i]->get_buffer(), a = frame_ubo_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      DeletionQueue::the().push(
+          [b = frame_ubo_buffers[i]->get_buffer(),
+           a = frame_ubo_buffers[i]->get_allocation(),
+           alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
       frame_ubo_buffers[i]->detach();
     }
     frame_ubo_buffers[i] =
         Buffer::create(ctx.allocator, "frame_ubo_buffer", sizeof(FrameUBO),
                        VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT);
     if (cluster_list_buffers[i]) {
-      DeletionQueue::the().push([b = cluster_list_buffers[i]->get_buffer(), a = cluster_list_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      DeletionQueue::the().push(
+          [b = cluster_list_buffers[i]->get_buffer(),
+           a = cluster_list_buffers[i]->get_allocation(),
+           alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
       cluster_list_buffers[i]->detach();
     }
-    cluster_list_buffers[i] =
-        Buffer::create(ctx.allocator, "cluster_list",
-                       cluster_total * sizeof(ClusterEntry),
-                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    cluster_list_buffers[i] = Buffer::create(
+        ctx.allocator, "cluster_list", cluster_total * sizeof(ClusterEntry),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     cluster_list_buffers[i]->set_zero();
     if (light_list_buffers[i]) {
-      DeletionQueue::the().push([b = light_list_buffers[i]->get_buffer(), a = light_list_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      DeletionQueue::the().push(
+          [b = light_list_buffers[i]->get_buffer(),
+           a = light_list_buffers[i]->get_allocation(),
+           alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
       light_list_buffers[i]->detach();
     }
     light_list_buffers[i] =
@@ -772,7 +783,10 @@ auto SceneRenderer::resize() -> void {
                        cluster_max_light_list_entries * sizeof(u32),
                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     if (light_list_counter_buffers[i]) {
-      DeletionQueue::the().push([b = light_list_counter_buffers[i]->get_buffer(), a = light_list_counter_buffers[i]->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      DeletionQueue::the().push(
+          [b = light_list_counter_buffers[i]->get_buffer(),
+           a = light_list_counter_buffers[i]->get_allocation(),
+           alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
       light_list_counter_buffers[i]->detach();
     }
     light_list_counter_buffers[i] =
@@ -822,7 +836,8 @@ auto SceneRenderer::destroy() -> void {
 }
 
 void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
-                           u32 pipeline_id, u32 material_id) {
+                           u32 pipeline_id, u32 material_id,
+                           u32 blend_pipeline_id) {
   auto *asset = get_mesh(handle);
   if (asset == nullptr) [[unlikely]] {
     error("[Renderer] submit(): null mesh asset for handle={}", handle.index());
@@ -832,14 +847,23 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
   for (const auto &node : asset->nodes) {
     const glm::mat4 node_t = t * node.local_transform;
     for (const auto &prim : node.primitives) {
-      if (prim.flat_index >= static_cast<u32>(flat_prim_table.size())) [[unlikely]] {
-        error("[Renderer] submit(): flat_index {} out of bounds (table={}), handle={}",
+      if (prim.flat_index >= static_cast<u32>(flat_prim_table.size()))
+          [[unlikely]] {
+        error("[Renderer] submit(): flat_index {} out of bounds (table={}), "
+              "handle={}",
               prim.flat_index, flat_prim_table.size(), handle.index());
         continue;
       }
       const u32 resolved_mat =
           material_id != ~0u ? material_id : prim.material_id;
-      const u64 key = (static_cast<u64>(pipeline_id) << 48) |
+
+      const auto &gpu_mat = geometry_pool->get_material(resolved_mat);
+      const bool is_blend =
+          blend_pipeline_id != ~0u &&
+          gpu_mat.alpha_mode == static_cast<u32>(AlphaMode::Blend);
+      const u32 effective_pipeline = is_blend ? blend_pipeline_id : pipeline_id;
+
+      const u64 key = (static_cast<u64>(effective_pipeline) << 48) |
                       (static_cast<u64>(resolved_mat) << 32) |
                       static_cast<u64>(prim.flat_index & 0xFFFF'FFFFU);
 
@@ -847,9 +871,10 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
           .sort_key = key,
           .mesh_prim_flat_index = prim.flat_index,
           .material_id = resolved_mat,
-          .pipeline_id = pipeline_id,
+          .pipeline_id = effective_pipeline,
           .transform = node_t,
           .aabb = prim.aabb,
+          .flags = gpu_mat.flags,
       });
     }
   }
@@ -857,10 +882,12 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
 
 void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
                            std::span<const glm::mat4> joint_palette,
-                           u32 pipeline_id, u32 material_id) {
+                           u32 pipeline_id, u32 material_id,
+                           u32 blend_pipeline_id) {
   auto *asset = get_mesh(handle);
   if (asset == nullptr) [[unlikely]] {
-    error("[Renderer] submit(skinned): null mesh asset for handle={}", handle.index());
+    error("[Renderer] submit(skinned): null mesh asset for handle={}",
+          handle.index());
     return;
   }
 
@@ -877,14 +904,23 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
     }
 
     for (const auto &prim : node.primitives) {
-      if (prim.flat_index >= static_cast<u32>(flat_prim_table.size())) [[unlikely]] {
-        error("[Renderer] submit(skinned): flat_index {} out of bounds (table={}), handle={}",
+      if (prim.flat_index >= static_cast<u32>(flat_prim_table.size()))
+          [[unlikely]] {
+        error("[Renderer] submit(skinned): flat_index {} out of bounds "
+              "(table={}), handle={}",
               prim.flat_index, flat_prim_table.size(), handle.index());
         continue;
       }
       const u32 resolved_mat =
           material_id != ~0u ? material_id : prim.material_id;
-      const u64 key = (static_cast<u64>(pipeline_id) << 48) |
+
+      const auto &gpu_mat = geometry_pool->get_material(resolved_mat);
+      const bool is_blend =
+          blend_pipeline_id != ~0u &&
+          gpu_mat.alpha_mode == static_cast<u32>(AlphaMode::Blend);
+      const u32 effective_pipeline = is_blend ? blend_pipeline_id : pipeline_id;
+
+      const u64 key = (static_cast<u64>(effective_pipeline) << 48) |
                       (static_cast<u64>(resolved_mat) << 32) |
                       static_cast<u64>(prim.flat_index & 0xFFFF'FFFFU);
 
@@ -906,9 +942,10 @@ void SceneRenderer::submit(MeshAssetHandle handle, const glm::mat4 &t,
           .sort_key = key,
           .mesh_prim_flat_index = prim.flat_index,
           .material_id = resolved_mat,
-          .pipeline_id = pipeline_id,
+          .pipeline_id = effective_pipeline,
           .transform = node_t,
           .aabb = prim.aabb,
+          .flags = gpu_mat.flags,
           .skinned_base = skinned_base,
       });
     }
@@ -954,7 +991,9 @@ void SceneRenderer::ensure_global_capacity(usize instance_count) {
   if (const auto size = instance_count * sizeof(CompressedInstanceData);
       !current || current->size() < size) {
     if (current) {
-      DeletionQueue::the().push([b = current->get_buffer(), a = current->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+      DeletionQueue::the().push(
+          [b = current->get_buffer(), a = current->get_allocation(),
+           alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
       current->detach();
     }
     current = Buffer::create(ctx.allocator, "global_instance_buffer", size,
@@ -993,7 +1032,8 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
     forward_pass.batches.clear();
     global_instance_data.clear();
     // Drop skinning state for the same reason: palette buffer is not allocated
-    // for the new frame index yet, and skinning_pass() is called unconditionally.
+    // for the new frame index yet, and skinning_pass() is called
+    // unconditionally.
     frame_skin_dst_vertex = 0;
     frame_palette_mat_count = 0;
     pending_palette_data.clear();
@@ -1042,24 +1082,34 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
     global_instance_data.resize(fs.entries.size());
     for (u32 i = 0; i < static_cast<u32>(fs.sort_order.size()); ++i) {
       const auto &e = fs.entries[fs.sort_order[i]];
-      if (e.mesh_prim_flat_index >= static_cast<u32>(flat_prim_table.size())) [[unlikely]] {
-        error("[Renderer] prepare(): mesh_prim_flat_index {} out of bounds (table={}), entry skipped",
+      if (e.mesh_prim_flat_index >= static_cast<u32>(flat_prim_table.size()))
+          [[unlikely]] {
+        error("[Renderer] prepare(): mesh_prim_flat_index {} out of bounds "
+              "(table={}), entry skipped",
               e.mesh_prim_flat_index, flat_prim_table.size());
         global_instance_data[i] = {};
         continue;
       }
       const auto *lod_group = flat_prim_table[e.mesh_prim_flat_index].lod_group;
       if (lod_group == nullptr) [[unlikely]] {
-        error("[Renderer] prepare(): null lod_group at flat_index {}, entry skipped",
+        error("[Renderer] prepare(): null lod_group at flat_index {}, entry "
+              "skipped",
               e.mesh_prim_flat_index);
         global_instance_data[i] = {};
         continue;
       }
-      const auto half = (e.aabb.get_max() - e.aabb.get_min()) * 0.5F;
+      const auto mn = e.aabb.get_min();
+      const auto mx = e.aabb.get_max();
+      // Sphere centered at local origin — radius = max distance to any AABB corner.
+      const float bounding_radius = glm::length(glm::vec3{
+          std::max(std::abs(mn.x), std::abs(mx.x)),
+          std::max(std::abs(mn.y), std::abs(mx.y)),
+          std::max(std::abs(mn.z), std::abs(mx.z)),
+      });
       global_instance_data[i] = CompressedInstanceData{
           e.transform,
           static_cast<u16>(e.material_id),
-          glm::length(half),
+          bounding_radius,
           lod_group->lod_count,
       };
       if (e.skinned_base != ~0u) {
@@ -1102,7 +1152,7 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
     ubo.point_light_count = static_cast<u32>(info.point_lights.size());
     std::copy_n(info.point_lights.data(), info.point_lights.size(),
                 ubo.point_lights.data());
-    ubo.viewport_width  = info.viewport_size.x;
+    ubo.viewport_width = info.viewport_size.x;
     ubo.viewport_height = info.viewport_size.y;
     frame_ubo_buffers.at(info.frame_index)->upload(std::span(&ubo, 1));
   }
@@ -1189,6 +1239,8 @@ void SceneRenderer::render_pass(VkCommandBuffer cmd, RenderPass &pass,
             ? override_pipeline
             : pipeline_registry->get_unsafe(batch.pipeline_id);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    if (batch.depth_compare != VK_COMPARE_OP_MAX_ENUM)
+      vkCmdSetDepthCompareOp(cmd, batch.depth_compare);
     vkCmdPushConstants(cmd, pipeline_layout, VK_SHADER_STAGE_ALL, 0u,
                        sizeof(GpuPushConstants), &push_constants);
 
@@ -1203,19 +1255,17 @@ void SceneRenderer::depth_frustum_culling_pass(VkCommandBuffer cmd) {
   ZoneScopedNC("SceneRenderer::depth_frustum_culling_pass", 0x00BFFF);
   TracyVkZoneC(tracy_vk_ctx->ctx, cmd, "depth_frustum_culling_pass", 0x00BFFF);
 
-
-
   auto geometry_count = global_instance_data.size();
   if (geometry_count == 0 || depth_prepass.batches.empty() ||
       forward_pass.batches.empty())
     return;
   auto &depth_ws = depth_prepass.frame_workspaces.at(current_frame_index);
 
-
   auto make_host_to_compute = [](VkBuffer buf) -> VkBufferMemoryBarrier2 {
     return {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is a mapped write
+        .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is a
+                                                      // mapped write
         .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
         .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
@@ -1499,7 +1549,8 @@ void SceneRenderer::forward_occlusion_culling_pass(
   auto make_host_to_compute = [](VkBuffer buf) -> VkBufferMemoryBarrier2 {
     return {
         .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-        .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is a mapped write
+        .srcStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, // upload_with_offset is a
+                                                      // mapped write
         .srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT,
         .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
@@ -1526,8 +1577,6 @@ void SceneRenderer::forward_occlusion_culling_pass(
           global_instance_buffer[current_frame_index]->get_device_address(),
       .frame_data =
           frame_ubo_buffers.at(current_frame_index)->get_device_address(),
-      .forward_max_instances =
-          forward_ws.max_instances_per_cmd_buffer->get_device_address(),
       .forward_instance_to_command_buffer =
           forward_ws.instance_to_command_buffer->get_device_address(),
       .forward_indirect_commands =
@@ -1597,34 +1646,37 @@ void SceneRenderer::light_clustering_pass(VkCommandBuffer cmd) {
   // Reset the allocation counter via the existing compute reset shader
   reset_field<u32>(cmd, *light_list_counter_buffers[fi], 1U, 0U, 0U);
 
-  // Barrier: counter COMPUTE_WRITE -> COMPUTE_READ/WRITE for the clustering pass
+  // Barrier: counter COMPUTE_WRITE -> COMPUTE_READ/WRITE for the clustering
+  // pass
   const VkBufferMemoryBarrier2 counter_barrier{
-      .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-      .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+      .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
       .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-      .dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-      .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
-      .buffer        = light_list_counter_buffers[fi]->get_buffer(),
-      .size          = VK_WHOLE_SIZE,
+      .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+      .dstAccessMask =
+          VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+      .buffer = light_list_counter_buffers[fi]->get_buffer(),
+      .size = VK_WHOLE_SIZE,
   };
   const VkDependencyInfo counter_dep{
-      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
       .bufferMemoryBarrierCount = 1U,
-      .pBufferMemoryBarriers    = &counter_barrier,
+      .pBufferMemoryBarriers = &counter_barrier,
   };
   vkCmdPipelineBarrier2(cmd, &counter_dep);
 
   const LightClusteringPushConstants push{
-      .frame_data         = frame_ubo_buffers.at(fi)->get_device_address(),
-      .cluster_list       = cluster_list_buffers[fi]->get_device_address(),
-      .light_list         = light_list_buffers[fi]->get_device_address(),
-      .light_list_counter = light_list_counter_buffers[fi]->get_device_address(),
+      .frame_data = frame_ubo_buffers.at(fi)->get_device_address(),
+      .cluster_list = cluster_list_buffers[fi]->get_device_address(),
+      .light_list = light_list_buffers[fi]->get_device_address(),
+      .light_list_counter =
+          light_list_counter_buffers[fi]->get_device_address(),
   };
 
   const auto &entry = pipeline_registry->get_entry(light_clustering_pipeline);
   vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
-  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
-                          0U, 1U, &bindless.set, 0U, nullptr);
+  vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout, 0U,
+                          1U, &bindless.set, 0U, nullptr);
   vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0U,
                      sizeof(push), &push);
   vkCmdDispatch(cmd, cluster_total, 1U, 1U);
@@ -1632,28 +1684,29 @@ void SceneRenderer::light_clustering_pass(VkCommandBuffer cmd) {
   // Barrier: cluster data COMPUTE_WRITE -> FRAGMENT_READ
   std::array<VkBufferMemoryBarrier2, 2> post_cluster_barriers = {{
       {
-          .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
           .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
           .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-          .buffer        = cluster_list_buffers[fi]->get_buffer(),
-          .size          = VK_WHOLE_SIZE,
+          .buffer = cluster_list_buffers[fi]->get_buffer(),
+          .size = VK_WHOLE_SIZE,
       },
       {
-          .sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-          .srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+          .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+          .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
           .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
-          .dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+          .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
           .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT,
-          .buffer        = light_list_buffers[fi]->get_buffer(),
-          .size          = VK_WHOLE_SIZE,
+          .buffer = light_list_buffers[fi]->get_buffer(),
+          .size = VK_WHOLE_SIZE,
       },
   }};
   const VkDependencyInfo post_dep{
-      .sType                    = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-      .bufferMemoryBarrierCount = static_cast<u32>(post_cluster_barriers.size()),
-      .pBufferMemoryBarriers    = post_cluster_barriers.data(),
+      .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+      .bufferMemoryBarrierCount =
+          static_cast<u32>(post_cluster_barriers.size()),
+      .pBufferMemoryBarriers = post_cluster_barriers.data(),
   };
   vkCmdPipelineBarrier2(cmd, &post_dep);
 }
@@ -1717,7 +1770,8 @@ void SceneRenderer::bloom_pass(VkCommandBuffer cmd) {
         .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
         .srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT,
         .dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-        .dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
+        .dstAccessMask =
+            VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT,
         .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .image = bloom_entry->texture.image,
@@ -1745,7 +1799,8 @@ void SceneRenderer::bloom_pass(VkCommandBuffer cmd) {
       const glm::uvec2 src = dst * 2U; // forward_target is 2× bloom mip 0
       const BloomDownsamplePushConstants pc{
           .src_texture_idx = forward_target_handle.index(),
-          .dst_texture_idx = bloom_entry->texture.mip_layer_handle(0, 0).index(),
+          .dst_texture_idx =
+              bloom_entry->texture.mip_layer_handle(0, 0).index(),
           .sampler_idx = sampler_idx,
           .is_first_pass = 1U,
           .src_size = src,
@@ -1762,8 +1817,10 @@ void SceneRenderer::bloom_pass(VkCommandBuffer cmd) {
       const glm::uvec2 src = mip_extent(mip - 1);
       const glm::uvec2 dst = mip_extent(mip);
       const BloomDownsamplePushConstants pc{
-          .src_texture_idx = bloom_entry->texture.mip_layer_handle(mip - 1, 0).index(),
-          .dst_texture_idx = bloom_entry->texture.mip_layer_handle(mip, 0).index(),
+          .src_texture_idx =
+              bloom_entry->texture.mip_layer_handle(mip - 1, 0).index(),
+          .dst_texture_idx =
+              bloom_entry->texture.mip_layer_handle(mip, 0).index(),
           .sampler_idx = sampler_idx,
           .is_first_pass = 0U,
           .src_size = src,
@@ -1777,7 +1834,8 @@ void SceneRenderer::bloom_pass(VkCommandBuffer cmd) {
   }
 
   // ---- Separable upsample chain ----
-  // For each level: H blur (bloom mip+1 → scratch mip), then V blur + accumulate (scratch mip → bloom mip)
+  // For each level: H blur (bloom mip+1 → scratch mip), then V blur +
+  // accumulate (scratch mip → bloom mip)
   {
     const auto *scratch_entry = textures.get(bloom_scratch_handle);
 
@@ -1814,8 +1872,10 @@ void SceneRenderer::bloom_pass(VkCommandBuffer cmd) {
       // H blur: bloom_chain mip+1 → scratch mip
       {
         const BloomBlurPushConstants pc{
-            .src_texture_idx = bloom_entry->texture.mip_layer_handle(umip + 1, 0).index(),
-            .dst_texture_idx = scratch_entry->texture.mip_layer_handle(umip, 0).index(),
+            .src_texture_idx =
+                bloom_entry->texture.mip_layer_handle(umip + 1, 0).index(),
+            .dst_texture_idx =
+                scratch_entry->texture.mip_layer_handle(umip, 0).index(),
             .sampler_idx = sampler_idx,
             .is_vertical = 0U,
             .dst_size = dst,
@@ -1831,8 +1891,10 @@ void SceneRenderer::bloom_pass(VkCommandBuffer cmd) {
       // V blur + accumulate: scratch mip → bloom_chain mip
       {
         const BloomBlurPushConstants pc{
-            .src_texture_idx = scratch_entry->texture.mip_layer_handle(umip, 0).index(),
-            .dst_texture_idx = bloom_entry->texture.mip_layer_handle(umip, 0).index(),
+            .src_texture_idx =
+                scratch_entry->texture.mip_layer_handle(umip, 0).index(),
+            .dst_texture_idx =
+                bloom_entry->texture.mip_layer_handle(umip, 0).index(),
             .sampler_idx = sampler_idx,
             .is_vertical = 1U,
             .dst_size = dst,
@@ -1879,7 +1941,8 @@ void SceneRenderer::composite_pass(VkCommandBuffer cmd) {
   const CompositePushConstants push{
       .forward_texture_index = forward_target_handle,
       .sampler = dummy_sampler_handle,
-      .bloom_texture_index = bloom_enabled ? bloom_chain_handle : TextureHandle{},
+      .bloom_texture_index =
+          bloom_enabled ? bloom_chain_handle : TextureHandle{},
       .bloom_strength = bloom_strength,
   };
   vkCmdPushConstants(cmd, entry.layout,
@@ -1928,9 +1991,8 @@ auto RenderPass::ensure_capacity(usize command_count, usize instance_count,
                 "Index Remapping Buffer");
   ensure_buffer(ws.culled_index_remapping_buffer, instance_needed,
                 storage_flags, "Culled Index Remapping Buffer");
-  ensure_buffer(ws.max_instances_per_cmd_buffer,
-                command_count * sizeof(u32), storage_flags,
-                "Max Instances Per Cmd Buffer");
+  ensure_buffer(ws.max_instances_per_cmd_buffer, command_count * sizeof(u32),
+                storage_flags, "Max Instances Per Cmd Buffer");
 
   return true;
 }
@@ -1959,12 +2021,21 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
         ZoneScopedNC("Switch Pipeline Batch", 0xFF00FF);
         current_pipeline = head.pipeline_id;
         draw_counts.push_back(0u);
+
+        VkCompareOp depth_compare = VK_COMPARE_OP_MAX_ENUM;
+        if (type == RenderPassType::Forward) {
+          depth_compare = has_flag(head.flags, MaterialFlags::alpha_blend)
+                              ? VK_COMPARE_OP_GREATER_OR_EQUAL
+                              : VK_COMPARE_OP_EQUAL;
+        }
+
         batches.push_back({
             .pipeline_id = head.pipeline_id,
             .max_command_count = 0u,
             .first_command_index = static_cast<u32>(commands.size()),
             .count_buffer_offset =
                 static_cast<u32>((draw_counts.size() - 1) * sizeof(u32)),
+            .depth_compare = depth_compare,
         });
       }
 
@@ -1979,8 +2050,17 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
           ++i;
       }
 
-      for (usize j = run_start; j < i; ++j)
-        instance_to_commands[j] = lod0_cmd;
+      constexpr auto non_opaque =
+          MaterialFlags::alpha_mask | MaterialFlags::alpha_blend |
+          MaterialFlags::has_transmission;
+      const bool in_depth_prepass =
+          type != RenderPassType::DepthPrepass ||
+          (head.flags & non_opaque) == MaterialFlags::None;
+
+      if (in_depth_prepass) {
+        for (usize j = run_start; j < i; ++j)
+          instance_to_commands[j] = lod0_cmd;
+      }
 
       const FlatPrimitive &fp =
           renderer.flat_prim_table[head.mesh_prim_flat_index];
@@ -2324,11 +2404,15 @@ void SceneRenderer::ensure_skinned_scratch(usize vertex_count) {
   const usize new_cap =
       std::max(vertex_count, (skinned_scratch_capacity * 3 / 2) + 1);
   if (vs) {
-    DeletionQueue::the().push([b = vs->get_buffer(), a = vs->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    DeletionQueue::the().push(
+        [b = vs->get_buffer(), a = vs->get_allocation(),
+         alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
     vs->detach();
   }
   if (ps) {
-    DeletionQueue::the().push([b = ps->get_buffer(), a = ps->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    DeletionQueue::the().push(
+        [b = ps->get_buffer(), a = ps->get_allocation(),
+         alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
     ps->detach();
   }
   vs = Buffer::create(ctx.allocator, "skinned_vertex_scratch",
@@ -2348,7 +2432,9 @@ void SceneRenderer::ensure_joint_palette_capacity(usize mat_count) {
     return;
   breadcrumb("joint_palette_alloc");
   if (buf) {
-    DeletionQueue::the().push([b = buf->get_buffer(), a = buf->get_allocation(), alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
+    DeletionQueue::the().push(
+        [b = buf->get_buffer(), a = buf->get_allocation(),
+         alloc = ctx.allocator] { vmaDestroyBuffer(alloc, b, a); });
     buf->detach();
   }
   buf = Buffer::create(ctx.allocator, "joint_palette", byte_size,

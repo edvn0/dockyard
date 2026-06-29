@@ -12,6 +12,8 @@ vma_stats.json
 .cache
 .vs
 assets/meshes/**/*.glb
+assets/meshes/**/*.gltf
+assets/meshes/**/*.bin
 assets/meshes/**/*.exr
 assets/meshes/**/*.ktx2
 assets/meshes/**/*.ktx

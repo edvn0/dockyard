@@ -169,7 +169,8 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
 
   for (auto &&[e, xt, ltw, m] : render_view.each()) {
     renderer->submit(m.handle, ltw.matrix, forward_pipeline.index(),
-                     resolve_material_slot({*active_scene, e}));
+                     resolve_material_slot({*active_scene, e}),
+                     forward_blend_pipeline.index());
   }
 
   for (auto &&[e, xt, ltw, m, anim] :
@@ -179,7 +180,8 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
            .each()) {
     renderer->submit(
         m.handle, ltw.matrix, std::span<const glm::mat4>(anim.joint_palette),
-        forward_pipeline.index(), resolve_material_slot({*active_scene, e}));
+        forward_pipeline.index(), resolve_material_slot({*active_scene, e}),
+        forward_blend_pipeline.index());
   }
   auto [view, projection] = resolve_camera();
   const auto camera_moved = view != shadow_map_state.last_view_matrix;
