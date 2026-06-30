@@ -193,8 +193,8 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
     float4 mr = sample_material_tex(
         mat.metallic_roughness_index,
         mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_mr));
-    roughness = clamp(mr.b * mat.roughness_factor, 0.0f, 1.0f);
-    metallic = clamp(mr.g * mat.metallic_factor, 0.0f, 1.0f);
+    roughness = clamp(mr.g * mat.roughness_factor, 0.00f, 1.0f);
+    metallic = clamp(mr.b * mat.metallic_factor, 0.00f, 1.0f);
     // KHR_materials_specular: tint dielectric F0 by specularColorFactor *
     // specularColorTexture.
     float3 spec_color =
@@ -203,7 +203,7 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
             mat.specular_color_index,
             mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_speccolor))
             .rgb;
-    float3 f0_dielectric = min(float3(0.04f) * spec_color, float3(1.0f));
+    float3 f0_dielectric = min(float3(0.04F) * spec_color, float3(1.0f));
     f0 = lerp(f0_dielectric, albedo.rgb, metallic);
     if ((mat.flags & MaterialFlags::combined_orm) != MaterialFlags::none) {
       ao = saturate(1.0f + mat.occlusion_strength * (mr.r - 1.0f));
@@ -301,5 +301,5 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
   float4(heat, 1.0f);
   } */
 
-  return float4(f0, albedo.a);
+  return float4(final_color, albedo.a);
 }

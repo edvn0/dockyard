@@ -1010,7 +1010,7 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
 
   {
     ZoneScopedNC("Poll Registries", 0x00FF7F);
-    texture_upload_pool->poll_one(*this);
+    texture_upload_pool->poll_n(*this, 5);
     pipeline_registry->poll_and_update_dirty_pipelines();
   }
 
@@ -1100,7 +1100,8 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
       }
       const auto mn = e.aabb.get_min();
       const auto mx = e.aabb.get_max();
-      // Sphere centered at local origin — radius = max distance to any AABB corner.
+      // Sphere centered at local origin — radius = max distance to any AABB
+      // corner.
       const float bounding_radius = glm::length(glm::vec3{
           std::max(std::abs(mn.x), std::abs(mx.x)),
           std::max(std::abs(mn.y), std::abs(mx.y)),

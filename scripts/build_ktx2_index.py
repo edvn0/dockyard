@@ -30,6 +30,7 @@ SEMANTIC_SUFFIX: dict[str, str] = {
     "albedo": "_BaseColor",
     "normal": "_Normal",
     "specular_color": "_Specular",
+    "specular": "_Specular",
     "specular_glossiness": "_SpecularGlossiness",
     "sg_diffuse": "_Diffuse",
     "emissive": "_Emissive",
