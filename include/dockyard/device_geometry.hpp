@@ -20,12 +20,13 @@ enum class DeviceAddress : u64 { Invalid = 0 };
 struct Vertex {
   float position[3];
   u32 uvs;
+  u32 uvs1;
   u32 normal;
   u32 tangent;
   u32 bitangent;
 };
 static_assert(std::is_trivially_copyable_v<Vertex>);
-static_assert(sizeof(Vertex) == 28); // 12 (pos) + 4*4 (rest)
+static_assert(sizeof(Vertex) == 32); // 12 (pos) + 5*4 (rest)
 
 struct PositionOnlyVertex {
   float position[3];
@@ -65,7 +66,8 @@ enum class MaterialFlags : u32 {
   combined_orm = 1 << 5, // Shader: occlusion packed in ORM (XYZ=ORM, W=unused)
   no_occlusion =
       1 << 6, // Shader: skip occlusion sampling, use occlusion_strength only
-  alpha_blend = 1 << 7, // AlphaMode::Blend — sorted translucency, no depth write
+  alpha_blend = 1 << 7,       // AlphaMode::Blend — sorted translucency, no depth write
+  spec_gloss_workflow = 1 << 8, // KHR_materials_pbrSpecularGlossiness
 };
 MAKE_BITFIELD(MaterialFlags)
 
@@ -114,6 +116,21 @@ struct GPUMaterial {
   float uv_scale_y;
   float uv_offset_x;
   float uv_offset_y;
+
+  // KHR_materials_pbrSpecularGlossiness: specular F0 color and SG texture index.
+  // metallic_factor is repurposed as glossiness_factor in this workflow.
+  float specular_factor[3];
+  u32 specular_glossiness_index;
+
+  // KHR_materials_specular: per-material F0 tint for dielectrics (MR workflow only).
+  float specular_color_factor[3]{1.0F, 1.0F, 1.0F};
+  u32 specular_color_index;
+
+  // Per-texture UV channel selector. Bit N = 1 means that texture slot uses
+  // UV1 (TEXCOORD_1) instead of UV0. Bit positions: see uv_ch_* constants in
+  // push_constant.slang.
+  u32 uv_channel_mask;
+  u32 _pad_uv[3];
 };
 
 static_assert(std::is_trivially_copyable_v<GPUMaterial>);
@@ -148,6 +165,10 @@ struct MaterialAsset {
   float transmission_factor = 0.0f; // KHR_materials_transmission
   float anisotropy_factor = 0.0f;   // KHR_materials_anisotropy
   float anisotropy_rotation = 0.0f;
+  float specular_factor[3] = {1.0f, 1.0f, 1.0f}; // KHR_materials_pbrSpecularGlossiness
+  TextureHandle specular_glossiness_texture;
+  float specular_color_factor[3] = {1.0F, 1.0F, 1.0F}; // KHR_materials_specular
+  TextureHandle specular_color_texture;
 
   // Rendering control
   bool double_sided = false;
@@ -158,6 +179,9 @@ struct MaterialAsset {
   float uv_scale_y = 1.0f;
   float uv_offset_x = 0.0f;
   float uv_offset_y = 0.0f;
+
+  // Per-texture UV channel selector; mirrors GPUMaterial::uv_channel_mask.
+  u32 uv_channel_mask = 0;
 };
 
 struct AllocatedOffset {

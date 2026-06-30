@@ -4,6 +4,7 @@
 #include <dockforge/inspector_panel.hpp>
 #include <dockforge/renderer_settings_panel.hpp>
 #include <dockforge/scene_outliner_panel.hpp>
+#include <dockforge/texture_pool_panel.hpp>
 
 #include <dockyard/asset_loader.hpp>
 #include <dockyard/components.hpp>
@@ -89,7 +90,10 @@ struct AssetLoader : dy::IAssetLoader {
     }
 
     std::expected<MeshAssetHandle, std::string> result{};
-    if (path.extension() == ".gz" || path.extension() == ".zip") {
+    const auto ext = path.extension();
+    const bool is_compressed = ext == ".zip" || ext == ".gz" || ext == ".tgz" ||
+                               ext == ".zst" || ext == ".tzst" || ext == ".zstd";
+    if (is_compressed) {
       result = dy::mesh::load_from_compressed(path, renderer);
     } else {
       result = dy::mesh::load_from_path(path, renderer);
@@ -323,6 +327,13 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   panels.push_back(std::make_unique<InspectorPanel>());
   panels.push_back(
       std::make_unique<RendererSettingsPanel>(renderer->settings_registry));
+  panels.push_back(std::make_unique<TexturePoolPanel>());
+  {
+    IPanel *pool_panel = panels.back().get();
+    renderer->settings_registry.add("Texture Upload Pool", [pool_panel] {
+      ImGui::Checkbox("Show panel", &pool_panel->open);
+    });
+  }
 
   load_toolbar_icons();
 

@@ -46,13 +46,14 @@ auto vm_reserve(usize bytes) -> void * {
 
 // Ensure pages in [ptr, ptr + up_to) are committed/accessible.
 // On POSIX this is a no-op; kernel lazily commits on first write.
-auto vm_ensure_committed(void *base, usize already_committed, usize up_to)
+auto vm_ensure_committed(void *base, usize already_committed, usize up_to,
+                         usize reserved)
     -> std::expected<usize, std::string> {
 #ifdef _WIN32
   if (up_to <= already_committed)
     return already_committed;
   usize new_commit = ((up_to + commit_chunk - 1) / commit_chunk) * commit_chunk;
-  // Don't overshoot — caller already validated against reserved
+  new_commit = std::min(new_commit, reserved); // chunk rounding must not exceed reserved
   if (!VirtualAlloc(static_cast<char *>(base) + already_committed,
                     new_commit - already_committed, MEM_COMMIT, PAGE_READWRITE))
     return std::unexpected("VirtualAlloc MEM_COMMIT failed");
@@ -147,7 +148,7 @@ struct BundleWriter {
           "archive content ({} bytes) exceeds reserved region ({} bytes); "
           "archive header may be corrupt",
           needed, b.reserved));
-    auto r = vm_ensure_committed(b.base, committed, needed);
+    auto r = vm_ensure_committed(b.base, committed, needed, b.reserved);
     if (!r)
       return std::unexpected(r.error());
     committed = *r;
@@ -626,6 +627,107 @@ static auto extract_zip_impl(const fs::path &src, const fs::path &dest,
 }
 
 // ---------------------------------------------------------------------------
+// Raw zstd (single compressed file, not a tar archive)
+// ---------------------------------------------------------------------------
+
+static auto extract_raw_zstd_impl(const fs::path &src, BundleWriter *bw,
+                                   const fs::path &dest)
+    -> std::expected<void, std::string> {
+  std::ifstream f(src, std::ios::binary | std::ios::ate);
+  if (!f)
+    return std::unexpected(std::format("cannot open '{}'", src.string()));
+
+  const auto compressed_size = static_cast<usize>(f.tellg());
+  f.seekg(0);
+  std::vector<uint8_t> compressed(compressed_size);
+  if (!f.read(reinterpret_cast<char *>(compressed.data()),
+              static_cast<std::streamsize>(compressed_size)))
+    return std::unexpected(std::format("read error for '{}'", src.string()));
+
+  const unsigned long long content_size =
+      ZSTD_getFrameContentSize(compressed.data(), compressed_size);
+  if (content_size == ZSTD_CONTENTSIZE_ERROR)
+    return std::unexpected("not a valid zstd frame");
+
+  // Entry key is the stem (e.g. "model.glb" for "model.glb.zstd").
+  const std::string entry_name = src.stem().string();
+
+  if (content_size != ZSTD_CONTENTSIZE_UNKNOWN) {
+    const usize out_size = static_cast<usize>(content_size);
+    if (bw) {
+      if (auto r = bw->ensure(out_size); !r)
+        return r;
+      EntryWriter ew{*bw};
+      auto *dst = ew.begin_entry();
+      const usize ret =
+          ZSTD_decompress(dst, out_size, compressed.data(), compressed_size);
+      if (ZSTD_isError(ret))
+        return std::unexpected(
+            std::format("zstd decompress error: {}", ZSTD_getErrorName(ret)));
+      ew.finish_entry(entry_name, out_size);
+    } else {
+      const fs::path out_path =
+          dest / fs::path(entry_name, fs::path::generic_format);
+      std::vector<std::byte> decompressed(out_size);
+      const usize ret = ZSTD_decompress(decompressed.data(), out_size,
+                                        compressed.data(), compressed_size);
+      if (ZSTD_isError(ret))
+        return std::unexpected(
+            std::format("zstd decompress error: {}", ZSTD_getErrorName(ret)));
+      std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+      if (!out)
+        return std::unexpected(
+            std::format("cannot create '{}'", out_path.string()));
+      out.write(reinterpret_cast<const char *>(decompressed.data()),
+                static_cast<std::streamsize>(out_size));
+    }
+    return {};
+  }
+
+  // Content size not stored in frame: stream-decompress into a staging buffer.
+  ZSTD_DStream *ds = ZSTD_createDStream();
+  struct ZstdGuard {
+    ZSTD_DStream *p;
+    ~ZstdGuard() { ZSTD_freeDStream(p); }
+  } guard{ds};
+  ZSTD_initDStream(ds);
+
+  std::vector<uint8_t> out_chunk(ZSTD_DStreamOutSize());
+  std::vector<std::byte> decompressed;
+  ZSTD_inBuffer zin{compressed.data(), compressed_size, 0};
+
+  while (zin.pos < zin.size) {
+    ZSTD_outBuffer zout{out_chunk.data(), out_chunk.size(), 0};
+    const usize ret = ZSTD_decompressStream(ds, &zout, &zin);
+    if (ZSTD_isError(ret))
+      return std::unexpected(
+          std::format("zstd decompress error: {}", ZSTD_getErrorName(ret)));
+    const auto *out_bytes =
+        reinterpret_cast<const std::byte *>(out_chunk.data());
+    decompressed.insert(decompressed.end(), out_bytes, out_bytes + zout.pos);
+  }
+
+  if (bw) {
+    if (auto r = bw->ensure(decompressed.size()); !r)
+      return r;
+    EntryWriter ew{*bw};
+    auto *dst = ew.begin_entry();
+    std::memcpy(dst, decompressed.data(), decompressed.size());
+    ew.finish_entry(entry_name, decompressed.size());
+  } else {
+    const fs::path out_path =
+        dest / fs::path(entry_name, fs::path::generic_format);
+    std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+    if (!out)
+      return std::unexpected(
+          std::format("cannot create '{}'", out_path.string()));
+    out.write(reinterpret_cast<const char *>(decompressed.data()),
+              static_cast<std::streamsize>(decompressed.size()));
+  }
+  return {};
+}
+
+// ---------------------------------------------------------------------------
 // Size estimation (cheap header reads, no decompression)
 // ---------------------------------------------------------------------------
 
@@ -696,6 +798,7 @@ struct FormatFlags {
   bool is_zip = false;
   bool is_tar_gz = false;
   bool is_tar_zst = false;
+  bool is_raw_zstd = false;
 };
 
 auto detect_format(const fs::path &src) -> FormatFlags {
@@ -705,6 +808,7 @@ auto detect_format(const fs::path &src) -> FormatFlags {
       .is_zip = ext == ".zip",
       .is_tar_gz = (ext == ".gz" && stem_ext == ".tar") || ext == ".tgz",
       .is_tar_zst = (ext == ".zst" && stem_ext == ".tar") || ext == ".tzst",
+      .is_raw_zstd = ext == ".zstd" || (ext == ".zst" && stem_ext != ".tar"),
   };
 }
 
@@ -735,10 +839,12 @@ auto extract(const dy::VFSPath &src_vfs, const dy::VFSPath &dest_vfs)
     return std::unexpected(std::format("cannot create dest '{}': {}",
                                        dest_dir.string(), ec.message()));
 
-  const auto [is_zip, is_tar_gz, is_tar_zst] = detect_format(src);
+  const auto [is_zip, is_tar_gz, is_tar_zst, is_raw_zstd] = detect_format(src);
 
   if (is_zip)
     return extract_zip_impl(src, dest_dir, nullptr);
+  if (is_raw_zstd)
+    return extract_raw_zstd_impl(src, nullptr, dest_dir);
 
   auto f = open_file(src);
   if (!f)
@@ -757,7 +863,7 @@ auto extract(const dy::VFSPath &src_vfs, const dy::VFSPath &dest_vfs)
 
   return std::unexpected(
       std::format("unsupported archive format '{}' (supported: .zip .tar.gz "
-                  ".tgz .tar.zst .tzst)",
+                  ".tgz .tar.zst .tzst .zstd)",
                   src.extension().string()));
 }
 
@@ -765,19 +871,19 @@ auto extract_to_memory(const dy::VFSPath &src_vfs, usize budget)
     -> std::expected<MemoryBundle, std::string> {
   const fs::path src = dy::VFS::get().resolve(src_vfs);
 
-  const auto [is_zip, is_tar_gz, is_tar_zst] = detect_format(src);
+  const auto [is_zip, is_tar_gz, is_tar_zst, is_raw_zstd] = detect_format(src);
 
-  if (!is_zip && !is_tar_gz && !is_tar_zst)
+  if (!is_zip && !is_tar_gz && !is_tar_zst && !is_raw_zstd)
     return std::unexpected(
         std::format("unsupported archive format '{}' (supported: .zip .tar.gz "
-                    ".tgz .tar.zst .tzst)",
+                    ".tgz .tar.zst .tzst .zstd)",
                     src.extension().string()));
 
   // --- Cheap size estimate ---
   std::optional<u64> estimated;
   if (is_zip)
     estimated = estimate_zip(src);
-  else if (is_tar_zst)
+  else if (is_tar_zst || is_raw_zstd)
     estimated = estimate_zstd(src);
   else if (is_tar_gz)
     estimated = estimate_gzip(src);
@@ -809,6 +915,8 @@ auto extract_to_memory(const dy::VFSPath &src_vfs, usize budget)
 
   if (is_zip) {
     result = extract_zip_impl(src, {}, &bw);
+  } else if (is_raw_zstd) {
+    result = extract_raw_zstd_impl(src, &bw, {});
   } else {
     auto f = open_file(src);
     if (!f) {

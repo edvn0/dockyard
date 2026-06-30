@@ -4,6 +4,7 @@
 
 #include <dockyard/forward.hpp>
 
+#include <atomic>
 #include <future>
 #include <span>
 
@@ -58,6 +59,12 @@ struct PendingUpload {
   std::stop_source stop_src;
 };
 
+struct Stats {
+  usize pending;
+  u64 total_submitted;
+  u64 total_completed;
+};
+
 class TextureUploadPool {
 public:
   auto submit(std::future<CpuTextureData> fut, std::stop_source stop_src,
@@ -73,10 +80,12 @@ public:
         .on_complete = std::move(on_complete),
         .stop_src = std::move(stop_src),
     });
+    submitted.fetch_add(1, std::memory_order_relaxed);
   }
 
   auto poll_one(SceneRenderer &renderer) -> void { poll_n(renderer, 1); }
   auto poll_n(SceneRenderer &renderer, usize) -> void;
+  [[nodiscard]] auto stats() const -> Stats;
   [[nodiscard]] bool empty() const;
   auto drop() -> void;
 
@@ -84,6 +93,8 @@ private:
   mutable std::mutex work_mutex;
   std::vector<PendingUpload> pending_work;
   std::atomic<bool> stopped{false};
+  std::atomic<u64> submitted{0};
+  std::atomic<u64> completed{0};
 };
 
 } // namespace dy::pool

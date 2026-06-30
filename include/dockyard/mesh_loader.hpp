@@ -40,10 +40,11 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
                     const LoadOptions &opts = {})
     -> std::expected<MeshAssetHandle, std::string>;
 
-// Load a mesh from a compressed archive (ZIP, .tar.gz, .tar.zst) without
-// extracting to disk.  The archive must contain exactly one .glb file;
-// self-contained GLB is required because fastgltf has no in-memory file
-// callback for external .bin / texture references.
+// Load a mesh from a compressed archive (ZIP, .tar.gz, .tar.zst, or raw .zstd)
+// without extracting to disk.  The archive must contain exactly one .glb file;
+// for raw .zstd the compressed file itself must be the GLB (e.g. model.glb.zstd).
+// Self-contained GLB is required because fastgltf has no in-memory file callback
+// for external .bin / texture references.
 // For .gltf archives with external files use archive::extract() + load_from_path().
 auto load_from_compressed(const VFSPath& archive_path,
                           SceneRenderer& renderer,

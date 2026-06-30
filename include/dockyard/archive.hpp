@@ -37,7 +37,9 @@ struct MemoryBundle {
 
 static constexpr size_t kDefaultMemoryBudget = 12ULL << 30; // 12 GiB
 
-// Extract a ZIP, .tar.gz/.tgz, or .tar.zst/.tzst archive into dest_dir.
+// Extract a ZIP, .tar.gz/.tgz, .tar.zst/.tzst, or raw .zstd archive into dest_dir.
+// For raw .zstd, the decompressed file is written using the stem as filename
+// (e.g. "model.glb.zstd" → dest_dir/model.glb).
 auto extract(const dy::VFSPath& src, const dy::VFSPath& dest_dir)
     -> std::expected<void, std::string>;
 
@@ -45,6 +47,7 @@ auto extract(const dy::VFSPath& src, const dy::VFSPath& dest_dir)
 // Reads the archive header first to estimate required size.
 // Returns an error immediately if the estimated size exceeds budget,
 // or mid-stream if the actual content exceeds the reservation (corrupt header).
+// For raw .zstd, the bundle entry key is the stem filename (e.g. "model.glb").
 auto extract_to_memory(const dy::VFSPath& src,
                        size_t budget = kDefaultMemoryBudget)
     -> std::expected<MemoryBundle, std::string>;

@@ -377,6 +377,14 @@ enum class ImageColorSpace : u8 { linear, srgb };
   for (const auto &mat : asset.materials) {
     mark_srgb(mat.pbrData.baseColorTexture);
     mark_srgb(mat.emissiveTexture);
+    if (const auto *sg = mat.specularGlossiness.get(); sg != nullptr) {
+      mark_srgb(sg->diffuseTexture);
+      // specularGlossinessTexture RGB is linear per KHR_materials_pbrSpecularGlossiness spec
+    }
+    if (const auto *spec = mat.specular.get(); spec != nullptr) {
+      mark_srgb(spec->specularColorTexture);
+      // specularTexture alpha (specular strength) is linear — not marked
+    }
   }
   return cs;
 }
@@ -405,29 +413,18 @@ constexpr u32 fb_emissive = 4u;
   GPUMaterial gpu{};
   const auto &pbr = mat.pbrData;
 
-  gpu.albedo_factor[0] = pbr.baseColorFactor[0];
-  gpu.albedo_factor[1] = pbr.baseColorFactor[1];
-  gpu.albedo_factor[2] = pbr.baseColorFactor[2];
-  gpu.albedo_factor[3] = pbr.baseColorFactor[3];
-
   gpu.emissive_factor[0] = mat.emissiveFactor[0];
   gpu.emissive_factor[1] = mat.emissiveFactor[1];
   gpu.emissive_factor[2] = mat.emissiveFactor[2];
   gpu.emissive_factor[3] = mat.emissiveStrength;
 
-  gpu.metallic_factor = pbr.metallicFactor;
-  gpu.roughness_factor = pbr.roughnessFactor;
   gpu.normal_scale = mat.normalTexture ? mat.normalTexture->scale : 1.0F;
   gpu.occlusion_strength =
       mat.occlusionTexture ? mat.occlusionTexture->strength : 1.0F;
   gpu.alpha_cutoff = mat.alphaCutoff;
   gpu.alpha_mode = static_cast<u32>(mat.alphaMode);
 
-  gpu.albedo_index =
-      resolve_tex(asset, handles, pbr.baseColorTexture, fb_albedo);
   gpu.normal_index = resolve_tex(asset, handles, mat.normalTexture, fb_normal);
-  gpu.metallic_roughness_index =
-      resolve_tex(asset, handles, pbr.metallicRoughnessTexture, fb_mr);
   gpu.emissive_index =
       resolve_tex(asset, handles, mat.emissiveTexture, fb_emissive);
   gpu.occlusion_index =
@@ -441,17 +438,56 @@ constexpr u32 fb_emissive = 4u;
   if (mat.doubleSided)
     set_flag(gpu.flags, MaterialFlags::two_sided);
 
-  const bool has_occlusion_ref = mat.occlusionTexture.has_value();
-  const bool has_mr = pbr.metallicRoughnessTexture.has_value();
+  if (const auto *sg = mat.specularGlossiness.get(); sg != nullptr) {
+    // KHR_materials_pbrSpecularGlossiness workflow.
+    // diffuse → albedo slot; metallic_factor repurposed as glossiness_factor.
+    gpu.albedo_factor[0] = sg->diffuseFactor[0];
+    gpu.albedo_factor[1] = sg->diffuseFactor[1];
+    gpu.albedo_factor[2] = sg->diffuseFactor[2];
+    gpu.albedo_factor[3] = sg->diffuseFactor[3];
+    gpu.specular_factor[0] = sg->specularFactor[0];
+    gpu.specular_factor[1] = sg->specularFactor[1];
+    gpu.specular_factor[2] = sg->specularFactor[2];
+    gpu.metallic_factor = sg->glossinessFactor;
+    gpu.albedo_index =
+        resolve_tex(asset, handles, sg->diffuseTexture, fb_albedo);
+    gpu.specular_glossiness_index =
+        resolve_tex(asset, handles, sg->specularGlossinessTexture, fb_mr);
+    if (!mat.occlusionTexture.has_value())
+      set_flag(gpu.flags, MaterialFlags::no_occlusion);
+    set_flag(gpu.flags, MaterialFlags::spec_gloss_workflow);
+  } else {
+    // Metallic-roughness (default glTF PBR workflow).
+    gpu.albedo_factor[0] = pbr.baseColorFactor[0];
+    gpu.albedo_factor[1] = pbr.baseColorFactor[1];
+    gpu.albedo_factor[2] = pbr.baseColorFactor[2];
+    gpu.albedo_factor[3] = pbr.baseColorFactor[3];
+    gpu.metallic_factor = pbr.metallicFactor;
+    gpu.roughness_factor = pbr.roughnessFactor;
+    gpu.albedo_index =
+        resolve_tex(asset, handles, pbr.baseColorTexture, fb_albedo);
+    gpu.metallic_roughness_index =
+        resolve_tex(asset, handles, pbr.metallicRoughnessTexture, fb_mr);
 
-  if (has_occlusion_ref && has_mr &&
-      mat.occlusionTexture->textureIndex ==
-          pbr.metallicRoughnessTexture->textureIndex) {
-    set_flag(gpu.flags, MaterialFlags::combined_orm);
-  } else if (!has_occlusion_ref && has_mr) {
-    set_flag(gpu.flags, MaterialFlags::combined_orm);
-  } else if (!has_occlusion_ref && !has_mr) {
-    set_flag(gpu.flags, MaterialFlags::no_occlusion);
+    const bool has_occlusion_ref = mat.occlusionTexture.has_value();
+    const bool has_mr = pbr.metallicRoughnessTexture.has_value();
+    if (has_occlusion_ref && has_mr &&
+        mat.occlusionTexture->textureIndex ==
+            pbr.metallicRoughnessTexture->textureIndex) {
+      set_flag(gpu.flags, MaterialFlags::combined_orm);
+    } else if (!has_occlusion_ref && has_mr) {
+      set_flag(gpu.flags, MaterialFlags::combined_orm);
+    } else if (!has_occlusion_ref && !has_mr) {
+      set_flag(gpu.flags, MaterialFlags::no_occlusion);
+    }
+
+    if (const auto *spec = mat.specular.get(); spec != nullptr) {
+      gpu.specular_color_factor[0] = spec->specularColorFactor[0];
+      gpu.specular_color_factor[1] = spec->specularColorFactor[1];
+      gpu.specular_color_factor[2] = spec->specularColorFactor[2];
+      gpu.specular_color_index =
+          resolve_tex(asset, handles, spec->specularColorTexture, fb_albedo);
+    }
   }
 
   if (auto *ext = mat.transmission.get(); ext != nullptr) {
@@ -473,6 +509,25 @@ constexpr u32 fb_emissive = 4u;
   gpu.uv_offset_y = 0.0F;
   gpu.cull_mode = mat.doubleSided ? static_cast<u32>(CullMode::None)
                                   : static_cast<u32>(CullMode::Back);
+
+  // Build per-texture UV channel mask: bit N = 1 means that texture uses UV1.
+  auto uses_uv1 = [](const auto &opt) -> u32 {
+    return (opt.has_value() && opt->texCoordIndex == 1) ? 1u : 0u;
+  };
+  u32 uv_mask = 0;
+  if (const auto *sg = mat.specularGlossiness.get(); sg != nullptr) {
+    uv_mask |= uses_uv1(sg->diffuseTexture)            << 0u; // albedo
+    uv_mask |= uses_uv1(sg->specularGlossinessTexture) << 5u; // specgloss
+  } else {
+    uv_mask |= uses_uv1(pbr.baseColorTexture)         << 0u; // albedo
+    uv_mask |= uses_uv1(pbr.metallicRoughnessTexture) << 2u; // mr
+    if (const auto *spec = mat.specular.get(); spec != nullptr)
+      uv_mask |= uses_uv1(spec->specularColorTexture) << 6u; // speccolor
+  }
+  uv_mask |= uses_uv1(mat.normalTexture)   << 1u; // normal
+  uv_mask |= uses_uv1(mat.emissiveTexture) << 3u; // emissive
+  uv_mask |= uses_uv1(mat.occlusionTexture)<< 4u; // occlusion
+  gpu.uv_channel_mask = uv_mask;
 
   return gpu;
 }
@@ -515,6 +570,14 @@ constexpr u32 fb_emissive = 4u;
     fastgltf::iterateAccessorWithIndex<glm::vec2>(
         asset, asset.accessors[a->accessorIndex], [&](glm::vec2 uv, usize i) {
           out.vertices[i].uvs = glm::packHalf2x16(uv);
+        });
+  }
+
+  if (const auto *a = prim.findAttribute("TEXCOORD_1");
+      a != prim.attributes.end()) {
+    fastgltf::iterateAccessorWithIndex<glm::vec2>(
+        asset, asset.accessors[a->accessorIndex], [&](glm::vec2 uv, usize i) {
+          out.vertices[i].uvs1 = glm::packHalf2x16(uv);
         });
   }
 
@@ -1178,7 +1241,8 @@ struct PrimLods {
 namespace {
 fastgltf::Parser parser{
     fastgltf::Extensions::KHR_lights_punctual |
-        fastgltf::Extensions::KHR_materials_specular,
+        fastgltf::Extensions::KHR_materials_specular |
+        fastgltf::Extensions::KHR_materials_pbrSpecularGlossiness,
 };
 }
 
@@ -1186,13 +1250,14 @@ static auto parse_gltf_file(const std::filesystem::path &fs_path,
                             const std::filesystem::path &gltf_dir)
     -> std::expected<fastgltf::Asset, std::string> {
   auto data = fastgltf::GltfDataBuffer::FromPath(fs_path);
+  if (!data)
+    return std::unexpected(std::format("GltfDataBuffer from path failed: {}",
+                                       fastgltf::getErrorMessage(data.error())));
   auto result = parser.loadGltf(data.get(), gltf_dir,
                                 fastgltf::Options::GenerateMeshIndices);
-  if (!result) {
-    auto message = result.error();
-    return std::unexpected(
-        std::format("Parse error: {}", std::to_underlying(message)));
-  }
+  if (!result)
+    return std::unexpected(std::format("glTF parse error: {}",
+                                       fastgltf::getErrorMessage(result.error())));
   return std::move(result.get());
 }
 
@@ -1893,16 +1958,30 @@ auto build_patch_list(const fastgltf::Asset &asset, usize image_idx,
         patches.push_back({slot, std::move(setter)});
     };
 
-    try_add(mat.pbrData.baseColorTexture, [](GPUMaterial &g, TextureHandle h) {
-      g.albedo_index = h.index();
-    });
+    if (const auto *sg = mat.specularGlossiness.get(); sg != nullptr) {
+      try_add(sg->diffuseTexture, [](GPUMaterial &g, TextureHandle h) {
+        g.albedo_index = h.index();
+      });
+      try_add(sg->specularGlossinessTexture, [](GPUMaterial &g, TextureHandle h) {
+        g.specular_glossiness_index = h.index();
+      });
+    } else {
+      try_add(mat.pbrData.baseColorTexture, [](GPUMaterial &g, TextureHandle h) {
+        g.albedo_index = h.index();
+      });
+      try_add(mat.pbrData.metallicRoughnessTexture,
+              [](GPUMaterial &g, TextureHandle h) {
+                g.metallic_roughness_index = h.index();
+              });
+      if (const auto *spec = mat.specular.get(); spec != nullptr) {
+        try_add(spec->specularColorTexture, [](GPUMaterial &g, TextureHandle h) {
+          g.specular_color_index = h.index();
+        });
+      }
+    }
     try_add(mat.normalTexture, [](GPUMaterial &g, TextureHandle h) {
       g.normal_index = h.index();
     });
-    try_add(mat.pbrData.metallicRoughnessTexture,
-            [](GPUMaterial &g, TextureHandle h) {
-              g.metallic_roughness_index = h.index();
-            });
     try_add(mat.occlusionTexture, [](GPUMaterial &g, TextureHandle h) {
       g.occlusion_index = h.index();
     });
@@ -2192,7 +2271,8 @@ auto load_from_compressed(const VFSPath &archive_path, SceneRenderer &renderer,
 
   const std::filesystem::path debug_path =
       std::format("{}/{}", archive_path.view(), *glb_key);
-  return build_mesh_from_parsed(*asset, {}, debug_path, renderer, opts,
+  const auto gltf_dir = VFS::get().resolve(archive_path).parent_path();
+  return build_mesh_from_parsed(*asset, gltf_dir, debug_path, renderer, opts,
                                NullableVFSPath{archive_path});
 }
 

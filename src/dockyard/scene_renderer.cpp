@@ -2050,12 +2050,16 @@ auto RenderPass::bake(std::span<const u32> sorted_order,
           ++i;
       }
 
-      constexpr auto non_opaque =
-          MaterialFlags::alpha_mask | MaterialFlags::alpha_blend |
-          MaterialFlags::has_transmission;
+      // Alpha-masked geometry IS rendered in the depth prepass: depth.slang's
+      // fragment shader discards texels below the cutoff, so the surviving
+      // texels write depth and the forward pass's EQUAL test matches them. Only
+      // blended / transmissive materials are excluded — they write no depth in
+      // the prepass and the forward pass tests them with GREATER_OR_EQUAL.
+      constexpr auto excluded_from_depth_prepass =
+          MaterialFlags::alpha_blend | MaterialFlags::has_transmission;
       const bool in_depth_prepass =
           type != RenderPassType::DepthPrepass ||
-          (head.flags & non_opaque) == MaterialFlags::None;
+          (head.flags & excluded_from_depth_prepass) == MaterialFlags::None;
 
       if (in_depth_prepass) {
         for (usize j = run_start; j < i; ++j)

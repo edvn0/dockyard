@@ -2,10 +2,10 @@
 -- State lives in this table (persists across begin_play/tick/end_play; rebuilt on reload).
 local game = {
     helmet_mesh = nil,
-    fox_mesh    = nil,
-    helmets     = {},
-    player_id   = nil,
-    time        = 0.0,
+    fox_mesh = nil,
+    helmets = {},
+    player_id = nil,
+    time = 0.0,
 }
 
 local function rand_range(a, b)
@@ -13,8 +13,8 @@ local function rand_range(a, b)
 end
 
 local function make_wall(scene, assets, name, pos, scl)
-    local e           = scene:make(name)
-    local mc          = e:add_mesh()
+    local e = scene:make(name)
+    local mc = e:add_mesh()
     local handle, err = assets:load_mesh(VFSPath.create("engine://cube"))
     if handle then
         mc.handle = handle
@@ -22,10 +22,10 @@ local function make_wall(scene, assets, name, pos, scl)
     else
         print("[sandbox] cube mesh error: " .. (err or "?"))
     end
-    local tf    = e:get_transform()
+    local tf = e:get_transform()
     tf.position = pos
-    tf.scale    = scl
-    local mo    = e:add_material_override()
+    tf.scale = scl
+    local mo = e:add_material_override()
     mo:set_albedo(rand_range(0, 1), rand_range(0, 1), rand_range(0, 1), 1)
     mo:set_roughness(rand_range(0, 1))
     mo:set_metallic(rand_range(0, 1))
@@ -34,20 +34,20 @@ end
 
 local function make_human(scene, assets, name, x, z)
     local human_scale_y = 1.75 / 7.826
-    local human_foot_y  = 3.913 * human_scale_y
-    local e             = scene:make(name)
-    local mc            = e:add_mesh()
-    local handle, err   = assets:load_mesh(VFSPath.create("engine://capsule"))
+    local human_foot_y = 3.913 * human_scale_y
+    local e = scene:make(name)
+    local mc = e:add_mesh()
+    local handle, err = assets:load_mesh(VFSPath.create("engine://capsule"))
     if handle then
         mc.handle = handle
         mc:set_source_path("engine://capsule")
     else
         print("[sandbox] capsule mesh error: " .. (err or "?"))
     end
-    local tf    = e:get_transform()
+    local tf = e:get_transform()
     tf.position = vec3(x, human_foot_y, z)
-    tf.scale    = vec3(0.2, human_scale_y, 0.2)
-    local mo    = e:add_material_override()
+    tf.scale = vec3(0.2, human_scale_y, 0.2)
+    local mo = e:add_material_override()
     mo:set_albedo(rand_range(0, 1), rand_range(0, 1), rand_range(0, 1), 1)
     mo:set_roughness(rand_range(0, 1))
     mo:set_metallic(rand_range(0, 1))
@@ -55,13 +55,13 @@ local function make_human(scene, assets, name, x, z)
 end
 
 local function make_light(scene, light_parent, x, z, intensity, radius)
-    local e      = scene:make("Light", light_parent)
-    local pl     = e:add_point_light()
-    pl.color     = vec3(rand_range(0.8, 1), rand_range(0.8, 1), rand_range(0.8, 1))
+    local e = scene:make("Light", light_parent)
+    local pl = e:add_point_light()
+    pl.color = vec3(rand_range(0.8, 1), rand_range(0.8, 1), rand_range(0.8, 1))
     pl.intensity = intensity
-    pl.radius    = radius
-    local tf     = e:get_transform()
-    tf.position  = vec3(x, 3.5, z)
+    pl.radius = radius
+    local tf = e:get_transform()
+    tf.position = vec3(x, 3.5, z)
     return e
 end
 
@@ -139,15 +139,17 @@ local function load_scene(scene, assets)
 end
 
 local function make_foxes(scene, assets)
-    if not (game.fox_mesh and game.fox_mesh:valid()) then return end
+    if not (game.fox_mesh and game.fox_mesh:valid()) then
+        return
+    end
     for i = 0, 9 do
         local fox = scene:make("Fox_" .. i)
-        local mc  = fox:add_mesh()
+        local mc = fox:add_mesh()
         mc.handle = game.fox_mesh
         mc:set_source_path("meshes://fox/Fox.glb")
-        local tf        = fox:get_transform()
-        tf.scale        = vec3(0.01, 0.01, 0.01)
-        tf.position     = vec3(rand_range(-25.0, 25.0), 0.0, rand_range(-25.0, 25.0))
+        local tf = fox:get_transform()
+        tf.scale = vec3(0.01, 0.01, 0.01)
+        tf.position = vec3(rand_range(-25.0, 25.0), 0.0, rand_range(-25.0, 25.0))
         local anim, err = assets:make_animation_state(game.fox_mesh, 0, 0)
         if anim then
             fox:add_animation_state(anim)
@@ -201,18 +203,17 @@ function game.on_scene_load(scene, assets)
     end
     --]]
 
-    local bistro_handle, err = assets:load_mesh(
-        VFSPath.create("meshes://Bistro/BistroCompressed.tar.gz"))
+    local bistro_handle, err = assets:load_mesh(VFSPath.create("meshes://Bistro/BistroExterior.glb.zstd"))
     if bistro_handle then
-        local e   = scene:make("Bistro")
-        local mc  = e:add_mesh()
+        local e = scene:make("Bistro")
+        local mc = e:add_mesh()
         mc.handle = bistro_handle
-        mc:set_source_path("meshes://Bistro/BistroCompressed.tar.gz")
+        mc:set_source_path("meshes://Bistro/BistroExterior.glb.zstd")
 
         local tf = e:get_transform()
         tf.scale = vec3(0.01, 0.01, 0.01)
         local pi = 3.1415925358
-        tf.rotation = quat_from_euler(pi/2, 0, 0)
+        tf.rotation = quat_from_euler(pi / 2, 0, 0)
     else
         print("[sandbox] bistro load error: " .. (err or "?"))
     end
@@ -227,10 +228,10 @@ function game.begin_play(scene)
         if mesh.handle:valid() then
             local pos = transform.position
             game.helmets[#game.helmets + 1] = {
-                id    = id,
-                ox    = pos.x,
-                oy    = pos.y,
-                oz    = pos.z,
+                id = id,
+                ox = pos.x,
+                oy = pos.y,
+                oz = pos.z,
                 phase = 0.0,
             }
         end
@@ -238,26 +239,26 @@ function game.begin_play(scene)
 
     -- Distribute phases evenly across all orbiting entities
     local count = #game.helmets
-    local tau   = 2 * math.pi
+    local tau = 2 * math.pi
     for i, hd in ipairs(game.helmets) do
         hd.phase = (i - 1) / count * tau
     end
 end
 
 function game.tick(scene, dt)
-    game.time    = game.time + dt
-    local time   = game.time
+    game.time = game.time + dt
+    local time = game.time
     local radius = 5.0
-    local speed  = 1.0
+    local speed = 1.0
 
     for _, hd in ipairs(game.helmets) do
         local tf = scene:get_transform(hd.id)
         if tf then
             local angle = time * speed + hd.phase
             -- Read-modify-write: avoids partial mutation issues, goes through mut()
-            local p     = tf.position
-            p.x         = hd.ox + math.cos(angle) * radius
-            p.z         = hd.oz + math.sin(angle) * radius
+            local p = tf.position
+            p.x = hd.ox + math.cos(angle) * radius
+            p.z = hd.oz + math.sin(angle) * radius
             tf.position = p
         end
     end
@@ -271,10 +272,10 @@ end
 
 function game.on_scene_unload(scene)
     game.helmet_mesh = nil
-    game.fox_mesh    = nil
-    game.helmets     = {}
-    game.player_id   = nil
-    game.time        = 0.0
+    game.fox_mesh = nil
+    game.helmets = {}
+    game.player_id = nil
+    game.time = 0.0
 end
 
 return game

@@ -557,8 +557,7 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
 auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
                          const CreateInfo &ci) -> Texture {
   breadcrumb("texture_from_bytes");
-  assert((!ci.bytes.empty() || !ci.mips.empty()) && ci.width > 0 &&
-         ci.height > 0);
+  assert(ci.width > 0 && ci.height > 0);
 
   const bool has_custom_mips = !ci.mips.empty();
 

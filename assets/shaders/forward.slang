@@ -16,30 +16,40 @@ struct V2F {
   float2 uv : TEXCOORD0;
   uint material_id : TEXCOORD1;
   uint lod_idx : TEXCOORD2;
+  float2 uv1 : TEXCOORD3;
 };
 
 float4 sample_material_tex(uint idx, float2 uv) {
   return sampled_images[NonUniformResourceIndex(idx)].Sample(samplers[1], uv);
 }
 
+// Select UV0 or UV1 based on a bit in the material's uv_channel_mask.
+float2 mat_uv(float2 uv0, float2 uv1, uint mask, uint bit) {
+  return ((mask >> bit) & 1u) ? uv1 : uv0;
+}
+
 // Evaluate PBR contribution from all point lights visible to this cluster tile.
 float3 evaluate_clustered_lights(
     Ptr<FrameUBO, Access.Read, AddressSpace.Device> frame_data,
     float4 sv_pos, // SV_Position of this fragment
-    float3 world_pos, float3 n, float3 v,
-    float ndotv_safe, float3 albedo_rgb, float roughness, float metallic,
-    float3 f0, ImmutablePtr<ClusterEntry, AddressSpace.Device> cluster_list,
+    float3 world_pos, float3 n, float3 v, float ndotv_safe, float3 albedo_rgb,
+    float roughness, float metallic, float3 f0,
+    ImmutablePtr<ClusterEntry, AddressSpace.Device> cluster_list,
     ImmutablePtr<uint, AddressSpace.Device> light_list) {
   // Derive depth slice from view-space z (left-handed, z+ forward)
-  float z_view = max(mul(frame_data.view, float4(world_pos, 1.0f)).z, frame_data.camera_near);
-  float z_ratio = log(z_view / frame_data.camera_near) / log(frame_data.camera_far / frame_data.camera_near);
+  float z_view = max(mul(frame_data.view, float4(world_pos, 1.0f)).z,
+                     frame_data.camera_near);
+  float z_ratio = log(z_view / frame_data.camera_near) /
+                  log(frame_data.camera_far / frame_data.camera_near);
   uint depth_slice = min(uint(max(z_ratio * float(CLUSTER_DEPTH_SLICES), 0.0f)),
                          CLUSTER_DEPTH_SLICES - 1u);
 
   // Derive screen tile from SV_Position (0,0 = top-left)
-  uint tile_x = min(uint(sv_pos.x / float(frame_data.viewport_width) * float(CLUSTER_TILES_X)),
+  uint tile_x = min(uint(sv_pos.x / float(frame_data.viewport_width) *
+                         float(CLUSTER_TILES_X)),
                     CLUSTER_TILES_X - 1u);
-  uint tile_y = min(uint(sv_pos.y / float(frame_data.viewport_height) * float(CLUSTER_TILES_Y)),
+  uint tile_y = min(uint(sv_pos.y / float(frame_data.viewport_height) *
+                         float(CLUSTER_TILES_Y)),
                     CLUSTER_TILES_Y - 1u);
 
   uint cluster_idx = depth_slice * (CLUSTER_TILES_X * CLUSTER_TILES_Y) +
@@ -115,6 +125,7 @@ V2F vertexMain(uint vertex_id: SV_VulkanVertexID,
   output.pos = mul(pc.frame_ubo.view_projection, world_pos);
 
   output.uv = unpackHalf2x16ToFloat(v.uvs);
+  output.uv1 = unpackHalf2x16ToFloat(v.uvs1);
   output.material_id = instance.material_id;
 
   return output;
@@ -126,7 +137,10 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
       pc.material_buffer_ptr[NonUniformResourceIndex(input.material_id)];
 
   float4 albedo =
-      sample_material_tex(mat.albedo_index, input.uv) * mat.albedo_factor;
+      sample_material_tex(
+          mat.albedo_index,
+          mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_albedo)) *
+      mat.albedo_factor;
 
   [branch]
   if (mat.alpha_mode == 1u && albedo.a < mat.alpha_cutoff)
@@ -138,7 +152,9 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
   float3 b = cross(geom_n, t) * input.tangent.w;
   float3x3 tbn = float3x3(t, b, geom_n);
 
-  float4 normal_sample = sample_material_tex(mat.normal_index, input.uv);
+  float4 normal_sample = sample_material_tex(
+      mat.normal_index,
+      mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_normal));
   float2 normal_xy = normal_sample.rg * 2.0f - 1.0f;
   normal_xy *= mat.normal_scale;
 
@@ -147,23 +163,69 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
   sampled_n.z = sqrt(1.0f - dot(sampled_n.xy, sampled_n.xy));
   float3 n = normalize(mul(sampled_n, tbn));
 
-  float4 mr = sample_material_tex(mat.metallic_roughness_index, input.uv);
-  float roughness = clamp(mr.b * mat.roughness_factor, 0.0f, 1.0f);
-  float metallic = clamp(mr.g * mat.metallic_factor, 0.04f, 0.1f);
-
-  float3 emissive = sample_material_tex(mat.emissive_index, input.uv).rgb *
-                    mat.emissive_factor.xyz * mat.emissive_factor.a;
-
+  float roughness;
+  float metallic;
+  float3 f0;
   float ao = 1.0f;
-  if ((mat.flags & MaterialFlags::combined_orm) != MaterialFlags::none) {
-    ao = saturate(1.0f + mat.occlusion_strength * (mr.r - 1.0f));
-  } else if ((mat.flags & MaterialFlags::no_occlusion) == MaterialFlags::none) {
-    float occlusion = sample_material_tex(mat.occlusion_index, input.uv).r;
-    ao = saturate(1.0f + mat.occlusion_strength * (occlusion - 1.0f));
+
+  [branch]
+  if ((mat.flags & MaterialFlags::spec_gloss_workflow) != MaterialFlags::none) {
+    // KHR_materials_pbrSpecularGlossiness: specular/glossiness texture
+    // (RGB=specular, A=glossiness). metallic_factor holds glossiness_factor;
+    // specular_factor holds the F0 tint.
+    float4 sg = sample_material_tex(
+        mat.specular_glossiness_index,
+        mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_specgloss));
+    float glossiness = sg.a * mat.metallic_factor;
+    roughness = clamp(1.0f - glossiness, 0.0f, 1.0f);
+    f0 = sg.rgb * mat.specular_factor;
+    metallic = 0.0f;
+    if ((mat.flags & MaterialFlags::no_occlusion) == MaterialFlags::none) {
+      float occlusion =
+          sample_material_tex(
+              mat.occlusion_index,
+              mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_occlusion))
+              .r;
+      ao = saturate(1.0f + mat.occlusion_strength * (occlusion - 1.0f));
+    }
+  } else {
+    // Metallic-roughness (default glTF PBR workflow).
+    float4 mr = sample_material_tex(
+        mat.metallic_roughness_index,
+        mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_mr));
+    roughness = clamp(mr.b * mat.roughness_factor, 0.0f, 1.0f);
+    metallic = clamp(mr.g * mat.metallic_factor, 0.0f, 1.0f);
+    // KHR_materials_specular: tint dielectric F0 by specularColorFactor *
+    // specularColorTexture.
+    float3 spec_color =
+        mat.specular_color_factor *
+        sample_material_tex(
+            mat.specular_color_index,
+            mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_speccolor))
+            .rgb;
+    float3 f0_dielectric = min(float3(0.04f) * spec_color, float3(1.0f));
+    f0 = lerp(f0_dielectric, albedo.rgb, metallic);
+    if ((mat.flags & MaterialFlags::combined_orm) != MaterialFlags::none) {
+      ao = saturate(1.0f + mat.occlusion_strength * (mr.r - 1.0f));
+    } else if ((mat.flags & MaterialFlags::no_occlusion) ==
+               MaterialFlags::none) {
+      float occlusion =
+          sample_material_tex(
+              mat.occlusion_index,
+              mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_occlusion))
+              .r;
+      ao = saturate(1.0f + mat.occlusion_strength * (occlusion - 1.0f));
+    }
   }
 
+  float3 emissive =
+      sample_material_tex(
+          mat.emissive_index,
+          mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_emissive))
+          .rgb *
+      mat.emissive_factor.xyz * mat.emissive_factor.a;
+
   float3 v = normalize(pc.frame_ubo.camera_pos.xyz - input.world_pos);
-  float3 f0 = lerp(float3(0.04f), albedo.rgb, metallic);
   float ndotv_safe = max(dot(n, v), 1e-5f);
 
   const float3 sun_color = float3(1.0f, 0.95f, 0.8f);
@@ -214,9 +276,8 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
       compute_shadow(input.world_pos, geom_n, sun_dir, *pc.frame_ubo);
 
   float3 point_light_contribution = evaluate_clustered_lights(
-      pc.frame_ubo, input.pos,
-      input.world_pos, n, v, ndotv_safe, albedo.rgb, roughness, metallic, f0,
-      pc.cluster_list_ptr, pc.light_list_ptr);
+      pc.frame_ubo, input.pos, input.world_pos, n, v, ndotv_safe, albedo.rgb,
+      roughness, metallic, f0, pc.cluster_list_ptr, pc.light_list_ptr);
 
   float3 final_color = (direct * shadow_result._0) + ambient + emissive +
                        point_light_contribution;
@@ -240,5 +301,5 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
   float4(heat, 1.0f);
   } */
 
-  return float4(final_color, albedo.a);
+  return float4(f0, albedo.a);
 }
