@@ -409,6 +409,27 @@ struct ComponentRenderer<dy::Components::PointLight>
   }
 };
 
+template <>
+struct ComponentRenderer<dy::Components::FirstPersonController>
+    : public BaseComponentRenderer<
+          ComponentRenderer<dy::Components::FirstPersonController>> {
+  static constexpr std::string_view label = "First Person Controller";
+  static constexpr bool removable = true;
+  static constexpr bool addable = true;
+
+  static auto draw(dy::Components::FirstPersonController &ctrl,
+                   dy::SceneRenderer &, dy::Scene &, dy::Entity &) -> bool {
+    bool changed = false;
+    changed |= labelled_input("Move Speed",  [&](const char *id) { return ImGui::SliderFloat(id, &ctrl.move_speed, 0.1F, 50.F); });
+    changed |= labelled_input("Sensitivity", [&](const char *id) { return ImGui::SliderFloat(id, &ctrl.sensitivity, 0.01F, 1.F); });
+    return changed;
+  }
+
+  static auto on_add(dy::SceneRenderer &, dy::Entity e) -> void {
+    e.emplace<dy::Components::FirstPersonController>();
+  }
+};
+
 inline auto ComponentInspector::draw(dy::SceneRenderer &renderer,
                                      dy::Scene &scene, dy::Entity &entity)
     -> bool {

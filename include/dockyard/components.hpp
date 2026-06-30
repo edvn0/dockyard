@@ -85,6 +85,13 @@ struct Camera {
   }
 };
 
+struct FirstPersonController {
+  f32 move_speed = 5.0F;
+  f32 sensitivity = 0.1F;
+  f32 pending_dx = 0.0F;
+  f32 pending_dy = 0.0F;
+};
+
 struct Tag {
   std::string tag;
   Tag() = default;

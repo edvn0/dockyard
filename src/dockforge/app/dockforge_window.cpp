@@ -9,6 +9,14 @@
 using namespace dy;
 
 auto Dockforge::on_mouse_moved(const events::MouseMoved &e) -> void {
+  if (sim_state.in<sim::S::Playing>()) {
+    for (auto &&[entity, ctrl] :
+         active_scene->view<Components::FirstPersonController>().each()) {
+      ctrl.pending_dx += e.dx;
+      ctrl.pending_dy += e.dy;
+    }
+    return;
+  }
   if (glfwGetMouseButton(App::get_window(), GLFW_MOUSE_BUTTON_RIGHT) ==
       GLFW_PRESS)
     editor_camera->on_mouse_delta(e.dx, e.dy);
@@ -21,6 +29,11 @@ auto Dockforge::on_mouse_scrolled(const events::MouseScrolled &e) -> void {
 }
 
 auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
+  if (e.key == GLFW_KEY_ESCAPE && !sim_state.in<sim::S::Editing>()) {
+    stop();
+    return;
+  }
+
   if (e.key == GLFW_KEY_F2 && e.mods == GLFW_MOD_SHIFT)
     editor_camera->save_keyframe(2.F);
 

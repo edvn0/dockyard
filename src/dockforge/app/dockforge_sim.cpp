@@ -1,5 +1,7 @@
 #include <dockforge/dockforge.hpp>
 
+#include <dockforge/editor_camera.hpp>
+
 #include <dockyard/animation.hpp>
 #include <dockyard/asset_loader.hpp>
 #include <dockyard/binary_stream.hpp>
@@ -7,18 +9,25 @@
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/scene_serialiser.hpp>
 
+#include <GLFW/glfw3.h>
+
 using namespace dy;
 
 static constexpr float step_dt = 1.0F / 60.0F;
 
 auto Dockforge::pause() -> void {
-  sim_state.try_transition<sim::S::Paused>(
-      [&](auto) { TracyMessage("Game paused", 11); });
+  sim_state.try_transition<sim::S::Paused>([&](auto) {
+    glfwSetInputMode(App::get_window(), GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+    TracyMessage("Game paused", 11);
+  });
 }
 
 auto Dockforge::resume() -> void {
-  sim_state.try_transition<sim::S::Playing>(
-      [&](auto) { TracyMessage("Game resumed", 12); });
+  sim_state.try_transition<sim::S::Playing>([&](auto) {
+    if (!active_scene->view<Components::FirstPersonController>().empty())
+      glfwSetInputMode(App::get_window(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    TracyMessage("Game resumed", 12);
+  });
 }
 
 auto Dockforge::step() -> void {
@@ -75,6 +84,13 @@ auto Dockforge::play() -> void {
     editor_state.active_scene = active_scene;
     editor_state.selected = entt::null;
     editor_state.hierarchy_dirty = true;
+
+    auto cam_entity = runtime_scene->make("Player Camera");
+    cam_entity.emplace<Components::Camera>(editor_camera->camera);
+    cam_entity.emplace<Components::FirstPersonController>();
+    runtime_scene->set_primary_camera(cam_entity.handle());
+    glfwSetInputMode(App::get_window(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
     info("[Sim] play(): calling begin_play");
     script_engine->begin_play(active_scene);
     TracyMessage("Game started", 12);
@@ -84,6 +100,8 @@ auto Dockforge::play() -> void {
 }
 
 auto Dockforge::stop() -> void {
+  glfwSetInputMode(App::get_window(), GLFW_CURSOR, GLFW_CURSOR_NORMAL);
+
   sim_state.try_transition<sim::S::Editing>([&](auto) {
     info("[Sim] stop(): override_pool next={} cap={} free={} base_slot={}",
          renderer->override_pool.next, renderer->override_pool.capacity,

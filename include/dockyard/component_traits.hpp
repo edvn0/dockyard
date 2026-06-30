@@ -46,11 +46,11 @@ template <> struct ComponentConfig<dy::AnimationState> {
 
 using MasterComponentList =
     std::tuple<dy::Components::Tag, dy::Components::Transform,
-               dy::Components::Camera, dy::Components::LocalToWorld,
-               dy::Components::MeshRequest, dy::Components::ParentOf,
-               dy::Components::Mesh, dy::Components::MaterialOverride,
-               dy::Components::DebugFrustum, dy::Components::PointLight,
-               dy::AnimationState>;
+               dy::Components::Camera, dy::Components::FirstPersonController,
+               dy::Components::LocalToWorld, dy::Components::MeshRequest,
+               dy::Components::ParentOf, dy::Components::Mesh,
+               dy::Components::MaterialOverride, dy::Components::DebugFrustum,
+               dy::Components::PointLight, dy::AnimationState>;
 
 template <typename Tuple, typename Fn> constexpr void for_each_type(Fn &&fn) {
   []<std::size_t... Is>(auto &&f, std::index_sequence<Is...>) {

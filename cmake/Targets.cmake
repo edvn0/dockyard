@@ -178,6 +178,7 @@ add_executable(dockforge
         src/dockforge/app/dockforge_window.cpp
         src/dockforge/free_camera_controller.cpp
         src/dockforge/path_camera_controller.cpp
+        src/dockforge/first_person_controller.cpp
         src/dockforge/editor_camera.cpp
         src/dockforge/editor_utils.cpp
         src/dockforge/matrix_cache.cpp

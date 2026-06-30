@@ -1,6 +1,7 @@
 #include <dockforge/dockforge.hpp>
 
 #include <dockforge/editor_camera.hpp>
+#include <dockforge/first_person_controller.hpp>
 
 #include <dockyard/animation.hpp>
 #include <dockyard/components.hpp>
@@ -47,6 +48,8 @@ auto Dockforge::update(float ts) -> void {
   }
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
+  if (sim_state.in<sim::S::Playing>())
+    first_person_system::update(*active_scene, App::get_window(), ts);
   {
     // Don't advance animations
     const auto timestep = sim_state.in<sim::S::Playing>() ? ts : 0.0F;
