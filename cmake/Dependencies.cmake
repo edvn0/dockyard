@@ -275,6 +275,42 @@ if (DOCKYARD_ENABLE_TRACY)
   )
 endif ()
 
+# ---- Physics -------------------------------------------------------------
+
+# bullet3's CMakeLists declares cmake_minimum_required(VERSION 2.8); CMake >= 4.0
+# removed compatibility with <3.5. Lift the floor for the subdirectory only
+# (mirrors the same fix applied to the Lua dependency above).
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+CPMAddPackage(
+        NAME bullet3
+        GITHUB_REPOSITORY bulletphysics/bullet3
+        GIT_TAG 3.25
+        GIT_SHALLOW YES
+        OPTIONS
+        "BUILD_SHARED_LIBS OFF"
+        "BUILD_BULLET2_DEMOS OFF"
+        "BUILD_CPU_DEMOS OFF"
+        "BUILD_EXTRAS OFF"
+        "BUILD_OPENGL3_DEMOS OFF"
+        "BUILD_UNIT_TESTS OFF"
+        "USE_GLUT OFF"
+        "USE_GRAPHICAL_BENCHMARK OFF"
+        "INSTALL_LIBS OFF"
+)
+unset(CMAKE_POLICY_VERSION_MINIMUM CACHE)
+
+# Bullet's own CMakeLists compiles at a very permissive warning level; silence it
+# under our stricter tree-wide flags instead of patching bullet3's build files.
+foreach (_bullet_target IN ITEMS BulletDynamics BulletCollision LinearMath)
+  if (TARGET ${_bullet_target})
+    target_compile_options(${_bullet_target} PRIVATE
+            $<$<CXX_COMPILER_ID:GNU>:${DOCKYARD_SUPPRESSED_WARNINGS}>
+            $<$<CXX_COMPILER_ID:Clang>:${DOCKYARD_SUPPRESSED_WARNINGS}>
+            $<$<CXX_COMPILER_ID:MSVC>:/W0>
+    )
+  endif ()
+endforeach ()
+
 # ---- Archive extraction (miniz + zstd) ---------------------------------------
 
 CPMAddPackage(
@@ -412,6 +448,7 @@ set_solution_folder("third_party/utility"
         EnTT spdlog efsw-static meshoptimizer freetype ThirdPartySTB glm lua_static
         miniz libzstd_static
 )
+set_solution_folder("third_party/physics" BulletDynamics BulletCollision LinearMath)
 if (DOCKYARD_ENABLE_TRACY)
   set_solution_folder("third_party/utility" TracyClient)
 endif ()

@@ -33,6 +33,12 @@ struct LoadOptions {
   //   loads damaged_helmet_lod0 … _lod5 as one chain,
   //   ignores any other meshes in the same file.
   std::optional<std::string> lod_base_name_filter;
+
+  // When set, MeshAsset::collision_positions/collision_indices are populated
+  // with LOD0 geometry (flattened across all primitives) for building Bullet
+  // triangle-mesh colliders. Off by default — most loaded meshes never need
+  // CPU-side geometry once it's been uploaded to the GPU.
+  bool retain_collision_geometry = false;
 };
 
 // Unchanged signature for the no-options case — zero cost, zero noise.

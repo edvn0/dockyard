@@ -4,6 +4,7 @@
 #include <dockforge/editor_camera.hpp>
 #include <dockforge/matrix_cache.hpp>
 
+#include <dockyard/asset_loader.hpp>
 #include <dockyard/components.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/vfs.hpp>
@@ -178,6 +179,67 @@ auto Dockforge::draw_debug_shapes() -> void {
     auto &&[pos, rot, scl] = xt.get();
     auto &&[view, proj] = frustum.matrices(pos, rot);
     canvas_renderer->frustum(view, proj, frustum.color);
+  }
+
+  if (show_collider_debug)
+    draw_collider_debug_shapes();
+}
+
+// Approximate wireframe box for each Collider, in the collider's own local
+// (pre-scale) space — canvas_renderer->box scales by the entity's world
+// matrix (which already includes Transform.scale), matching how
+// PhysicsWorld::create_rigid_body applies scale via setLocalScaling.
+auto Dockforge::draw_collider_debug_shapes() -> void {
+  ZoneScopedNC("Dockforge::draw_collider_debug_shapes", 0x66DD66);
+  constexpr glm::vec4 collider_color{0.2F, 1.0F, 0.2F, 1.0F};
+
+  // Mesh colliders retain their geometry's AABB across many primitives —
+  // recomputing that every frame the debug view is on would scan millions of
+  // points, so cache it per source path the first time it's drawn.
+  static StringMap<AABB> mesh_collider_aabb_cache;
+
+  for (auto &&[e, xt, collider] :
+       active_scene->view<Components::Transform, Components::Collider>()
+           .each()) {
+    const glm::mat4 m = cached_matrix(e, xt);
+
+    switch (collider.shape) {
+    case Components::ColliderShape::Box:
+      canvas_renderer->box(m, collider.half_extents, collider_color);
+      break;
+    case Components::ColliderShape::Sphere:
+      canvas_renderer->box(m, glm::vec3{collider.radius}, collider_color);
+      break;
+    case Components::ColliderShape::Capsule:
+      canvas_renderer->box(
+          m,
+          glm::vec3{collider.radius, (collider.height * 0.5F) + collider.radius,
+                    collider.radius},
+          collider_color);
+      break;
+    case Components::ColliderShape::Mesh: {
+      if (!collider.mesh_source_path.valid())
+        break;
+      const std::string key{collider.mesh_source_path.view()};
+      auto cached = mesh_collider_aabb_cache.find(key);
+      if (cached == mesh_collider_aabb_cache.end()) {
+        auto handle = asset_loader->load_mesh(collider.mesh_source_path.value(),
+                                              /*retain_collision_geometry=*/true);
+        AABB aabb = AABB::create();
+        if (handle) {
+          if (const auto *asset = renderer->get_mesh(*handle)) {
+            for (const auto &vtx : asset->collision_positions)
+              aabb.update(glm::vec3{vtx.position[0], vtx.position[1],
+                                    vtx.position[2]});
+          }
+        }
+        cached = mesh_collider_aabb_cache.emplace(key, aabb).first;
+      }
+      if (cached->second.is_valid())
+        canvas_renderer->box(m, cached->second, collider_color);
+      break;
+    }
+    }
   }
 }
 

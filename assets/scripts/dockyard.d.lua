@@ -130,6 +130,30 @@ function MaterialOverride:set_metallic(v) end
 ---@field radius number
 PointLight = {}
 
+---@class ColliderShape
+---@field Box integer
+---@field Sphere integer
+---@field Capsule integer
+---@field Mesh integer
+ColliderShape = {}
+
+---@class Collider
+---@field shape ColliderShape  Defaults to ColliderShape.Box
+---@field half_extents vec3  Box half-extents; unit-cube mesh uses {0.5,0.5,0.5}
+---@field radius number  Sphere/Capsule radius
+---@field height number  Capsule height (distance between cap centers)
+Collider = {}
+
+---@param path string  Mesh asset to build a static triangle-mesh collider from (Mesh shape only)
+function Collider:set_mesh_source_path(path) end
+
+---@class RigidBody
+---@field mass number  0 = static
+---@field friction number
+---@field restitution number
+---@field kinematic boolean
+RigidBody = {}
+
 -- ---------------------------------------------------------------------------
 -- Entity
 -- ---------------------------------------------------------------------------
@@ -157,6 +181,12 @@ function Entity:add_material_override() end
 
 ---@return PointLight
 function Entity:add_point_light() end
+
+---@return Collider
+function Entity:add_collider() end
+
+---@return RigidBody
+function Entity:add_rigid_body() end
 
 ---@param state AnimationState
 ---@return AnimationState
@@ -196,8 +226,9 @@ function Scene:each_mesh(callback) end
 IAssetLoader = {}
 
 ---@param path VFSPath
+---@param retain_collision_geometry? boolean  Keep LOD0 CPU geometry for a Mesh collider (default false)
 ---@return MeshAssetHandle|nil, string|nil
-function IAssetLoader:load_mesh(path) end
+function IAssetLoader:load_mesh(path, retain_collision_geometry) end
 
 ---@param handle MeshAssetHandle
 ---@param skel_idx number  0-based skeleton index

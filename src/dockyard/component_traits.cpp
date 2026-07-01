@@ -308,6 +308,86 @@ void ComponentFixup<AnimationState>::fixup(entt::registry &reg,
   anim.loop = saved_loop;
 }
 
+void ComponentSerializer<Components::Collider>::save(
+    auto &archive, const Components::Collider &value) {
+  archive.writer.write(&value.shape, sizeof(value.shape));
+  archive.writer.write(&value.half_extents, sizeof(glm::vec3));
+  archive.writer.write(&value.radius, sizeof(f32));
+  archive.writer.write(&value.height, sizeof(f32));
+  write_safe_string(archive, value.mesh_source_path.view());
+}
+
+void ComponentSerializer<Components::Collider>::load(
+    auto &archive, Components::Collider &value) {
+  archive.reader.read(&value.shape, sizeof(value.shape));
+  archive.reader.read(&value.half_extents, sizeof(glm::vec3));
+  archive.reader.read(&value.radius, sizeof(f32));
+  archive.reader.read(&value.height, sizeof(f32));
+  const std::string path_str = read_safe_string(archive);
+  value.mesh_source_path =
+      path_str.empty() ? NullableVFSPath{} : NullableVFSPath::create("{}", path_str);
+  value.runtime_id = 0;
+}
+
+void ComponentSerializer<Components::RigidBody>::save(
+    auto &archive, const Components::RigidBody &value) {
+  archive.writer.write(&value.mass, sizeof(f32));
+  archive.writer.write(&value.friction, sizeof(f32));
+  archive.writer.write(&value.restitution, sizeof(f32));
+  archive.writer.write(&value.kinematic, sizeof(bool));
+}
+
+void ComponentSerializer<Components::RigidBody>::load(
+    auto &archive, Components::RigidBody &value) {
+  archive.reader.read(&value.mass, sizeof(f32));
+  archive.reader.read(&value.friction, sizeof(f32));
+  archive.reader.read(&value.restitution, sizeof(f32));
+  archive.reader.read(&value.kinematic, sizeof(bool));
+  value.runtime_id = 0;
+}
+
+void ComponentSerializer<Components::CharacterController>::save(
+    auto &archive, const Components::CharacterController &value) {
+  archive.writer.write(&value.radius, sizeof(f32));
+  archive.writer.write(&value.height, sizeof(f32));
+  archive.writer.write(&value.step_height, sizeof(f32));
+  archive.writer.write(&value.move_speed, sizeof(f32));
+  archive.writer.write(&value.jump_speed, sizeof(f32));
+}
+
+void ComponentSerializer<Components::CharacterController>::load(
+    auto &archive, Components::CharacterController &value) {
+  archive.reader.read(&value.radius, sizeof(f32));
+  archive.reader.read(&value.height, sizeof(f32));
+  archive.reader.read(&value.step_height, sizeof(f32));
+  archive.reader.read(&value.move_speed, sizeof(f32));
+  archive.reader.read(&value.jump_speed, sizeof(f32));
+  value.runtime_id = 0;
+}
+
+void ComponentSerializer<Components::Constraint>::save(
+    auto &archive, const Components::Constraint &value) {
+  archive.writer.write(&value.type, sizeof(value.type));
+  archive.writer.write(&value.body_a, sizeof(entt::entity));
+  archive.writer.write(&value.body_b, sizeof(entt::entity));
+  archive.writer.write(&value.pivot_a, sizeof(glm::vec3));
+  archive.writer.write(&value.pivot_b, sizeof(glm::vec3));
+  archive.writer.write(&value.axis_a, sizeof(glm::vec3));
+  archive.writer.write(&value.axis_b, sizeof(glm::vec3));
+}
+
+void ComponentSerializer<Components::Constraint>::load(
+    auto &archive, Components::Constraint &value) {
+  archive.reader.read(&value.type, sizeof(value.type));
+  archive.reader.read(&value.body_a, sizeof(entt::entity));
+  archive.reader.read(&value.body_b, sizeof(entt::entity));
+  archive.reader.read(&value.pivot_a, sizeof(glm::vec3));
+  archive.reader.read(&value.pivot_b, sizeof(glm::vec3));
+  archive.reader.read(&value.axis_a, sizeof(glm::vec3));
+  archive.reader.read(&value.axis_b, sizeof(glm::vec3));
+  value.runtime_id = 0;
+}
+
 void ComponentSerializer<Components::MaterialOverride>::save(
     auto &archive, const Components::MaterialOverride &m) {
   archive.writer.write(&m.material, sizeof(m.material));
@@ -333,5 +413,9 @@ EXPLICITLY_DEFINE(Components::PointLight);
 EXPLICITLY_DEFINE(Components::Mesh);
 EXPLICITLY_DEFINE(Components::MaterialOverride);
 EXPLICITLY_DEFINE(AnimationState);
+EXPLICITLY_DEFINE(Components::Collider);
+EXPLICITLY_DEFINE(Components::RigidBody);
+EXPLICITLY_DEFINE(Components::CharacterController);
+EXPLICITLY_DEFINE(Components::Constraint);
 
 } // namespace dy

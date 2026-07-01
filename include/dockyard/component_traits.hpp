@@ -43,6 +43,22 @@ template <> struct ComponentConfig<dy::AnimationState> {
   static constexpr bool serializable = true;
   static constexpr bool ui_inspectable = true;
 };
+template <> struct ComponentConfig<dy::Components::Collider> {
+  static constexpr bool serializable = true;
+  static constexpr bool ui_inspectable = true;
+};
+template <> struct ComponentConfig<dy::Components::RigidBody> {
+  static constexpr bool serializable = true;
+  static constexpr bool ui_inspectable = true;
+};
+template <> struct ComponentConfig<dy::Components::CharacterController> {
+  static constexpr bool serializable = true;
+  static constexpr bool ui_inspectable = true;
+};
+template <> struct ComponentConfig<dy::Components::Constraint> {
+  static constexpr bool serializable = true;
+  static constexpr bool ui_inspectable = true;
+};
 
 using MasterComponentList =
     std::tuple<dy::Components::Tag, dy::Components::Transform,
@@ -50,7 +66,9 @@ using MasterComponentList =
                dy::Components::LocalToWorld, dy::Components::MeshRequest,
                dy::Components::ParentOf, dy::Components::Mesh,
                dy::Components::MaterialOverride, dy::Components::DebugFrustum,
-               dy::Components::PointLight, dy::AnimationState>;
+               dy::Components::PointLight, dy::AnimationState,
+               dy::Components::Collider, dy::Components::RigidBody,
+               dy::Components::CharacterController, dy::Components::Constraint>;
 
 template <typename Tuple, typename Fn> constexpr void for_each_type(Fn &&fn) {
   []<std::size_t... Is>(auto &&f, std::index_sequence<Is...>) {
@@ -109,6 +127,26 @@ template <> struct ComponentSerializer<Components::PointLight> {
 template <> struct ComponentSerializer<AnimationState> {
   static void save(auto &archive, const AnimationState &);
   static void load(auto &archive, AnimationState &);
+};
+
+template <> struct ComponentSerializer<Components::Collider> {
+  static void save(auto &archive, const Components::Collider &);
+  static void load(auto &archive, Components::Collider &);
+};
+
+template <> struct ComponentSerializer<Components::RigidBody> {
+  static void save(auto &archive, const Components::RigidBody &);
+  static void load(auto &archive, Components::RigidBody &);
+};
+
+template <> struct ComponentSerializer<Components::CharacterController> {
+  static void save(auto &archive, const Components::CharacterController &);
+  static void load(auto &archive, Components::CharacterController &);
+};
+
+template <> struct ComponentSerializer<Components::Constraint> {
+  static void save(auto &archive, const Components::Constraint &);
+  static void load(auto &archive, Components::Constraint &);
 };
 
 template <> struct ComponentSerializer<Components::MaterialOverride> {

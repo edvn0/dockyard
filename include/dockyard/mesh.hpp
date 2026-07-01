@@ -4,6 +4,7 @@
 #include <array>
 #include <dockyard/animation.hpp>
 #include <dockyard/bindless_handle.hpp>
+#include <dockyard/device_geometry.hpp>
 #include <dockyard/types.hpp>
 #include <glm/glm.hpp>
 #include <limits>
@@ -136,6 +137,12 @@ struct MeshAsset {
 
   std::vector<Skeleton> skeletons;     // one per glTF skin
   std::vector<AnimationClip> animations;
+
+  // LOD0 geometry flattened across all primitives, populated only when
+  // mesh::LoadOptions::retain_collision_geometry was set at load time; empty
+  // otherwise. Used to build Bullet btBvhTriangleMeshShape colliders.
+  std::vector<PositionOnlyVertex> collision_positions;
+  std::vector<u32> collision_indices;
 };
 
 } // namespace dy

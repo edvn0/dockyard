@@ -184,6 +184,25 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
         forward_blend_pipeline.index());
   }
   auto [view, projection] = resolve_camera();
+  {
+    static const Components::Camera *last_logged_primary = nullptr;
+    const auto *primary = active_scene->primary_camera();
+    if (primary != last_logged_primary) {
+      last_logged_primary = primary;
+      info("[Render] resolve_camera: primary_camera={} editor_camera "
+           "near/far=({}, {}) primary_camera near/far=({}, {}) editor_pos="
+           "({}, {}, {}) primary_pos=({}, {}, {})",
+           static_cast<const void *>(primary), editor_camera->near_plane(),
+           editor_camera->far_plane(),
+           primary != nullptr ? primary->near_plane : -1.0F,
+           primary != nullptr ? primary->far_plane : -1.0F,
+           editor_camera->position().x, editor_camera->position().y,
+           editor_camera->position().z,
+           primary != nullptr ? primary->position.x : 0.0F,
+           primary != nullptr ? primary->position.y : 0.0F,
+           primary != nullptr ? primary->position.z : 0.0F);
+    }
+  }
   const auto camera_moved = view != shadow_map_state.last_view_matrix;
   if (camera_moved) {
     shadow_map_state.last_view_matrix = view;

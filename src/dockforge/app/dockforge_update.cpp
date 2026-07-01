@@ -5,6 +5,7 @@
 
 #include <dockyard/animation.hpp>
 #include <dockyard/components.hpp>
+#include <dockyard/physics_world.hpp>
 #include <dockyard/scene_renderer.hpp>
 
 using namespace dy;
@@ -48,8 +49,13 @@ auto Dockforge::update(float ts) -> void {
   }
   if (active_scene->primary_camera() == nullptr)
     editor_camera->update(ts);
-  if (sim_state.in<sim::S::Playing>())
-    first_person_system::update(*active_scene, App::get_window(), ts);
+  if (sim_state.in<sim::S::Playing>() && physics_world) {
+    first_person_system::pre_physics_update(*active_scene, *physics_world,
+                                            App::get_window(), ts);
+    physics_world->step(ts);
+    physics_world->sync_transforms_out(*active_scene);
+    first_person_system::post_physics_update(*active_scene, *physics_world);
+  }
   {
     // Don't advance animations
     const auto timestep = sim_state.in<sim::S::Playing>() ? ts : 0.0F;

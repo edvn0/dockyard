@@ -56,6 +56,7 @@ add_library(dockyard STATIC
         src/dockyard/texture_upload_pool.cpp
         src/dockyard/image_decoder.cpp
         src/dockyard/script_engine.cpp
+        src/dockyard/physics_world.cpp
 )
 
 dockyard_configure_renderdoc(dockyard
@@ -98,6 +99,7 @@ target_compile_definitions(dockyard PUBLIC
         $<$<BOOL:${DOCKYARD_ENABLE_TRACY}>:TRACY_VK_USE_SYMBOL_TABLE>
         $<$<BOOL:${DOCKYARD_ENABLE_TRACY}>:TRACY_IMPORTS>
 )
+target_include_directories(dockyard PRIVATE "${bullet3_SOURCE_DIR}/src")
 target_link_libraries(dockyard
         PUBLIC
         dockyard-allocator
@@ -123,6 +125,9 @@ target_link_libraries(dockyard
         sol2::sol2
         miniz
         libzstd_static
+        BulletDynamics
+        BulletCollision
+        LinearMath
 )
 target_compile_definitions(dockyard PRIVATE
         $<$<CONFIG:Debug>:SOL_ALL_SAFETIES_ON=1>
@@ -130,6 +135,11 @@ target_compile_definitions(dockyard PRIVATE
 # sol2 headers are heavy template code; relax warnings for the one TU that includes them.
 # Skip PCH to avoid the warning-level inconsistency MSVC raises when overriding /W4→/W3.
 set_source_files_properties(src/dockyard/script_engine.cpp PROPERTIES
+        SKIP_PRECOMPILE_HEADERS ON
+        SKIP_UNITY_BUILD_INCLUSION ON
+)
+# Bullet headers are heavy macro/template code; isolate to their own TU.
+set_source_files_properties(src/dockyard/physics_world.cpp PROPERTIES
         SKIP_PRECOMPILE_HEADERS ON
         SKIP_UNITY_BUILD_INCLUSION ON
 )
@@ -221,6 +231,7 @@ if(DOCKYARD_BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/test_state_machine.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_skin_vertex.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_animation.cpp
+                ${CMAKE_SOURCE_DIR}/tests/test_physics.cpp
         )
   target_enable_native_arch(dockyard-testing)
   target_precompile_headers(dockyard-testing REUSE_FROM dockyard)

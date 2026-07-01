@@ -113,7 +113,7 @@ private:
   };
 
   glm::vec3 position{};
-  glm::quat rotation{};
+  glm::quat rotation{1.0F, 0.0F, 0.0F, 0.0F};
   glm::vec3 scale{1};
   bool is_dirty{true};
 
@@ -199,6 +199,53 @@ struct PointLight {
   glm::vec3 color = {1.F, 1.F, 1.F};
   float intensity = 1.F;
   float radius = 10.F;
+};
+
+enum class ColliderShape : u8 { Box, Sphere, Capsule, Mesh };
+
+// Authorable collision shape. `runtime_id` identifies the live Bullet shape
+// while the physics world exists (Play); it is never serialized and is 0
+// whenever no physics world owns this collider (Editing, or freshly loaded).
+struct Collider {
+  ColliderShape shape = ColliderShape::Box;
+  glm::vec3 half_extents{0.5F, 0.5F, 0.5F}; // Box
+  f32 radius = 0.5F;                        // Sphere, Capsule
+  f32 height = 1.0F;                        // Capsule: distance between cap centers
+  NullableVFSPath mesh_source_path;         // Mesh: source asset for the triangle shape
+  u64 runtime_id = 0;
+};
+
+// mass == 0 marks a static body. `kinematic` bodies are moved by game/script
+// code (transform written by the engine) and pushed into Bullet each step
+// rather than being simulated. `runtime_id` mirrors Collider's convention.
+struct RigidBody {
+  f32 mass = 0.0F;
+  f32 friction = 0.5F;
+  f32 restitution = 0.0F;
+  bool kinematic = false;
+  u64 runtime_id = 0;
+};
+
+struct CharacterController {
+  f32 radius = 0.3F;
+  f32 height = 1.8F;
+  f32 step_height = 0.35F;
+  f32 move_speed = 5.0F;
+  f32 jump_speed = 5.0F;
+  u64 runtime_id = 0;
+};
+
+enum class ConstraintType : u8 { Point, Hinge, Fixed };
+
+struct Constraint {
+  ConstraintType type = ConstraintType::Fixed;
+  entt::entity body_a{entt::null};
+  entt::entity body_b{entt::null};
+  glm::vec3 pivot_a{0.0F};
+  glm::vec3 pivot_b{0.0F};
+  glm::vec3 axis_a{0.0F, 1.0F, 0.0F}; // Hinge only
+  glm::vec3 axis_b{0.0F, 1.0F, 0.0F}; // Hinge only
+  u64 runtime_id = 0;
 };
 
 } // namespace dy::Components

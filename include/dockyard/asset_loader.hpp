@@ -9,7 +9,11 @@
 namespace dy {
 
 struct IAssetLoader {
-  virtual auto load_mesh(const VFSPath &path)
+  // retain_collision_geometry requests LOD0 CPU geometry be kept on the
+  // returned MeshAsset for building a Bullet mesh collider (see
+  // mesh::LoadOptions::retain_collision_geometry). Off by default.
+  virtual auto load_mesh(const VFSPath &path,
+                        bool retain_collision_geometry = false)
       -> std::expected<MeshAssetHandle, std::string> = 0;
   virtual auto notify_material_overrides_added() -> void = 0;
   virtual auto make_animation_state(MeshAssetHandle handle, u32 skel_idx,

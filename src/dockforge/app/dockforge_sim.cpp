@@ -6,6 +6,7 @@
 #include <dockyard/asset_loader.hpp>
 #include <dockyard/binary_stream.hpp>
 #include <dockyard/components.hpp>
+#include <dockyard/physics_world.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/scene_serialiser.hpp>
 
@@ -36,6 +37,10 @@ auto Dockforge::step() -> void {
     return;
   script_engine->tick(active_scene, step_dt);
   animation_state_update(step_dt);
+  if (physics_world) {
+    physics_world->step(step_dt);
+    physics_world->sync_transforms_out(*active_scene);
+  }
 }
 
 auto Dockforge::play() -> void {
@@ -85,9 +90,101 @@ auto Dockforge::play() -> void {
     editor_state.selected = entt::null;
     editor_state.hierarchy_dirty = true;
 
+    physics_world = std::make_unique<PhysicsWorld>();
+
+    u32 bodies_created = 0;
+    for (auto &&[entity, transform, collider, rigid_body] :
+         runtime_scene
+             ->view<Components::Transform, Components::Collider,
+                   Components::RigidBody>()
+             .each()) {
+      const MeshAsset *mesh_asset = nullptr;
+      if (collider.shape == Components::ColliderShape::Mesh &&
+          collider.mesh_source_path.valid()) {
+        auto result = asset_loader->load_mesh(
+            collider.mesh_source_path.value(), /*retain_collision_geometry=*/true);
+        if (result) {
+          mesh_asset = renderer->get_mesh(*result);
+        } else {
+          warn("[Sim] play(): failed to resolve mesh collider '{}': {}",
+               collider.mesh_source_path.view(), result.error());
+        }
+      }
+
+      MeshCollisionGeometry mesh_geometry{};
+      const MeshCollisionGeometry *mesh_geometry_ptr = nullptr;
+      if (mesh_asset != nullptr) {
+        mesh_geometry.positions = mesh_asset->collision_positions;
+        mesh_geometry.indices = mesh_asset->collision_indices;
+        mesh_geometry_ptr = &mesh_geometry;
+      }
+
+      const auto accessor = transform.get();
+      const BodyTransform body_transform{.position = accessor.position,
+                                         .rotation = accessor.rotation,
+                                         .scale = accessor.scale};
+      const u64 id = physics_world->create_rigid_body(collider, rigid_body,
+                                                       body_transform,
+                                                       mesh_geometry_ptr);
+      rigid_body.runtime_id = id;
+      collider.runtime_id = id;
+      if (id != 0)
+        ++bodies_created;
+
+      if (mesh_asset != nullptr && !mesh_asset->collision_positions.empty()) {
+        // mesh_aabb merges each primitive's LOCAL (pre-node-transform) AABB
+        // and is unrelated to the physics mesh — measure the actual retained
+        // collision geometry (already node-transform-baked by flatten_nodes)
+        // instead, scaled by this entity's own top-level Transform to match
+        // what create_rigid_body's setLocalScaling applies.
+        AABB collision_aabb = AABB::create();
+        for (const auto &vtx : mesh_asset->collision_positions)
+          collision_aabb.update(glm::vec3{vtx.position[0], vtx.position[1],
+                                          vtx.position[2]} *
+                                accessor.scale);
+        info("[Sim] play(): mesh collider entity {:x} collision AABB "
+             "min=({}, {}, {}) max=({}, {}, {}), transform pos=({}, {}, {}) "
+             "scale=({}, {}, {})",
+             static_cast<u32>(entity), collision_aabb.get_min().x,
+             collision_aabb.get_min().y, collision_aabb.get_min().z,
+             collision_aabb.get_max().x, collision_aabb.get_max().y,
+             collision_aabb.get_max().z, accessor.position.x,
+             accessor.position.y, accessor.position.z, accessor.scale.x,
+             accessor.scale.y, accessor.scale.z);
+      }
+    }
+
+    u32 constraints_created = 0;
+    for (auto &&[entity, constraint] :
+         runtime_scene->view<Components::Constraint>().each()) {
+      u64 id_a = 0;
+      u64 id_b = 0;
+      if (const auto *rb_a =
+              runtime_scene->registry().try_get<Components::RigidBody>(
+                  constraint.body_a))
+        id_a = rb_a->runtime_id;
+      if (const auto *rb_b =
+              runtime_scene->registry().try_get<Components::RigidBody>(
+                  constraint.body_b))
+        id_b = rb_b->runtime_id;
+
+      constraint.runtime_id =
+          physics_world->create_constraint(constraint, id_a, id_b);
+      if (constraint.runtime_id != 0)
+        ++constraints_created;
+    }
+    info("[Sim] play(): physics world created {} rigid bodies, {} constraints",
+         bodies_created, constraints_created);
+
     auto cam_entity = runtime_scene->make("Player Camera");
     cam_entity.emplace<Components::Camera>(editor_camera->camera);
     cam_entity.emplace<Components::FirstPersonController>();
+    auto &char_ctrl = cam_entity.emplace<Components::CharacterController>();
+    const auto &spawn_pos = cam_entity.get<Components::Camera>().position;
+    char_ctrl.runtime_id =
+        physics_world->create_character_controller(char_ctrl, spawn_pos);
+    info("[Sim] play(): player spawn=({}, {}, {}) runtime_id={}",
+         spawn_pos.x, spawn_pos.y, spawn_pos.z, char_ctrl.runtime_id);
     runtime_scene->set_primary_camera(cam_entity.handle());
     glfwSetInputMode(App::get_window(), GLFW_CURSOR, GLFW_CURSOR_DISABLED);
 
@@ -151,6 +248,7 @@ auto Dockforge::stop() -> void {
          invalidated, renderer->override_pool.base_slot);
 
     TracyMessage("Game stopped", 12);
+    physics_world.reset();
     active_scene = editor_scene.get();
     editor_state.active_scene = active_scene;
     runtime_scene.reset();

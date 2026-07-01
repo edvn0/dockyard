@@ -149,10 +149,12 @@ static auto register_bindings(sol::state &lua) -> void {
       "IAssetLoader",
       sol::no_constructor,
       "load_mesh",
-          [](sol::this_state L, IAssetLoader &loader,
-             const VFSPath &path) -> sol::variadic_results {
+          [](sol::this_state L, IAssetLoader &loader, const VFSPath &path,
+             sol::optional<bool> retain_collision_geometry)
+              -> sol::variadic_results {
             sol::state_view sv{L};
-            auto result = loader.load_mesh(path);
+            auto result = loader.load_mesh(
+                path, retain_collision_geometry.value_or(false));
             sol::variadic_results ret;
             if (result) {
               ret.push_back(sol::make_object(sv, *result));
@@ -243,6 +245,45 @@ static auto register_bindings(sol::state &lua) -> void {
       "intensity", &Components::PointLight::intensity,
       "radius", &Components::PointLight::radius);
 
+  // Components::ColliderShape — read via e.g. ColliderShape.Mesh
+  lua.new_enum<Components::ColliderShape>(
+      "ColliderShape",
+      {
+          {"Box", Components::ColliderShape::Box},
+          {"Sphere", Components::ColliderShape::Sphere},
+          {"Capsule", Components::ColliderShape::Capsule},
+          {"Mesh", Components::ColliderShape::Mesh},
+      });
+
+  // Components::Collider — shape defaults to Box; scripts set half_extents
+  // (Box), radius/height (Sphere, Capsule), or set_mesh_source_path (Mesh —
+  // builds a static triangle-mesh collider from the referenced asset's LOD0
+  // geometry). Combined with the entity's Transform via BodyTransform::scale
+  // at Play time, so e.g. half_extents of {0.5,0.5,0.5} matches
+  // "engine://cube"'s unit-cube mesh scaled by Transform.scale, same as the
+  // visual mesh.
+  lua.new_usertype<Components::Collider>(
+      "Collider",
+      sol::no_constructor,
+      "shape", &Components::Collider::shape,
+      "half_extents", &Components::Collider::half_extents,
+      "radius", &Components::Collider::radius,
+      "height", &Components::Collider::height,
+      "set_mesh_source_path",
+          [](Components::Collider &c, std::string_view s) {
+            c.mesh_source_path = VFSPath::create(s);
+          });
+
+  // Components::RigidBody — mass == 0 is a static body (the common case for
+  // level geometry authored from Lua, e.g. walls/floors).
+  lua.new_usertype<Components::RigidBody>(
+      "RigidBody",
+      sol::no_constructor,
+      "mass", &Components::RigidBody::mass,
+      "friction", &Components::RigidBody::friction,
+      "restitution", &Components::RigidBody::restitution,
+      "kinematic", &Components::RigidBody::kinematic);
+
   // Entity — one explicit method per component type (templates can't be
   // instantiated from Lua)
   lua.new_usertype<Entity>(
@@ -269,6 +310,14 @@ static auto register_bindings(sol::state &lua) -> void {
       "add_point_light",
           [](Entity &e) -> Components::PointLight & {
             return e.emplace<Components::PointLight>();
+          },
+      "add_collider",
+          [](Entity &e) -> Components::Collider & {
+            return e.emplace<Components::Collider>();
+          },
+      "add_rigid_body",
+          [](Entity &e) -> Components::RigidBody & {
+            return e.emplace<Components::RigidBody>();
           },
       "add_animation_state",
           [](Entity &e, AnimationState anim) -> AnimationState & {

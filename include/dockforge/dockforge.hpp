@@ -21,6 +21,7 @@ namespace dy {
 class ImGuiRenderer;
 struct SceneRenderer;
 struct IAssetLoader;
+class PhysicsWorld;
 } // namespace dy
 
 using namespace dy;
@@ -53,7 +54,10 @@ struct ShadowMapState {
   glm::mat4 last_view_matrix{1.0F};
   bool invalid = true;
   float near_plane = 0.5F;
-  float far_plane = 100.0F;
+  // CSM cascade distance — must cover the visible scene or distant geometry
+  // loses shadows. 100 was fine for the small sandbox room; the Bistro
+  // courtyard spans ~184 units, so push this out with margin.
+  float far_plane = 250.0F;
 };
 
 struct Dockforge : App {
@@ -86,6 +90,7 @@ struct Dockforge : App {
   EditorState editor_state;
   EditorActions editor_actions;
   ShadowMapState shadow_map_state;
+  bool show_collider_debug = true;
 
   enum class FullscreenMode : u8 { borderless, exclusive };
   bool is_fullscreen = false;
@@ -101,6 +106,9 @@ struct Dockforge : App {
 
   std::unique_ptr<dy::ScriptEngine> script_engine;
   std::unique_ptr<dy::IAssetLoader> asset_loader;
+  // Lives only during Play: created in play(), stepped in update() while
+  // Playing, torn down in stop(). Null while Editing.
+  std::unique_ptr<dy::PhysicsWorld> physics_world;
   sim::Machine sim_state{sim::Editing{}};
   NullableVFSPath script_path;
 
@@ -130,6 +138,7 @@ struct Dockforge : App {
   auto try_pick_entity(glm::vec2 mouse_screen) -> void;
   auto build_ui() -> void;
   auto draw_debug_shapes() -> void;
+  auto draw_collider_debug_shapes() -> void;
   auto duplicate_entity(Entity) -> Entity;
   auto flush_material_overrides() -> void;
   auto patch_material_override_slots(u32 delta) -> void;

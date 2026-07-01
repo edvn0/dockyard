@@ -6,6 +6,8 @@
 #include <dockyard/components.hpp>
 #include <dockyard/scene_renderer.hpp>
 
+#include <array>
+#include <cstring>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <imgui.h>
@@ -427,6 +429,173 @@ struct ComponentRenderer<dy::Components::FirstPersonController>
 
   static auto on_add(dy::SceneRenderer &, dy::Entity e) -> void {
     e.emplace<dy::Components::FirstPersonController>();
+  }
+};
+
+template <>
+struct ComponentRenderer<dy::Components::Collider>
+    : public BaseComponentRenderer<ComponentRenderer<dy::Components::Collider>> {
+  static constexpr std::string_view label = "Collider";
+  static constexpr bool removable = true;
+  static constexpr bool addable = true;
+
+  static auto draw(dy::Components::Collider &collider, dy::SceneRenderer &,
+                   dy::Scene &, dy::Entity &) -> bool {
+    bool changed = false;
+
+    static constexpr std::array<const char *, 4> shape_names{"Box", "Sphere",
+                                                              "Capsule", "Mesh"};
+    int shape_idx = static_cast<int>(collider.shape);
+    ImGui::TextUnformatted("Shape");
+    if (ImGui::Combo("##shape", &shape_idx, shape_names.data(),
+                     static_cast<int>(shape_names.size()))) {
+      collider.shape = static_cast<dy::Components::ColliderShape>(shape_idx);
+      changed = true;
+    }
+
+    switch (collider.shape) {
+    case dy::Components::ColliderShape::Box:
+      changed |= labelled_input("Half Extents", [&](const char *id) {
+        return ImGui::DragFloat3(id, glm::value_ptr(collider.half_extents), 0.01F,
+                                 0.01F);
+      });
+      break;
+    case dy::Components::ColliderShape::Sphere:
+      changed |= labelled_input("Radius", [&](const char *id) {
+        return ImGui::DragFloat(id, &collider.radius, 0.01F, 0.01F);
+      });
+      break;
+    case dy::Components::ColliderShape::Capsule:
+      changed |= labelled_input("Radius", [&](const char *id) {
+        return ImGui::DragFloat(id, &collider.radius, 0.01F, 0.01F);
+      });
+      changed |= labelled_input("Height", [&](const char *id) {
+        return ImGui::DragFloat(id, &collider.height, 0.01F, 0.01F);
+      });
+      break;
+    case dy::Components::ColliderShape::Mesh: {
+      char buf[256];
+      const auto view = collider.mesh_source_path.view();
+      std::snprintf(buf, sizeof(buf), "%.*s", static_cast<int>(view.size()),
+                    view.data());
+      ImGui::TextUnformatted("Mesh Source Path");
+      if (ImGui::InputText("##mesh_source_path", buf, sizeof(buf))) {
+        collider.mesh_source_path = std::strlen(buf) == 0
+                                        ? dy::NullableVFSPath{}
+                                        : dy::NullableVFSPath::create("{}", buf);
+        changed = true;
+      }
+      break;
+    }
+    }
+
+    return changed;
+  }
+
+  static auto on_add(dy::SceneRenderer &, dy::Entity e) -> void {
+    e.emplace<dy::Components::Collider>();
+  }
+};
+
+template <>
+struct ComponentRenderer<dy::Components::RigidBody>
+    : public BaseComponentRenderer<
+          ComponentRenderer<dy::Components::RigidBody>> {
+  static constexpr std::string_view label = "Rigid Body";
+  static constexpr bool removable = true;
+  static constexpr bool addable = true;
+
+  static auto draw(dy::Components::RigidBody &body, dy::SceneRenderer &,
+                   dy::Scene &, dy::Entity &) -> bool {
+    bool changed = false;
+    changed |= labelled_input("Mass",        [&](const char *id) { return ImGui::DragFloat(id, &body.mass, 0.1F, 0.F, 10'000.F); });
+    changed |= labelled_input("Friction",    [&](const char *id) { return ImGui::SliderFloat(id, &body.friction, 0.F, 2.F); });
+    changed |= labelled_input("Restitution", [&](const char *id) { return ImGui::SliderFloat(id, &body.restitution, 0.F, 1.F); });
+    changed |= labelled_input("Kinematic",   ImGui::Checkbox, &body.kinematic);
+    return changed;
+  }
+
+  static auto on_add(dy::SceneRenderer &, dy::Entity e) -> void {
+    e.emplace<dy::Components::RigidBody>();
+  }
+};
+
+template <>
+struct ComponentRenderer<dy::Components::CharacterController>
+    : public BaseComponentRenderer<
+          ComponentRenderer<dy::Components::CharacterController>> {
+  static constexpr std::string_view label = "Character Controller";
+  static constexpr bool removable = true;
+  static constexpr bool addable = true;
+
+  static auto draw(dy::Components::CharacterController &ctrl,
+                   dy::SceneRenderer &, dy::Scene &, dy::Entity &) -> bool {
+    bool changed = false;
+    changed |= labelled_input("Radius",      [&](const char *id) { return ImGui::DragFloat(id, &ctrl.radius, 0.01F, 0.01F, 5.F); });
+    changed |= labelled_input("Height",      [&](const char *id) { return ImGui::DragFloat(id, &ctrl.height, 0.01F, 0.01F, 5.F); });
+    changed |= labelled_input("Step Height", [&](const char *id) { return ImGui::DragFloat(id, &ctrl.step_height, 0.01F, 0.F, 2.F); });
+    changed |= labelled_input("Move Speed",  [&](const char *id) { return ImGui::SliderFloat(id, &ctrl.move_speed, 0.1F, 50.F); });
+    changed |= labelled_input("Jump Speed",  [&](const char *id) { return ImGui::SliderFloat(id, &ctrl.jump_speed, 0.1F, 50.F); });
+    return changed;
+  }
+
+  static auto on_add(dy::SceneRenderer &, dy::Entity e) -> void {
+    e.emplace<dy::Components::CharacterController>();
+  }
+};
+
+template <>
+struct ComponentRenderer<dy::Components::Constraint>
+    : public BaseComponentRenderer<
+          ComponentRenderer<dy::Components::Constraint>> {
+  static constexpr std::string_view label = "Constraint";
+  static constexpr bool removable = true;
+  static constexpr bool addable = true;
+
+  static auto draw(dy::Components::Constraint &constraint, dy::SceneRenderer &,
+                   dy::Scene &, dy::Entity &) -> bool {
+    bool changed = false;
+
+    static constexpr std::array<const char *, 3> type_names{"Point", "Hinge",
+                                                             "Fixed"};
+    int type_idx = static_cast<int>(constraint.type);
+    ImGui::TextUnformatted("Type");
+    if (ImGui::Combo("##constraint_type", &type_idx, type_names.data(),
+                     static_cast<int>(type_names.size()))) {
+      constraint.type = static_cast<dy::Components::ConstraintType>(type_idx);
+      changed = true;
+    }
+
+    // Body A/B are entered as raw entity IDs (see the Scene Outliner for an
+    // entity's ID); a dedicated entity-picker widget is left for a follow-up.
+    changed |= labelled_input("Body A (entity id)", [&](const char *id) {
+      int val = static_cast<int>(constraint.body_a);
+      const bool edited = ImGui::InputInt(id, &val);
+      if (edited)
+        constraint.body_a = static_cast<entt::entity>(val);
+      return edited;
+    });
+    changed |= labelled_input("Body B (entity id)", [&](const char *id) {
+      int val = static_cast<int>(constraint.body_b);
+      const bool edited = ImGui::InputInt(id, &val);
+      if (edited)
+        constraint.body_b = static_cast<entt::entity>(val);
+      return edited;
+    });
+
+    changed |= labelled_input("Pivot A", [&](const char *id) { return ImGui::DragFloat3(id, glm::value_ptr(constraint.pivot_a), 0.01F); });
+    changed |= labelled_input("Pivot B", [&](const char *id) { return ImGui::DragFloat3(id, glm::value_ptr(constraint.pivot_b), 0.01F); });
+
+    if (constraint.type == dy::Components::ConstraintType::Hinge) {
+      changed |= labelled_input("Axis A", [&](const char *id) { return ImGui::DragFloat3(id, glm::value_ptr(constraint.axis_a), 0.01F); });
+      changed |= labelled_input("Axis B", [&](const char *id) { return ImGui::DragFloat3(id, glm::value_ptr(constraint.axis_b), 0.01F); });
+    }
+
+    return changed;
+  }
+
+  static auto on_add(dy::SceneRenderer &, dy::Entity e) -> void {
+    e.emplace<dy::Components::Constraint>();
   }
 };
 

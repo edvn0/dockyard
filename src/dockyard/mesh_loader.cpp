@@ -55,6 +55,19 @@ struct PrimitiveResult {
   AABB aabb;
 };
 
+// Per-primitive collision geometry in that primitive's own LOCAL space
+// (coarsest generated LOD, not LOD0 — see upload_geometry), keyed by
+// [mesh_idx][prim_idx_within_mesh] to mirror MeshAsset::meshes. flatten_nodes
+// bakes each owning node's world transform into these before appending them
+// into MeshAsset::collision_positions/collision_indices — a mesh's raw
+// vertex data alone isn't enough, since the same mesh can be referenced by
+// many differently-transformed nodes in the scene graph.
+struct RawCollisionPrimitive {
+  std::vector<PositionOnlyVertex> positions;
+  std::vector<u32> indices;
+};
+using RawCollisionGeometry = std::vector<std::vector<RawCollisionPrimitive>>;
+
 } // namespace dy
 
 namespace {
@@ -691,7 +704,16 @@ constexpr u32 fb_emissive = 4u;
         std::max(static_cast<usize>(3),
                  static_cast<usize>(static_cast<f32>(lod0.indices.size()) *
                                     target_ratio));
-    const usize rounded = (target_count / 3) * 3;
+    // target_count is a ratio of the ORIGINAL lod0 index count, but meshopt's
+    // target_index_count must never exceed the previous LOD's actual index
+    // count (prev_count). A simplification step — especially
+    // meshopt_simplifySloppy, used below for i >= 3 — can legitimately
+    // undershoot its own target on flat/degenerate geometry; when it does,
+    // the next iteration's fixed-ratio target can exceed the now-smaller
+    // prev_count and trip meshopt's `target_index_count <= index_count`
+    // assertion. Clamping here keeps the request valid; the loop's
+    // out_count == prev_count check then ends the chain gracefully instead.
+    const usize rounded = std::min((target_count / 3) * 3, prev_count);
 
     tl_simplified.resize(prev_count);
     usize out_count = 0;
@@ -926,12 +948,21 @@ using JointLookup = std::unordered_map<usize, std::pair<i32, i32>>;
 void flatten_nodes(
     const fastgltf::Asset &asset, std::span<const std::size_t> root_indices,
     MeshAsset &out, const std::unordered_set<usize> &suppressed_mesh_indices,
-    const std::unordered_map<usize, usize> &lod_to_primary_mesh) {
+    const std::unordered_map<usize, usize> &lod_to_primary_mesh,
+    const RawCollisionGeometry &raw_collision) {
   struct Frame {
     usize node_idx;
     i32 parent_flat_idx;
     bool is_root;
   };
+
+  // Parallel to out.nodes: world_transforms[i] is out.nodes[i]'s accumulated
+  // world matrix. desc.parent_index is always < the node's own flat index
+  // (this DFS visits a parent before any of its children), so a parent's
+  // world transform is always already available when a child needs it.
+  std::vector<glm::mat4> world_transforms;
+  usize collision_prims_baked = 0;
+  usize collision_prims_seen = 0;
 
   std::vector<Frame> dfs;
   dfs.reserve(root_indices.size());
@@ -971,6 +1002,12 @@ void flatten_nodes(
     if (node.skinIndex.has_value())
       desc.skin_index = static_cast<i32>(*node.skinIndex);
 
+    const glm::mat4 world_transform =
+        (parent_flat < 0)
+            ? desc.local_transform
+            : world_transforms[static_cast<usize>(parent_flat)] *
+                  desc.local_transform;
+
     if (node.meshIndex.has_value()) {
       // Remap to primary mesh if this node holds a LOD0 that was merged.
       const usize mi = lod_to_primary_mesh.contains(*node.meshIndex)
@@ -994,10 +1031,40 @@ void flatten_nodes(
             .material_id = mat_id,
             .aabb = out.submesh_aabbs[mi][pi],
         });
+
+        // Bake this node's world transform into its share of the retained
+        // collision geometry (see RawCollisionPrimitive) and flatten it into
+        // the asset-wide collision buffers. mi < raw_collision.size() always
+        // holds since raw_collision is sized like out.meshes; pi may exceed
+        // raw_collision[mi].size() if this primitive failed extraction
+        // (upload_geometry skips pushing a raw entry for it too).
+        ++collision_prims_seen;
+        if (mi < raw_collision.size() && pi < raw_collision[mi].size()) {
+          ++collision_prims_baked;
+          const auto &raw_prim = raw_collision[mi][pi];
+          const usize vertex_base = out.collision_positions.size();
+
+          out.collision_positions.reserve(out.collision_positions.size() +
+                                          raw_prim.positions.size());
+          for (const auto &vtx : raw_prim.positions) {
+            const glm::vec3 local{vtx.position[0], vtx.position[1],
+                                  vtx.position[2]};
+            const glm::vec3 world{world_transform * glm::vec4(local, 1.0F)};
+            out.collision_positions.push_back(
+                {.position = {world.x, world.y, world.z}});
+          }
+
+          out.collision_indices.reserve(out.collision_indices.size() +
+                                        raw_prim.indices.size());
+          for (const u32 idx : raw_prim.indices)
+            out.collision_indices.push_back(static_cast<u32>(vertex_base) +
+                                            idx);
+        }
       }
     }
 
     out.nodes.push_back(std::move(desc));
+    world_transforms.push_back(world_transform);
 
     for (usize i = node.children.size(); i-- > 0;)
       dfs.push_back({
@@ -1006,6 +1073,11 @@ void flatten_nodes(
           .is_root = false,
       });
   }
+
+  if (!raw_collision.empty())
+    info("flatten_nodes: baked collision geometry for {}/{} primitive "
+         "references ({} nodes total)",
+         collision_prims_baked, collision_prims_seen, out.nodes.size());
 }
 
 } // namespace
@@ -1717,7 +1789,9 @@ upload_geometry(const fastgltf::Asset &asset,
                 const std::vector<std::expected<PrimitiveResult, std::string>>
                     &extracted_prims,
                 const std::vector<PrimLods> &prim_lods, usize total_lod_indices,
-                GeometryPool &pool, MeshAsset &result) {
+                GeometryPool &pool, MeshAsset &result,
+                bool retain_collision_geometry,
+                RawCollisionGeometry &raw_collision_out) {
   PROFILE_SCOPE("Allocate geometry TOTAL");
 
   {
@@ -1749,6 +1823,8 @@ upload_geometry(const fastgltf::Asset &asset,
   result.meshes.resize(asset.meshes.size());
   result.submesh_aabbs.resize(asset.meshes.size());
   result.vertex_base_offset = pool.vertex_offset;
+  if (retain_collision_geometry)
+    raw_collision_out.resize(asset.meshes.size());
 
   auto *v_base = cast<Vertex>(pool.vertex_buffer->get_mapped_pointer(),
                               pool.vertex_offset);
@@ -1891,6 +1967,31 @@ upload_geometry(const fastgltf::Asset &asset,
         result.meshes[owning_mesh_idx].push_back(lod_group);
         result.submesh_aabbs[owning_mesh_idx].push_back(aabb);
         result.mesh_aabb.merge(aabb);
+
+        if (retain_collision_geometry) {
+          // Use the coarsest generated LOD's indices, not LOD0's — collision
+          // doesn't need render-quality detail, and a large environment mesh
+          // at full LOD0 density (millions of triangles) is both far too
+          // slow for real-time collision and large enough to blow past
+          // Bullet's BVH-build limits. LODn indices reference the same LOD0
+          // vertex range (see generate_lods), so vertices are unaffected.
+          const auto &collision_source_indices = prim_lods[i].extra.empty()
+                                                     ? pdata.indices
+                                                     : prim_lods[i].extra.back();
+
+          // Stored in this primitive's own local space, indices untouched —
+          // flatten_nodes applies each owning node's world transform and
+          // flattens these into MeshAsset::collision_positions/indices once
+          // the node hierarchy (and thus per-node transforms) is known.
+          RawCollisionPrimitive raw_prim;
+          raw_prim.positions.reserve(pdata.vertices.size());
+          for (const auto &vtx : pdata.vertices)
+            raw_prim.positions.push_back(
+                {.position = {vtx.position[0], vtx.position[1], vtx.position[2]}});
+          raw_prim.indices.assign(collision_source_indices.begin(),
+                                  collision_source_indices.end());
+          raw_collision_out[owning_mesh_idx].push_back(std::move(raw_prim));
+        }
       } else {
         // LODn > 0: patch the lod_slot into the existing MeshLodGroup.
         auto &lod_group = result.meshes[owning_mesh_idx][w.prim_idx];
@@ -2190,8 +2291,10 @@ static auto build_mesh_from_parsed(fastgltf::Asset &asset,
     pu.patches =
         build_patch_list(asset, pu.image_idx, result->material_base_slot);
 
+  RawCollisionGeometry raw_collision;
   upload_geometry(asset, prim_work_list, extracted_prims, prim_lods,
-                  total_lod_indices, pool, *result);
+                  total_lod_indices, pool, *result,
+                  opts.retain_collision_geometry, raw_collision);
 
   {
     PROFILE_SCOPE("Load skeletons & animations");
@@ -2207,7 +2310,7 @@ static auto build_mesh_from_parsed(fastgltf::Asset &asset,
   if (!scene_roots.empty()) {
     PROFILE_SCOPE("Iterate nodes");
     flatten_nodes(asset, scene_roots, *result, suppressed_mesh_indices,
-                  lod_to_primary_mesh);
+                  lod_to_primary_mesh, raw_collision);
   }
 
   // Count effective LOD levels for the log message.

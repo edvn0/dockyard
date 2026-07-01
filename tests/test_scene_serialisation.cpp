@@ -86,6 +86,150 @@ TEST_CASE("Scene Serialization with Mesh Components") {
   REQUIRE(target_registry.all_of<Components::Mesh>(deserialized_entity));
 }
 
+TEST_CASE("Scene Serialization with Physics Components") {
+  using namespace dy;
+
+  SUBCASE("Given_ColliderWithMeshPath_When_RoundTrip_Then_ShapeAndPathSurviveAndRuntimeIdIsZero") {
+    Scene original;
+    auto ent = original.registry().create();
+    Components::Collider collider{
+        .shape = Components::ColliderShape::Mesh,
+        .mesh_source_path = NullableVFSPath::create("meshes://level.glb"),
+    };
+    collider.runtime_id = 42; // Simulates a live Bullet body at save time.
+    original.registry().emplace<Components::Collider>(ent, collider);
+
+    std::vector<u8> buf;
+    {
+      MemoryWriter writer{buf};
+      SceneSerializer::serialize(original, writer);
+    }
+    Scene loaded;
+    {
+      MemoryReader reader{buf};
+      SceneSerializer::deserialize(loaded, reader);
+    }
+
+    auto view = loaded.registry().view<Components::Collider>();
+    REQUIRE(view.size() == 1);
+    const auto &result = view.get<Components::Collider>(view.front());
+    CHECK(result.shape == Components::ColliderShape::Mesh);
+    CHECK(result.mesh_source_path.view() == "meshes://level.glb");
+    CHECK(result.runtime_id == 0);
+  }
+
+  SUBCASE("Given_RigidBodyWithLiveRuntimeId_When_RoundTrip_Then_PhysicalParamsSurviveAndRuntimeIdResetsToZero") {
+    Scene original;
+    auto ent = original.registry().create();
+    Components::RigidBody body{
+        .mass = 12.5F,
+        .friction = 0.7F,
+        .restitution = 0.3F,
+        .kinematic = true,
+    };
+    body.runtime_id = 7;
+    original.registry().emplace<Components::RigidBody>(ent, body);
+
+    std::vector<u8> buf;
+    {
+      MemoryWriter writer{buf};
+      SceneSerializer::serialize(original, writer);
+    }
+    Scene loaded;
+    {
+      MemoryReader reader{buf};
+      SceneSerializer::deserialize(loaded, reader);
+    }
+
+    auto view = loaded.registry().view<Components::RigidBody>();
+    REQUIRE(view.size() == 1);
+    const auto &result = view.get<Components::RigidBody>(view.front());
+    CHECK(result.mass == doctest::Approx(12.5F));
+    CHECK(result.friction == doctest::Approx(0.7F));
+    CHECK(result.restitution == doctest::Approx(0.3F));
+    CHECK(result.kinematic == true);
+    CHECK(result.runtime_id == 0);
+  }
+
+  SUBCASE("Given_CharacterController_When_RoundTrip_Then_TuningParamsSurvive") {
+    Scene original;
+    auto ent = original.registry().create();
+    Components::CharacterController ctrl{
+        .radius = 0.4F,
+        .height = 1.9F,
+        .step_height = 0.3F,
+        .move_speed = 6.0F,
+        .jump_speed = 4.0F,
+    };
+    ctrl.runtime_id = 3;
+    original.registry().emplace<Components::CharacterController>(ent, ctrl);
+
+    std::vector<u8> buf;
+    {
+      MemoryWriter writer{buf};
+      SceneSerializer::serialize(original, writer);
+    }
+    Scene loaded;
+    {
+      MemoryReader reader{buf};
+      SceneSerializer::deserialize(loaded, reader);
+    }
+
+    auto view = loaded.registry().view<Components::CharacterController>();
+    REQUIRE(view.size() == 1);
+    const auto &result = view.get<Components::CharacterController>(view.front());
+    CHECK(result.radius == doctest::Approx(0.4F));
+    CHECK(result.height == doctest::Approx(1.9F));
+    CHECK(result.step_height == doctest::Approx(0.3F));
+    CHECK(result.move_speed == doctest::Approx(6.0F));
+    CHECK(result.jump_speed == doctest::Approx(4.0F));
+    CHECK(result.runtime_id == 0);
+  }
+
+  SUBCASE("Given_ConstraintReferencingTwoEntities_When_RoundTrip_Then_EntityRefsAndFramesSurvive") {
+    Scene original;
+    auto body_a = original.registry().create();
+    auto body_b = original.registry().create();
+    Components::Constraint constraint{
+        .type = Components::ConstraintType::Hinge,
+        .body_a = body_a,
+        .body_b = body_b,
+        .pivot_a = {1.0F, 0.0F, 0.0F},
+        .pivot_b = {-1.0F, 0.0F, 0.0F},
+        .axis_a = {0.0F, 0.0F, 1.0F},
+        .axis_b = {0.0F, 0.0F, 1.0F},
+    };
+    constraint.runtime_id = 99;
+    original.registry().emplace<Components::Constraint>(body_a, constraint);
+
+    std::vector<u8> buf;
+    {
+      MemoryWriter writer{buf};
+      SceneSerializer::serialize(original, writer);
+    }
+    Scene loaded;
+    {
+      MemoryReader reader{buf};
+      SceneSerializer::deserialize(loaded, reader);
+    }
+
+    auto view = loaded.registry().view<Components::Constraint>();
+    REQUIRE(view.size() == 1);
+    const auto entity_holding_constraint = view.front();
+    const auto &result = view.get<Components::Constraint>(entity_holding_constraint);
+    CHECK(result.type == Components::ConstraintType::Hinge);
+    // entt::snapshot/snapshot_loader recreate entities with matching IDs when
+    // loading into a freshly-created (empty) registry, so raw entity refs
+    // saved on Constraint compare equal post round-trip without remapping —
+    // the same guarantee ParentOf::parent already relies on.
+    CHECK(result.body_a == entity_holding_constraint);
+    CHECK(result.body_b == body_b);
+    CHECK(result.pivot_a == glm::vec3{1.0F, 0.0F, 0.0F});
+    CHECK(result.pivot_b == glm::vec3{-1.0F, 0.0F, 0.0F});
+    CHECK(result.runtime_id == 0);
+  }
+}
+
 #ifdef RUN_SERIALISATION_SMOKE_TESTS
 TEST_CASE("Scene Serialization - High Volume Stress Test") {
   using namespace dy;

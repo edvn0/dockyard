@@ -11,6 +11,7 @@
 #include <dockyard/image_decoder.hpp>
 #include <dockyard/imgui_renderer.hpp>
 #include <dockyard/mesh_loader.hpp>
+#include <dockyard/physics_world.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/vfs.hpp>
 
@@ -78,28 +79,44 @@ static auto install_titlebar_hit_test(GLFWwindow *window) -> void {
 
 namespace {
 struct AssetLoader : dy::IAssetLoader {
+  struct CacheEntry {
+    dy::MeshAssetHandle handle;
+    bool has_collision_geometry = false;
+  };
+
   dy::SceneRenderer &renderer;
-  StringMap<dy::MeshAssetHandle> mesh_cache;
+  StringMap<CacheEntry> mesh_cache;
 
   explicit AssetLoader(dy::SceneRenderer &r) : renderer(r) {}
 
-  auto load_mesh(const dy::VFSPath &path)
+  auto load_mesh(const dy::VFSPath &path, bool retain_collision_geometry)
       -> std::expected<dy::MeshAssetHandle, std::string> override {
     if (auto it = mesh_cache.find(path.view()); it != mesh_cache.end()) {
-      return it->second;
+      if (!retain_collision_geometry || it->second.has_collision_geometry)
+        return it->second.handle;
+      // Previously loaded without collision geometry; fall through and
+      // reload with retention so the physics world has geometry to build a
+      // mesh collider from. This registers a second MeshAsset — accepted
+      // cost for the (rare) case a render mesh is later reused as collision.
     }
 
+    const dy::mesh::LoadOptions opts{
+        .retain_collision_geometry = retain_collision_geometry,
+    };
     std::expected<MeshAssetHandle, std::string> result{};
     const auto ext = path.extension();
     const bool is_compressed = ext == ".zip" || ext == ".gz" || ext == ".tgz" ||
                                ext == ".zst" || ext == ".tzst" || ext == ".zstd";
     if (is_compressed) {
-      result = dy::mesh::load_from_compressed(path, renderer);
+      result = dy::mesh::load_from_compressed(path, renderer, opts);
     } else {
-      result = dy::mesh::load_from_path(path, renderer);
+      result = dy::mesh::load_from_path(path, renderer, opts);
     }
     if (result)
-      mesh_cache.emplace(std::string{path.view()}, *result);
+      mesh_cache[std::string{path.view()}] = CacheEntry{
+          .handle = *result,
+          .has_collision_geometry = retain_collision_geometry,
+      };
     return result;
   }
 
@@ -334,6 +351,9 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       ImGui::Checkbox("Show panel", &pool_panel->open);
     });
   }
+  renderer->settings_registry.add("Physics", [this] {
+    ImGui::Checkbox("Show colliders", &show_collider_debug);
+  });
 
   load_toolbar_icons();
 

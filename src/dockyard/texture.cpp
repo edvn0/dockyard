@@ -225,6 +225,30 @@ auto get_format_block_info(VkFormat format) -> FormatBlockInfo {
   case VK_FORMAT_BC6H_SFLOAT_BLOCK:
     return {4, 4, 16};
 
+  // BC1/BC4 — 4x4 blocks, 8 bytes (half-rate: 1-bit alpha or single channel).
+  case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+  case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+  case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+  case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+  case VK_FORMAT_BC4_UNORM_BLOCK:
+  case VK_FORMAT_BC4_SNORM_BLOCK:
+    return {4, 4, 8};
+
+  // BC2/BC3/BC5/BC7 — 4x4 blocks, 16 bytes. BC7 is the default colour-texture
+  // transcode target, BC5 the normal-map target (see ktx_transcode_format in
+  // mesh_loader.cpp) — both previously fell through to the 1x1/4-byte
+  // default below, undersizing the staging buffer for any texture whose
+  // dimensions weren't large enough to mask the miscalculation.
+  case VK_FORMAT_BC2_UNORM_BLOCK:
+  case VK_FORMAT_BC2_SRGB_BLOCK:
+  case VK_FORMAT_BC3_UNORM_BLOCK:
+  case VK_FORMAT_BC3_SRGB_BLOCK:
+  case VK_FORMAT_BC5_UNORM_BLOCK:
+  case VK_FORMAT_BC5_SNORM_BLOCK:
+  case VK_FORMAT_BC7_UNORM_BLOCK:
+  case VK_FORMAT_BC7_SRGB_BLOCK:
+    return {4, 4, 16};
+
   // Standard uncompressed formats fall back to 1x1 blocks
   case VK_FORMAT_R8G8B8A8_UNORM:
     return {1, 1, 4};
