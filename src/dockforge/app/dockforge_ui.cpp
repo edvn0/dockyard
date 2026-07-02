@@ -349,27 +349,6 @@ auto Dockforge::draw_hdr_selector() -> void {
     renderer->set_hdr_map(sunset);
   }
 
-  if (renderer->ibl_probe.valid()) {
-    ImGui::SeparatorText("GPU handles");
-
-    auto probe_row = [](const char *label, u32 index) {
-      const float sz = ImGui::GetFrameHeight();
-      const ImVec2 dim{sz, sz};
-      ImGui::Image(ImTextureRef{ImTextureID{index}}, dim, {0, 0}, {1, 1},
-                   {1, 1, 1, 1}, ImGui::GetStyleColorVec4(ImGuiCol_Border));
-      ImGui::SameLine(0.0F, ImGui::GetStyle().ItemInnerSpacing.x);
-      ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
-                           ((sz - ImGui::GetFrameHeight()) * 0.5F));
-      int idx = static_cast<int>(index);
-      ImGui::InputInt(label, &idx, 0, 0, ImGuiInputTextFlags_ReadOnly);
-    };
-
-    probe_row("Env map", renderer->ibl_probe.env_map.index());
-    probe_row("Irradiance", renderer->ibl_probe.irradiance.index());
-    probe_row("Prefiltered", renderer->ibl_probe.prefiltered.index());
-    probe_row("BRDF LUT", renderer->ibl_probe.brdf_lut.index());
-  }
-
   ImGui::End();
 }
 

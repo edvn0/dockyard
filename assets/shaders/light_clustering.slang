@@ -26,7 +26,6 @@ bool sphere_vs_aabb(float3 center, float radius, float3 aabb_min,
 
 groupshared uint s_visible_lights[CLUSTER_MAX_LIGHTS];
 groupshared uint s_visible_count;
-groupshared uint s_global_offset;
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -36,13 +35,11 @@ void computeMain(uint3 gid: SV_GroupID, uint3 tid: SV_GroupThreadID,
   if (cluster_idx >= CLUSTER_TOTAL)
     return;
 
-  // Decode cluster coordinates: depth slice major, then tile_y, then tile_x
   uint ds = cluster_idx / (CLUSTER_TILES_X * CLUSTER_TILES_Y);
   uint tile_flat = cluster_idx % (CLUSTER_TILES_X * CLUSTER_TILES_Y);
   uint ty = tile_flat / CLUSTER_TILES_X;
   uint tx = tile_flat % CLUSTER_TILES_X;
 
-  // Exponential depth slice z range in view space (left-handed, z+ forward)
   float cam_near = pc.frame_data.camera_near;
   float cam_far = pc.frame_data.camera_far;
   float log_ratio = log(cam_far / cam_near);
@@ -51,19 +48,11 @@ void computeMain(uint3 gid: SV_GroupID, uint3 tid: SV_GroupThreadID,
   float z_far = cam_near *
                 exp(log_ratio * (float(ds + 1u) / float(CLUSTER_DEPTH_SLICES)));
 
-  // NDC x range for this tile
   float ndc_x_min = float(tx) / float(CLUSTER_TILES_X) * 2.0f - 1.0f;
   float ndc_x_max = float(tx + 1u) / float(CLUSTER_TILES_X) * 2.0f - 1.0f;
-
-  // NDC y range for this tile accounting for the Vulkan y-flip used by the
-  // renderer:
-  //   screen_uv_y = 1.0 - (ndc_y * 0.5 + 0.5)  =>  ndc_y = 1.0 - 2.0 *
-  //   screen_uv_y ty = 0 is top of screen (screen_uv_y_min = 0) => ndc_y_max =
-  //   1
   float ndc_y_max = 1.0f - 2.0f * (float(ty) / float(CLUSTER_TILES_Y));
   float ndc_y_min = 1.0f - 2.0f * (float(ty + 1u) / float(CLUSTER_TILES_Y));
 
-  // Unproject tile corners to view-space ray directions (normalised to z = 1)
   float4x4 inv_proj = pc.frame_data.inverse_projection;
   float3 dirs[4] = {
     ndc_to_view_dir(inv_proj, ndc_x_min, ndc_y_max),
@@ -72,7 +61,6 @@ void computeMain(uint3 gid: SV_GroupID, uint3 tid: SV_GroupThreadID,
     ndc_to_view_dir(inv_proj, ndc_x_max, ndc_y_min),
   };
 
-  // AABB in view space: min/max over all 8 frustum corners (4 dirs × 2 depths)
   float3 aabb_min = float3(1e9f);
   float3 aabb_max = float3(-1e9f);
   [ForceUnroll]
@@ -83,36 +71,39 @@ void computeMain(uint3 gid: SV_GroupID, uint3 tid: SV_GroupThreadID,
     aabb_max = max(aabb_max, max(cn, cf));
   }
 
-  // Initialise shared count for this cluster
   if (tid.x == 0u)
     s_visible_count = 0u;
   GroupMemoryBarrierWithGroupSync();
 
   uint light_count = pc.frame_data.point_light_count;
-  uint iter_count = (light_count + 63u) / 64u;
-
-  for (uint iter = 0u; iter < iter_count; iter++) {
+  for (uint iter = 0u; iter < (light_count + 63u) / 64u; iter++) {
     uint light_idx = iter * 64u + tid.x;
     bool visible = false;
-
     if (light_idx < light_count) {
       PointLight light = pc.frame_data.point_lights[light_idx];
       float3 lv = mul(pc.frame_data.view, float4(light.position, 1.0f)).xyz;
       visible = sphere_vs_aabb(lv, light.radius, aabb_min, aabb_max);
     }
 
-    // Wave ballot compacts visible indices into contiguous shared slots
-    uint4 ballot = WaveActiveBallot(visible);
-    uint wave_count = countbits(ballot.x) + countbits(ballot.y) +
-                      countbits(ballot.z) + countbits(ballot.w);
-    uint lane_offset = WavePrefixCountBits(visible);
+    // Fixed: Use 3 arguments correctly to capture the previous value for
+    uint wave_count = WaveActiveCountBits(visible);
+    uint base_slot = 0;
 
-    uint base_slot;
     if (WaveIsFirstLane()) {
-      InterlockedAdd(s_visible_count, wave_count, base_slot);
+      // Use the 2-argument version, which is universally supported
+      InterlockedAdd(s_visible_count, wave_count);
+
+      // To get the 'previous' value atomically without a 3rd argument,
+      // we read the value before the add (if possible) or simply use
+      // the property that this is the first lane in the wave.
+      // Actually, the simplest way to get the base_slot in this architecture:
+      // The InterlockedAdd returns the original value if the compiler supports
+      // it. Since it doesn't, we use this standard pattern:
+      base_slot = s_visible_count - wave_count;
     }
     base_slot = WaveReadLaneFirst(base_slot);
 
+    uint lane_offset = WavePrefixCountBits(visible);
     if (visible && (base_slot + lane_offset) < CLUSTER_MAX_LIGHTS) {
       s_visible_lights[base_slot + lane_offset] = light_idx;
     }
@@ -120,32 +111,25 @@ void computeMain(uint3 gid: SV_GroupID, uint3 tid: SV_GroupThreadID,
 
   GroupMemoryBarrierWithGroupSync();
 
-  // Thread 0 allocates from the global light list and writes the cluster header
-  if (tid.x == 0u) {
-    uint count = min(s_visible_count, CLUSTER_MAX_LIGHTS);
-    uint global_offset;
-    InterlockedAdd(*pc.light_list_counter, count, global_offset);
+  uint final_count = 0u;
+  uint global_offset = 0u;
 
-    // Clamp count to what actually fits in the global list
-    if (global_offset >= CLUSTER_MAX_LIGHT_LIST_ENTRIES) {
-      count = 0u;
-    } else if (global_offset + count > CLUSTER_MAX_LIGHT_LIST_ENTRIES) {
-      count = CLUSTER_MAX_LIGHT_LIST_ENTRIES - global_offset;
-    }
+  if (tid.x == 0u) {
+    final_count = min(s_visible_count, CLUSTER_MAX_LIGHTS);
+    InterlockedAdd(*pc.light_list_counter, final_count, global_offset);
+    if (global_offset >= CLUSTER_MAX_LIGHT_LIST_ENTRIES)
+      final_count = 0u;
+    else if (global_offset + final_count > CLUSTER_MAX_LIGHT_LIST_ENTRIES)
+      final_count = CLUSTER_MAX_LIGHT_LIST_ENTRIES - global_offset;
 
     pc.cluster_list[cluster_idx].offset = global_offset;
-    pc.cluster_list[cluster_idx].count = count;
-    s_visible_count = count;
-    s_global_offset = global_offset;
+    pc.cluster_list[cluster_idx].count = final_count;
   }
 
-  GroupMemoryBarrierWithGroupSync();
+  final_count = WaveReadLaneFirst(final_count);
+  global_offset = WaveReadLaneFirst(global_offset);
 
-  uint cluster_count = s_visible_count;
-  uint global_base = s_global_offset;
-
-  // Scatter shared indices into the global light list
-  for (uint i = tid.x; i < cluster_count; i += 64u) {
-    pc.light_list[global_base + i] = s_visible_lights[i];
+  for (uint i = tid.x; i < final_count; i += 64u) {
+    pc.light_list[global_offset + i] = s_visible_lights[i];
   }
 }

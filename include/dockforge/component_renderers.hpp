@@ -1,5 +1,6 @@
 #pragma once
 
+#include "dockyard/mesh_loader.hpp"
 #include <dockforge/component_inspector.hpp>
 #include <dockyard/animation.hpp>
 #include <dockyard/component_traits.hpp>
@@ -8,6 +9,7 @@
 
 #include <array>
 #include <cstring>
+#include <nfd.hpp>
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <imgui.h>
@@ -133,6 +135,24 @@ struct ComponentRenderer<dy::Components::Mesh>
                                        : "Mesh Asset #" + std::to_string(current_handle.index()))
               : "None (Empty Handle)";
 
+      if (ImGui::Button("Load new mesh")) {
+      constexpr std::array<nfdfilteritem_t, 1> filters = {
+          nfdfilteritem_t{.name = "Valid meshes", .spec = "dymesh,glb,zst,zstd,gz"},
+      };
+
+      NFD::UniquePath out_path;
+      const nfdresult_t result = NFD::OpenDialog(
+          out_path, filters.data(), std::size(filters));
+
+      if (result == NFD_OKAY) {
+          auto path = dy::VFS::get().mount_file("meshes", std::filesystem::path {out_path.get()});
+          dy::info("OutPath: {}, VFSPath: {}", out_path.get(), path.view());
+          auto handle = dy::mesh::load_from_path(path, scene_renderer);
+      } else if (result == NFD_ERROR) {
+        dy::warn("Native file dialog failed: {}", NFD::GetError());
+      }
+      }
+
       ImGui::TextUnformatted("Bound Mesh");
       if (ImGui::BeginCombo("##BoundMesh", preview_name.c_str())) {
         if (ImGui::Selectable("None (Empty)", current_handle.empty())) {
@@ -147,7 +167,7 @@ struct ComponentRenderer<dy::Components::Mesh>
             auto live_handle = registry.handle_at(idx);
             const auto *live_asset = registry.get(live_handle);
             std::string mesh_label =
-                (live_asset && live_asset->source_path.valid())
+                ((live_asset != nullptr) && live_asset->source_path.valid())
                     ? std::string{live_asset->source_path.view()}
                     : "Mesh Asset #" + std::to_string(idx);
 

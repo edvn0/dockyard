@@ -309,17 +309,6 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       renderer->textures, renderer->samplers, renderer->comparison_samplers,
       renderer->subimages);
 
-  constexpr std::string_view sponza_path =
-      "meshes://damaged_helmet/DamagedHelmet_6LOD.glb";
-  if (auto loaded_sponza =
-          asset_loader->load_mesh(VFSPath::create(sponza_path))) {
-    auto sponza = active_scene->make("Sponza");
-    auto &mc = sponza.emplace<Components::Mesh>();
-    mc.handle = *loaded_sponza;
-    mc.source_path = VFSPath::create(sponza_path);
-    sponza.get<Components::Transform>().mut().position = {-10, 3, 9};
-  }
-
   if (script_engine && script_engine->loaded())
     script_engine->on_scene_load(editor_scene.get(), *asset_loader);
 

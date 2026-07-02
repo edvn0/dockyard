@@ -168,7 +168,6 @@ end
 -- ---------------------------------------------------------------------------
 
 function game.on_scene_load(scene, assets)
-	--[[
     local handle, err = assets:load_mesh(
         VFSPath.create("meshes://damaged_helmet/DamagedHelmet.glb"))
     if handle then
@@ -177,6 +176,24 @@ function game.on_scene_load(scene, assets)
     else
         print("[Sandbox] Failed to preload helmet mesh: " .. (err or "?"))
     end
+
+
+    --  Spawn 300 helmets if the mesh was preloaded
+    if game.helmet_mesh and game.helmet_mesh:valid() then
+        local size   = 100.0
+        local parent = scene:make("Helmet parent")
+        for _ = 1, 500 do
+            local child = scene:make("Helmet", parent)
+            local mc    = child:add_mesh()
+            mc.handle   = game.helmet_mesh
+            mc:set_source_path("meshes://damaged_helmet/DamagedHelmet.glb")
+            local tf    = child:get_transform()
+            tf.position = vec3(rand_range(-size, size),
+                rand_range(-size, size),
+                rand_range(-size, size))
+        end
+    end
+	--[[
 
     local fox_handle, fox_err = assets:load_mesh(VFSPath.create("meshes://fox/Fox.glb"))
     if fox_handle then
@@ -191,28 +208,12 @@ function game.on_scene_load(scene, assets)
     local player   = scene:make("Player 4")
     game.player_id = player:id()
 
-    -- Spawn 300 helmets if the mesh was preloaded
-    if game.helmet_mesh and game.helmet_mesh:valid() then
-        local size   = 25.0
-        local parent = scene:make("Helmet parent")
-        for _ = 1, 300 do
-            local child = scene:make("Helmet", parent)
-            local mc    = child:add_mesh()
-            mc.handle   = game.helmet_mesh
-            mc:set_source_path("meshes://damaged_helmet/DamagedHelmet.glb")
-            local tf    = child:get_transform()
-            tf.position = vec3(rand_range(-size, size),
-                rand_range(-size, size),
-                rand_range(-size, size))
-        end
-    end
-    --]]
 
 	-- Walls/columns/humans test level disabled — default editor scene is a
 	-- single DamagedHelmet (see dockforge_init.cpp) for isolated PBR review.
 	-- load_scene(scene, assets)
 
-	local bistro_path = "meshes://Bistro/BistroExterior.glb.zst"
+	--[[ local bistro_path = "meshes://Bistro/BistroExterior.glb.zst"
 	local bistro_handle, err = assets:load_mesh(VFSPath.create(bistro_path), true)
 	if bistro_handle then
 		local e = scene:make("Bistro")
@@ -240,7 +241,7 @@ function game.on_scene_load(scene, assets)
 		e:add_rigid_body() -- mass defaults to 0 (static)
 	else
 		print("[sandbox] bistro load error: " .. (err or "?"))
-	end
+	end ]]
 end
 
 function game.begin_play(scene)
