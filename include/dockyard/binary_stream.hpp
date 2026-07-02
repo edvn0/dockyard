@@ -7,7 +7,11 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace dy {
@@ -17,6 +21,25 @@ struct BinaryWriter {
   virtual ~BinaryWriter() = default;
 
   template <typename T> void write_t(const T &val) { write(&val, sizeof(T)); }
+
+  void write_bytes(std::span<const std::byte> bytes) {
+    write(bytes.data(), bytes.size());
+  }
+
+  // Writes a u64 element count followed by the raw contents of span — T must
+  // be trivially copyable so the whole block can be written as one memcpy.
+  template <typename T> void write_pod_array(std::span<const T> span) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    write_t<std::uint64_t>(span.size());
+    if (!span.empty())
+      write(span.data(), span.size_bytes());
+  }
+
+  void write_string(std::string_view str) {
+    write_t<std::uint64_t>(str.size());
+    if (!str.empty())
+      write(str.data(), str.size());
+  }
 };
 
 struct BinaryReader {
@@ -27,6 +50,25 @@ struct BinaryReader {
     T val;
     read(&val, sizeof(T));
     return val;
+  }
+
+  // Inverse of BinaryWriter::write_pod_array — reads the count, resizes, and
+  // fills the vector with a single memcpy.
+  template <typename T> auto read_pod_vector() -> std::vector<T> {
+    static_assert(std::is_trivially_copyable_v<T>);
+    const auto count = read_t<std::uint64_t>();
+    std::vector<T> out(count);
+    if (count > 0)
+      read(out.data(), out.size() * sizeof(T));
+    return out;
+  }
+
+  auto read_string() -> std::string {
+    const auto len = read_t<std::uint64_t>();
+    std::string out(len, '\0');
+    if (len > 0)
+      read(out.data(), out.size());
+    return out;
   }
 };
 

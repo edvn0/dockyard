@@ -3,6 +3,7 @@
 #include <dockyard/archive.hpp>
 #include <dockyard/log.hpp>
 #include <dockyard/mesh.hpp>
+#include <dockyard/mesh_cache.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/types.hpp>
 #include <dockyard/vfs.hpp>
@@ -32,6 +33,7 @@
 #include <execution>
 #include <expected>
 #include <format>
+#include <fstream>
 #include <numeric>
 #include <ranges>
 #include <string>
@@ -1268,10 +1270,7 @@ struct RemapResult {
   return out;
 }
 
-struct MaterialTexturePatch {
-  u32 pool_slot;
-  std::function<void(GPUMaterial &, TextureHandle)> apply;
-};
+using MaterialTexturePatch = mesh_cache::MaterialTexturePatch;
 
 struct ImageSource {
   std::variant<std::filesystem::path, std::vector<std::byte>> data;
@@ -2025,70 +2024,64 @@ upload_geometry(const fastgltf::Asset &asset,
 
 static void submit_texture_uploads(std::vector<PendingUpload> &pending,
                                    SceneRenderer &renderer,
-                                   MeshAssetHandle handle) {
+                                   MeshAssetHandle handle,
+                                   u32 material_base_slot) {
   for (auto &pu : pending) {
     renderer.texture_upload_pool->submit(
         std::move(pu.fut), std::move(pu.stop_src),
         [&renderer, mesh_handle = handle, image_idx = pu.image_idx,
-         patches = std::move(pu.patches)](TextureHandle h) mutable {
+         patches = std::move(pu.patches), material_base_slot](
+            TextureHandle h) mutable {
           auto *mesh_asset = renderer.resolve_mut(mesh_handle);
           mesh_asset->texture_handles[image_idx] = h;
-          for (auto &[slot, apply] : patches) {
+          for (const auto &[local_index, role] : patches) {
+            const u32 slot = material_base_slot + local_index;
             auto &mat = renderer.geometry_pool->get_material(slot);
-            apply(mat, h);
+            mesh_cache::apply_texture_role(mat, role, h);
             renderer.geometry_pool->update_material(slot, mat);
           }
         });
   }
 }
 
-auto build_patch_list(const fastgltf::Asset &asset, usize image_idx,
-                      u32 material_base_slot)
+// Patches are always asset-relative (material_local_index is 0-based within
+// this asset's own material list) — the caller adds material_base_slot at
+// the point of use. This keeps the same patch list valid whether it was just
+// computed from a live fastgltf::Asset or read back from a mesh cache file,
+// where material_base_slot is only known once the cached materials are
+// re-allocated into (possibly different) pool slots.
+auto build_patch_list(const fastgltf::Asset &asset, usize image_idx)
     -> std::vector<MaterialTexturePatch> {
   std::vector<MaterialTexturePatch> patches;
 
   for (usize mi = 0; mi < asset.materials.size(); ++mi) {
     const auto &mat = asset.materials[mi];
-    const u32 slot = material_base_slot + static_cast<u32>(mi);
+    const u32 local_index = static_cast<u32>(mi);
 
-    auto try_add = [&](const auto &tex_opt, auto setter) {
+    auto try_add = [&](const auto &tex_opt, mesh_cache::TextureRole role) {
       if (!tex_opt.has_value())
         return;
       const auto &tex = asset.textures[tex_opt->textureIndex];
       if (tex.imageIndex.has_value() && *tex.imageIndex == image_idx)
-        patches.push_back({slot, std::move(setter)});
+        patches.push_back({local_index, role});
     };
 
     if (const auto *sg = mat.specularGlossiness.get(); sg != nullptr) {
-      try_add(sg->diffuseTexture, [](GPUMaterial &g, TextureHandle h) {
-        g.albedo_index = h.index();
-      });
-      try_add(sg->specularGlossinessTexture, [](GPUMaterial &g, TextureHandle h) {
-        g.specular_glossiness_index = h.index();
-      });
+      try_add(sg->diffuseTexture, mesh_cache::TextureRole::albedo);
+      try_add(sg->specularGlossinessTexture,
+              mesh_cache::TextureRole::specular_glossiness);
     } else {
-      try_add(mat.pbrData.baseColorTexture, [](GPUMaterial &g, TextureHandle h) {
-        g.albedo_index = h.index();
-      });
+      try_add(mat.pbrData.baseColorTexture, mesh_cache::TextureRole::albedo);
       try_add(mat.pbrData.metallicRoughnessTexture,
-              [](GPUMaterial &g, TextureHandle h) {
-                g.metallic_roughness_index = h.index();
-              });
+              mesh_cache::TextureRole::metallic_roughness);
       if (const auto *spec = mat.specular.get(); spec != nullptr) {
-        try_add(spec->specularColorTexture, [](GPUMaterial &g, TextureHandle h) {
-          g.specular_color_index = h.index();
-        });
+        try_add(spec->specularColorTexture,
+                mesh_cache::TextureRole::specular_color);
       }
     }
-    try_add(mat.normalTexture, [](GPUMaterial &g, TextureHandle h) {
-      g.normal_index = h.index();
-    });
-    try_add(mat.occlusionTexture, [](GPUMaterial &g, TextureHandle h) {
-      g.occlusion_index = h.index();
-    });
-    try_add(mat.emissiveTexture, [](GPUMaterial &g, TextureHandle h) {
-      g.emissive_index = h.index();
-    });
+    try_add(mat.normalTexture, mesh_cache::TextureRole::normal);
+    try_add(mat.occlusionTexture, mesh_cache::TextureRole::occlusion);
+    try_add(mat.emissiveTexture, mesh_cache::TextureRole::emissive);
   }
   return patches;
 }
@@ -2140,6 +2133,31 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
   return renderer.register_gltf(std::move(result));
 }
 
+// Reads the bytes an ImageSource would hand to the KTX2/stb decoder, even
+// when they live on disk (URI or KTX2 sidecar) rather than already embedded
+// in the glTF — used only when building a mesh-cache snapshot, so the cache
+// stays self-contained and has no runtime dependency on the source glTF.
+[[nodiscard]] static auto read_file_bytes(const std::filesystem::path &path)
+    -> std::vector<std::byte> {
+  std::ifstream in(path, std::ios::binary | std::ios::ate);
+  if (!in)
+    return {};
+  const auto size = in.tellg();
+  std::vector<std::byte> bytes(static_cast<usize>(size));
+  in.seekg(0);
+  in.read(reinterpret_cast<char *>(bytes.data()), size);
+  return bytes;
+}
+
+[[nodiscard]] static auto resolve_image_source_bytes(const ImageSource &src)
+    -> std::vector<std::byte> {
+  if (src.ktx_sidecar_path)
+    return read_file_bytes(*src.ktx_sidecar_path);
+  if (const auto *path = std::get_if<std::filesystem::path>(&src.data))
+    return read_file_bytes(*path);
+  return std::get<std::vector<std::byte>>(src.data);
+}
+
 // Shared mesh-building pipeline called by both load_from_path and
 // load_from_compressed after the glTF asset has already been parsed.
 // gltf_dir  — directory used to resolve sidecar KTX2 files and external image
@@ -2147,12 +2165,13 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
 //             pass an empty path for GLB loaded from memory (no external
 //             files).
 // debug_path — used only in log messages.
-static auto build_mesh_from_parsed(fastgltf::Asset &asset,
-                                   const std::filesystem::path &gltf_dir,
-                                   const std::filesystem::path &debug_path,
-                                   SceneRenderer &renderer,
-                                   const LoadOptions &opts,
-                                   NullableVFSPath source_path)
+static auto
+build_mesh_from_parsed(fastgltf::Asset &asset,
+                       const std::filesystem::path &gltf_dir,
+                       const std::filesystem::path &debug_path,
+                       SceneRenderer &renderer, const LoadOptions &opts,
+                       NullableVFSPath source_path,
+                       mesh_cache::BinaryMesh *out_snapshot = nullptr)
     -> std::expected<MeshAssetHandle, std::string> {
   auto &pool = *renderer.geometry_pool;
 
@@ -2166,7 +2185,26 @@ static auto build_mesh_from_parsed(fastgltf::Asset &asset,
   const auto color_spaces = classify_images(asset);
   auto image_sources =
       collect_image_sources(asset, gltf_dir, debug_path, color_spaces);
+
+  // Snapshot the encoded texture bytes before launch_texture_futures moves
+  // image_sources into async decode tasks — needed so the mesh cache is
+  // self-contained (no dependency on the source glTF / sidecar files).
+  std::vector<mesh_cache::ImageRecord> cached_images;
+  if (out_snapshot != nullptr) {
+    cached_images.reserve(image_sources.size());
+    for (const auto &src : image_sources) {
+      cached_images.push_back({
+          .encoded_bytes = resolve_image_source_bytes(src),
+          .format = src.format,
+          .srgb = src.srgb,
+          .debug_name = src.debug_name,
+          .cache_key = src.cache_key,
+      });
+    }
+  }
+
   auto pending = launch_texture_futures(image_sources, renderer, *result);
+  const usize skin_base_before = pool.skin_vertex_offset;
 
   // -------------------------------------------------------------------------
   // Detect explicit LOD groups from mesh names (e.g. _lod0 … _lod5)
@@ -2287,9 +2325,11 @@ static auto build_mesh_from_parsed(fastgltf::Asset &asset,
 
   allocate_materials(asset, pool, *result);
 
-  for (auto &pu : pending)
-    pu.patches =
-        build_patch_list(asset, pu.image_idx, result->material_base_slot);
+  for (auto &pu : pending) {
+    pu.patches = build_patch_list(asset, pu.image_idx);
+    if (out_snapshot != nullptr)
+      cached_images[pu.image_idx].patches = pu.patches;
+  }
 
   RawCollisionGeometry raw_collision;
   upload_geometry(asset, prim_work_list, extracted_prims, prim_lods,
@@ -2325,14 +2365,167 @@ static auto build_mesh_from_parsed(fastgltf::Asset &asset,
        asset.materials.size(), asset.meshes.size(), result->nodes.size(),
        max_lod_count);
 
+  if (out_snapshot != nullptr) {
+    PROFILE_SCOPE("Build mesh cache snapshot");
+    mesh_cache::BinaryMesh &snap = *out_snapshot;
+
+    const usize vertex_count =
+        (pool.vertex_offset - result->vertex_base_offset) / sizeof(Vertex);
+    const usize index_count =
+        (pool.index_offset - result->index_base_offset) / sizeof(u32);
+    const usize skin_vertex_count = pool.skin_vertex_offset - skin_base_before;
+
+    snap.vertices.resize(vertex_count);
+    std::memcpy(snap.vertices.data(),
+               cast<Vertex>(pool.vertex_buffer->get_mapped_pointer(),
+                            result->vertex_base_offset),
+               vertex_count * sizeof(Vertex));
+
+    snap.indices.resize(index_count);
+    std::memcpy(snap.indices.data(),
+               cast<u32>(pool.index_buffer->get_mapped_pointer(),
+                         result->index_base_offset),
+               index_count * sizeof(u32));
+
+    if (skin_vertex_count > 0) {
+      snap.skin_vertices.resize(skin_vertex_count);
+      std::memcpy(snap.skin_vertices.data(),
+                 pool.skin_mapped_pointer(skin_base_before),
+                 skin_vertex_count * sizeof(SkinVertex));
+    }
+
+    const auto live_materials =
+        pool.get_materials(result->material_base_slot, result->material_count);
+    snap.materials.assign(live_materials.begin(), live_materials.end());
+
+    snap.material_slots = result->material_slots;
+    snap.meshes = result->meshes;
+    snap.submesh_aabbs = result->submesh_aabbs;
+    snap.mesh_aabb = result->mesh_aabb;
+    snap.nodes = result->nodes;
+    snap.root_node_indices = result->root_node_indices;
+    snap.skeletons = result->skeletons;
+    snap.animations = result->animations;
+    snap.collision_positions = result->collision_positions;
+    snap.collision_indices = result->collision_indices;
+    snap.images = std::move(cached_images);
+
+    // result keeps its live, pool-absolute offsets (it's about to be
+    // registered and rendered); the snapshot is rebased to asset-relative
+    // (0-based) so it stays valid regardless of where a future load lands
+    // in a (possibly different) pool.
+    mesh_cache::rebase(
+        snap, -static_cast<i64>(result->vertex_base_offset / sizeof(Vertex)),
+        -static_cast<i64>(result->index_base_offset / sizeof(u32)),
+        -static_cast<i64>(skin_base_before),
+        -static_cast<i64>(result->material_base_slot));
+  }
+
+  const u32 material_base_slot = result->material_base_slot;
   auto handle = renderer.register_gltf(std::move(*result));
-  submit_texture_uploads(pending, renderer, handle);
+  submit_texture_uploads(pending, renderer, handle, material_base_slot);
+  return handle;
+}
+
+// Expands a cached BinaryMesh back into the live GeometryPool with a single
+// memcpy per bulk section (vertices/indices via GeometryPool::allocate,
+// materials via GeometryPool::allocate_materials) instead of re-running the
+// glTF/meshopt/mikktspace pipeline. Textures still decode asynchronously
+// through the normal texture_upload_pool — only the CPU mesh-build pipeline
+// is skipped.
+[[nodiscard]] static auto build_from_cache(mesh_cache::BinaryMesh &&cached,
+                                           SceneRenderer &renderer,
+                                           NullableVFSPath source_path)
+    -> std::expected<MeshAssetHandle, std::string> {
+  auto &pool = *renderer.geometry_pool;
+
+  auto result =
+      std::make_unique<MeshAsset>(MeshAsset{.mesh_aabb = AABB::create()});
+  result->source_path = source_path;
+
+  const auto offs = pool.allocate(cached.vertices, cached.indices);
+  result->vertex_base_offset = offs.vertex_offset;
+  result->shadow_vertex_base_offset = offs.shadow_vertex_offset;
+  result->index_base_offset = offs.index_offset;
+
+  usize skin_base = 0;
+  if (!cached.skin_vertices.empty()) {
+    pool.ensure_skin_capacity(cached.skin_vertices.size());
+    skin_base = pool.skin_vertex_offset;
+    std::memcpy(pool.skin_mapped_pointer(skin_base), cached.skin_vertices.data(),
+               cached.skin_vertices.size() * sizeof(SkinVertex));
+    pool.flush_skin_range(skin_base, cached.skin_vertices.size());
+    pool.skin_vertex_offset += cached.skin_vertices.size();
+  }
+
+  const auto mat_offset = pool.allocate_materials(
+      std::span<const GPUMaterial>(cached.materials));
+  result->material_base_slot = mat_offset.start_index;
+  result->material_count = static_cast<u32>(cached.materials.size());
+
+  mesh_cache::rebase(cached,
+                     static_cast<i64>(offs.vertex_offset / sizeof(Vertex)),
+                     static_cast<i64>(offs.index_offset / sizeof(u32)),
+                     static_cast<i64>(skin_base),
+                     static_cast<i64>(result->material_base_slot));
+
+  result->material_slots = std::move(cached.material_slots);
+  result->meshes = std::move(cached.meshes);
+  result->submesh_aabbs = std::move(cached.submesh_aabbs);
+  result->mesh_aabb = cached.mesh_aabb;
+  result->nodes = std::move(cached.nodes);
+  result->root_node_indices = std::move(cached.root_node_indices);
+  result->skeletons = std::move(cached.skeletons);
+  result->animations = std::move(cached.animations);
+  result->collision_positions = std::move(cached.collision_positions);
+  result->collision_indices = std::move(cached.collision_indices);
+
+  result->texture_handles.resize(cached.images.size(),
+                                 renderer.dummy_texture_handle);
+
+  std::vector<ImageSource> image_sources;
+  image_sources.reserve(cached.images.size());
+  for (usize i = 0; i < cached.images.size(); ++i) {
+    auto &img = cached.images[i];
+    image_sources.push_back({
+        .data = std::move(img.encoded_bytes),
+        .ktx_sidecar_path = std::nullopt,
+        .debug_name = img.debug_name,
+        .cache_key = img.cache_key,
+        .format = img.format,
+        .srgb = img.srgb,
+        .image_idx = i,
+    });
+  }
+
+  auto pending = launch_texture_futures(image_sources, renderer, *result);
+  for (auto &pu : pending)
+    pu.patches = std::move(cached.images[pu.image_idx].patches);
+
+  const u32 material_base_slot = result->material_base_slot;
+  auto handle = renderer.register_gltf(std::move(*result));
+  submit_texture_uploads(pending, renderer, handle, material_base_slot);
   return handle;
 }
 
 auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
                     const LoadOptions &opts)
     -> std::expected<MeshAssetHandle, std::string> {
+  const u64 source_hash = mesh_cache::hash_source(path, opts);
+  const auto cache_path = mesh_cache::cache_path_for(path, source_hash);
+
+  if (auto cache_bytes = VFS::get().read_bytes(cache_path)) {
+    if (auto cached = mesh_cache::deserialize(*cache_bytes, source_hash)) {
+      info("load_gltf: '{}' — loaded from mesh cache '{}'", path.view(),
+           cache_path.view());
+      return build_from_cache(std::move(*cached), renderer,
+                              NullableVFSPath{path});
+    } else {
+      info("load_gltf: '{}' — mesh cache miss ({}), doing a cold load",
+           path.view(), cached.error());
+    }
+  }
+
   const auto fs_path = VFS::get().resolve(path);
   const auto gltf_dir = fs_path.parent_path();
 
@@ -2343,8 +2536,42 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
   if (!asset)
     return std::unexpected(asset.error());
 
-  return build_mesh_from_parsed(*asset, gltf_dir, fs_path, renderer, opts,
-                                NullableVFSPath{path});
+  auto snapshot = std::make_unique<mesh_cache::BinaryMesh>();
+  auto handle = build_mesh_from_parsed(*asset, gltf_dir, fs_path, renderer,
+                                       opts, NullableVFSPath{path},
+                                       snapshot.get());
+  if (!handle)
+    return handle;
+
+  // Compress + write in the background — never blocks the caller on a cache
+  // miss, and a write failure is not fatal (next cold load just retries it).
+  // The future is intentionally not awaited; any failure is caught and
+  // logged inside the task itself so nothing is silently dropped.
+  [[maybe_unused]] auto write_task = renderer.thread_pool.submit_task(
+      [snapshot = std::move(snapshot), cache_path, source_hash]() mutable {
+        try {
+          info("mesh cache: background write starting for '{}'",
+               cache_path.view());
+          auto bytes = mesh_cache::serialize(*snapshot, source_hash);
+          std::filesystem::create_directories(
+              VFS::get().resolve(cache_path).parent_path());
+          auto stream = VFS::get().resolve_to_output_stream(cache_path);
+          if (!stream) {
+            warn("mesh cache write failed for '{}': {}", cache_path.view(),
+                 stream.error());
+            return;
+          }
+          stream->write(reinterpret_cast<const char *>(bytes.data()),
+                       static_cast<std::streamsize>(bytes.size()));
+          info("mesh cache: wrote '{}' ({} bytes)", cache_path.view(),
+               bytes.size());
+        } catch (const std::exception &e) {
+          warn("mesh cache write threw for '{}': {}", cache_path.view(),
+               e.what());
+        }
+      });
+
+  return handle;
 }
 
 auto load_from_compressed(const VFSPath &archive_path, SceneRenderer &renderer,

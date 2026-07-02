@@ -310,7 +310,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       renderer->subimages);
 
   constexpr std::string_view sponza_path =
-      "meshes://Sponza/MISSING_main_sponza.glb";
+      "meshes://damaged_helmet/DamagedHelmet_6LOD.glb";
   if (auto loaded_sponza =
           asset_loader->load_mesh(VFSPath::create(sponza_path))) {
     auto sponza = active_scene->make("Sponza");

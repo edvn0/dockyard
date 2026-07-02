@@ -48,6 +48,7 @@ add_library(dockyard STATIC
         src/dockyard/imgui_renderer.cpp
         src/dockyard/pipeline_builder.cpp
         src/dockyard/mesh_loader.cpp
+        src/dockyard/mesh_cache.cpp
         src/dockyard/scene.cpp
         src/dockyard/shader_watcher.cpp
         src/dockyard/canvas_renderer.cpp
@@ -233,6 +234,7 @@ if(DOCKYARD_BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/test_skin_vertex.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_animation.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_physics.cpp
+                ${CMAKE_SOURCE_DIR}/tests/test_mesh_cache.cpp
         )
   target_enable_native_arch(dockyard-testing)
   target_precompile_headers(dockyard-testing REUSE_FROM dockyard)
