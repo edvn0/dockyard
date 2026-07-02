@@ -30,8 +30,8 @@ void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID,
                            pc.frame_data.camera_pos.xyz,
                            pc.frame_data.camera_far * pc.frame_data.camera_far);
 
-  // if (!cull.visible)
-  //   return;
+  if (!cull.visible)
+     return;
 
   uint depth_base_cmd_id = pc.depth_instance_to_command[item_idx];
   if (depth_base_cmd_id != 0xFFFFFFFF) {

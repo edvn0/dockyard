@@ -673,6 +673,7 @@ auto Texture::from_bytes(const VulkanContext &ctx, std::string_view name,
     usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
   if (ci.storage_view)
     usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+  usage |= ci.extra_usage;
 
   const VkImageCreateInfo image_ci{
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,

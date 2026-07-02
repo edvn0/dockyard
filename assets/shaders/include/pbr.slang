@@ -33,3 +33,18 @@ float geometry_smith(float3 n, float3 v, float3 l, float roughness)
     float ndotl = max(dot(n, l), 0.0f);
     return geometry_schlick_ggx(ndotv, roughness) * geometry_schlick_ggx(ndotl, roughness);
 }
+
+// IBL split-sum uses a different k than analytic lights (Karis, "Real Shading
+// in Unreal Engine 4"): k_ibl = roughness^2 / 2, vs k_direct = (roughness+1)^2 / 8.
+float geometry_schlick_ggx_ibl(float ndotx, float roughness)
+{
+    float k = (roughness * roughness) / 2.0f;
+    return ndotx / (ndotx * (1.0f - k) + k);
+}
+
+float geometry_smith_ibl(float3 n, float3 v, float3 l, float roughness)
+{
+    float ndotv = max(dot(n, v), 0.0f);
+    float ndotl = max(dot(n, l), 0.0f);
+    return geometry_schlick_ggx_ibl(ndotv, roughness) * geometry_schlick_ggx_ibl(ndotl, roughness);
+}

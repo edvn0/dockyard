@@ -4,13 +4,101 @@
 #include <volk.h>
 
 #include <dockyard/app.hpp>
+#include <dockyard/buffer.hpp>
 #include <dockyard/events.hpp>
 #include <dockyard/log.hpp>
 #include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene_renderer.hpp>
+#include <dockyard/vfs.hpp>
 #include <dockyard/vk_check.hpp>
 
+#include <array>
+#include <optional>
+
 namespace dy {
+
+namespace {
+constexpr u32 brdf_lut_size = 512u;
+constexpr u32 brdf_lut_bytes_per_pixel = 4u; // VK_FORMAT_R16G16_SFLOAT
+constexpr u32 brdf_lut_cache_magic = 0x55524C42u; // 'BLRU'
+constexpr u32 brdf_lut_cache_version = 1u;
+
+// Sources that affect the generated LUT contents — cache is invalidated
+// whenever any of these change, so shader edits never serve stale data.
+constexpr std::array brdf_lut_source_paths = {
+    "shaders://ibl/brdf_lut_gen.slang",
+    "shaders://include/ibl.slang",
+    "shaders://include/pbr.slang",
+    "shaders://include/constants.slang",
+};
+
+struct BrdfLutCacheHeader {
+  u32 magic;
+  u32 version;
+  u32 width;
+  u32 height;
+  u64 source_hash;
+};
+
+[[nodiscard]] auto hash_brdf_lut_sources() -> u64 {
+  u64 h = 14695981039346656037ULL;
+  for (const char *path : brdf_lut_source_paths) {
+    auto bytes = VFS::get().read_bytes(VFSPath::create(path));
+    if (!bytes)
+      continue;
+    h ^= hash_bytes(bytes->data(), bytes->size());
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+[[nodiscard]] auto brdf_lut_cache_path() -> VFSPath {
+  return VFSPath::create("binary://brdf_lut_{}.cache", brdf_lut_size);
+}
+
+[[nodiscard]] auto load_cached_brdf_lut(u64 expected_hash)
+    -> std::optional<std::vector<std::byte>> {
+  auto stream = VFS::get().resolve_to_input_stream(brdf_lut_cache_path());
+  if (!stream)
+    return std::nullopt;
+
+  BrdfLutCacheHeader header{};
+  stream->read(reinterpret_cast<char *>(&header), sizeof(header));
+  if (!*stream || header.magic != brdf_lut_cache_magic ||
+      header.version != brdf_lut_cache_version ||
+      header.width != brdf_lut_size || header.height != brdf_lut_size ||
+      header.source_hash != expected_hash)
+    return std::nullopt;
+
+  const usize pixel_bytes =
+      usize{header.width} * header.height * brdf_lut_bytes_per_pixel;
+  std::vector<std::byte> pixels(pixel_bytes);
+  stream->read(reinterpret_cast<char *>(pixels.data()),
+              static_cast<std::streamsize>(pixel_bytes));
+  if (!*stream)
+    return std::nullopt;
+  return pixels;
+}
+
+auto save_cached_brdf_lut(u64 source_hash, std::span<const std::byte> pixels)
+    -> void {
+  auto stream = VFS::get().resolve_to_output_stream(brdf_lut_cache_path());
+  if (!stream) {
+    warn("Failed to write BRDF LUT cache: {}", stream.error());
+    return;
+  }
+  const BrdfLutCacheHeader header{
+      .magic = brdf_lut_cache_magic,
+      .version = brdf_lut_cache_version,
+      .width = brdf_lut_size,
+      .height = brdf_lut_size,
+      .source_hash = source_hash,
+  };
+  stream->write(reinterpret_cast<const char *>(&header), sizeof(header));
+  stream->write(reinterpret_cast<const char *>(pixels.data()),
+               static_cast<std::streamsize>(pixels.size()));
+}
+} // namespace
 
 auto RendererListener::on_swapchain_invalidated(
     const events::SwapchainInvalidated &e) const -> void {
@@ -145,52 +233,56 @@ auto ViewportResources::resize(const VulkanContext &ctx,
     }
   };
 
-  resize_or_create(depth_resolved_target, [&] {
-    return Texture::create(
-        ctx, "depth_resolved_target", w, h, VK_FORMAT_D32_SFLOAT,
-        VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
-  });
+  for (u32 i = 0; i < frames_in_flight; ++i) {
+    resize_or_create(depth_resolved_target[i], [&] {
+      return Texture::create(
+          ctx, "depth_resolved_target", w, h, VK_FORMAT_D32_SFLOAT,
+          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+              VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+          VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
+    });
 
-  resize_or_create(depth_pre_hiz, [&] {
-    return Texture::create(
-        ctx, "depth_pre_hiz", w, h, VK_FORMAT_R32_SFLOAT,
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-            VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
-  });
+    resize_or_create(depth_pre_hiz[i], [&] {
+      return Texture::create(
+          ctx, "depth_pre_hiz", w, h, VK_FORMAT_R32_SFLOAT,
+          VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+              VK_IMAGE_USAGE_STORAGE_BIT,
+          VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
+    });
+  }
 
   u32 hiz_w = std::max(1U, w / 2);
   u32 hiz_h = std::max(1U, h / 2);
   u32 hiz_mips = static_cast<u32>(std::bit_width(std::max(hiz_w, hiz_h)));
 
-  if (hierarchical_depth_pyramid_target.valid()) {
-    renderer.textures.get(hierarchical_depth_pyramid_target)
-        ->texture.destroy(ctx, &renderer.textures);
+  for (u32 i = 0; i < frames_in_flight; ++i) {
+    auto &pyramid_handle = hierarchical_depth_pyramid_target[i];
+    if (pyramid_handle.valid()) {
+      renderer.textures.get(pyramid_handle)->texture.destroy(
+          ctx, &renderer.textures);
 
-    // Build the new pyramid outside the pool: register_sub_views calls
-    // texture_pool.create() which can reallocate pool_slots, invalidating any
-    // pointer into the pool obtained before the call.
-    auto new_pyramid = Texture::create(
-        ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips, true);
-    new_pyramid.register_sub_views(ctx, renderer.textures, renderer.bindless);
+      // Build the new pyramid outside the pool: register_sub_views calls
+      // texture_pool.create() which can reallocate pool_slots, invalidating
+      // any pointer into the pool obtained before the call.
+      auto new_pyramid = Texture::create(
+          ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+          VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips, true);
+      new_pyramid.register_sub_views(ctx, renderer.textures, renderer.bindless);
 
-    // Re-fetch: pool_slots may have been reallocated during register_sub_views.
-    renderer.textures.get(hierarchical_depth_pyramid_target)->texture =
-        std::move(new_pyramid);
-  } else {
-    auto tex = Texture::create(
-        ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips, true);
-    tex.register_sub_views(ctx, renderer.textures, renderer.bindless);
-    hierarchical_depth_pyramid_target = renderer.textures.create(TextureEntry{
-        .texture = std::move(tex),
-        .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
-    });
+      // Re-fetch: pool_slots may have been reallocated during register_sub_views.
+      renderer.textures.get(pyramid_handle)->texture = std::move(new_pyramid);
+    } else {
+      auto tex = Texture::create(
+          ctx, "hiz_pyramid_target", hiz_w, hiz_h, VK_FORMAT_R32_SFLOAT,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+          VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, hiz_mips, true);
+      tex.register_sub_views(ctx, renderer.textures, renderer.bindless);
+      pyramid_handle = renderer.textures.create(TextureEntry{
+          .texture = std::move(tex),
+          .sampled_view_type = VK_IMAGE_VIEW_TYPE_2D,
+      });
+    }
   }
 
   resize_or_create(forward_target, [&] {
@@ -252,7 +344,8 @@ auto ViewportResources::resize(const VulkanContext &ctx,
   resize_or_create(display_target, [&] {
     return Texture::create(
         ctx, "display_target", w, h, VK_FORMAT_R8G8B8A8_SRGB,
-        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         VK_IMAGE_ASPECT_COLOR_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
   });
 }
@@ -863,17 +956,27 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
                               }),
       VK_IMAGE_VIEW_TYPE_CUBE);
 
-  auto bytes = std::vector<std::byte>(512u * 512u * sizeof(u32), {});
-  probe.brdf_lut =
-      register_tex(Texture::from_bytes(ctx, "ibl/brdf_lut",
-                                       {
-                                           .bytes = std::span(bytes),
-                                           .width = 512u,
-                                           .height = 512u,
-                                           .format = VK_FORMAT_R16G16_SFLOAT,
-                                           .storage_view = true,
-                                       }),
-                   VK_IMAGE_VIEW_TYPE_2D);
+  const u64 brdf_lut_source_hash = hash_brdf_lut_sources();
+  std::optional<std::vector<std::byte>> cached_brdf_lut =
+      load_cached_brdf_lut(brdf_lut_source_hash);
+  if (cached_brdf_lut)
+    info("IBL: loaded cached BRDF LUT (skipping regeneration)");
+
+  auto placeholder_bytes = std::vector<std::byte>(
+      usize{brdf_lut_size} * brdf_lut_size * brdf_lut_bytes_per_pixel, {});
+  probe.brdf_lut = register_tex(
+      Texture::from_bytes(
+          ctx, "ibl/brdf_lut",
+          {
+              .bytes = cached_brdf_lut ? std::span(*cached_brdf_lut)
+                                       : std::span(placeholder_bytes),
+              .width = brdf_lut_size,
+              .height = brdf_lut_size,
+              .format = VK_FORMAT_R16G16_SFLOAT,
+              .storage_view = true,
+              .extra_usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+          }),
+      VK_IMAGE_VIEW_TYPE_2D);
 
   auto register_cube_sub_views = [&](TextureHandle h) {
     auto &tex = renderer.textures.get(h)->texture;
@@ -993,16 +1096,32 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
     vkCmdPipelineBarrier2(cmd, &dep);
   };
 
+  const VkDeviceSize brdf_lut_byte_size =
+      VkDeviceSize{brdf_lut_size} * brdf_lut_size * brdf_lut_bytes_per_pixel;
+  std::unique_ptr<Buffer> brdf_lut_readback =
+      cached_brdf_lut ? nullptr
+                      : Buffer::create(ctx.allocator, "brdf_lut_readback",
+                                       brdf_lut_byte_size,
+                                       VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
+  const auto env_entry = renderer.textures.get(probe.env_map);
+  const auto irr_entry = renderer.textures.get(probe.irradiance);
+  const auto pref_entry = renderer.textures.get(probe.prefiltered);
+  const auto lut_entry = renderer.textures.get(probe.brdf_lut);
+
+  // Each IBL pass gets its own fenced submission rather than one giant batch.
+  // Windows' GPU driver watchdog (TDR) kills any single uninterrupted GPU
+  // submission that runs past ~2 seconds; the specular prefilter alone (1024
+  // samples/texel across a 512x512x6 cubemap's full mip chain) is heavy
+  // enough that bundling every pass together risked exceeding that window
+  // (observed as VK_ERROR_DEVICE_LOST on startup in Release builds, where
+  // there's no validation-layer overhead to inadvertently keep it under the
+  // limit).
   PROFILE_SCOPE("Full compute");
-  ctx.one_time_submit([&](VkCommandBuffer cmd) {
-    PROFILE_SCOPE("Inner submission");
 
-    const auto env_entry = renderer.textures.get(probe.env_map);
-    const auto irr_entry = renderer.textures.get(probe.irradiance);
-    const auto pref_entry = renderer.textures.get(probe.prefiltered);
-    const auto lut_entry = renderer.textures.get(probe.brdf_lut);
-
-    {
+  {
+    PROFILE_SCOPE("IBL: equirect_to_cubemap");
+    ctx.one_time_submit([&](VkCommandBuffer cmd) {
       const VkImageMemoryBarrier2 init_barriers[] = {
           cube_barrier(env_entry->texture.image, 1u, VK_PIPELINE_STAGE_2_NONE,
                        VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -1024,9 +1143,7 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL),
       };
       submit_barriers(cmd, init_barriers);
-    }
 
-    {
       const auto &entry = renderer.pipeline_registry->get_entry(*pipe_equirect);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
@@ -1040,18 +1157,19 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
                          sizeof(pc), &pc);
       vkCmdDispatch(cmd, 64u, 64u, 6u);
-    }
 
-    {
       const VkImageMemoryBarrier2 b = cube_barrier(
           env_entry->texture.image, 1u, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
           VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
           VK_ACCESS_2_SHADER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
           VK_IMAGE_LAYOUT_GENERAL);
       submit_barriers(cmd, {&b, 1});
-    }
+    });
+  }
 
-    {
+  {
+    PROFILE_SCOPE("IBL: irradiance_convolve");
+    ctx.one_time_submit([&](VkCommandBuffer cmd) {
       const auto &entry =
           renderer.pipeline_registry->get_entry(*pipe_irradiance);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
@@ -1069,15 +1187,18 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
       const auto group_count_x = (target_size + 7u) / 8u;
       const auto group_count_y = (target_size + 7u) / 8u;
       vkCmdDispatch(cmd, group_count_x, group_count_y, 6u);
-    }
+    });
+  }
 
-    {
-      const auto &entry =
-          renderer.pipeline_registry->get_entry(*pipe_prefilter);
-      vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
-      vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
-                              0u, 1u, &renderer.bindless.set, 0u, nullptr);
-      for (u32 mip = 0u; mip < prefiltered_mips; ++mip) {
+  {
+    PROFILE_SCOPE("IBL: specular_prefilter");
+    const auto &entry = renderer.pipeline_registry->get_entry(*pipe_prefilter);
+    for (u32 mip = 0u; mip < prefiltered_mips; ++mip) {
+      ctx.one_time_submit([&](VkCommandBuffer cmd) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                entry.layout, 0u, 1u, &renderer.bindless.set,
+                                0u, nullptr);
         const u32 mip_size = std::max(1u, prefiltered_size >> mip);
         const u32 groups = std::max(1u, mip_size / 8u);
         const PushConstants pc{
@@ -1091,24 +1212,30 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
         vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
                            sizeof(pc), &pc);
         vkCmdDispatch(cmd, groups, groups, 6u);
-      }
+      });
     }
+  }
 
-    {
+  if (!cached_brdf_lut) {
+    PROFILE_SCOPE("IBL: brdf_lut_gen");
+    ctx.one_time_submit([&](VkCommandBuffer cmd) {
       const auto &entry = renderer.pipeline_registry->get_entry(*pipe_brdf_lut);
       vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.pipeline);
       vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, entry.layout,
                               0u, 1u, &renderer.bindless.set, 0u, nullptr);
       const PushConstants pc{
-          .size = 512u,
+          .size = brdf_lut_size,
           .out_index = probe.brdf_lut.index(),
       };
       vkCmdPushConstants(cmd, entry.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0u,
                          sizeof(pc), &pc);
-      vkCmdDispatch(cmd, 64u, 64u, 1u);
-    }
+      vkCmdDispatch(cmd, brdf_lut_size / 8u, brdf_lut_size / 8u, 1u);
+    });
+  }
 
-    {
+  {
+    PROFILE_SCOPE("IBL: finalize");
+    ctx.one_time_submit([&](VkCommandBuffer cmd) {
       const VkImageMemoryBarrier2 final_barriers[] = {
           cube_barrier(irr_entry->texture.image, 1u,
                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -1130,8 +1257,49 @@ auto IblProbe::create(const VulkanContext &ctx, SceneRenderer &renderer,
                            VK_IMAGE_LAYOUT_GENERAL),
       };
       submit_barriers(cmd, final_barriers);
-    }
-  });
+
+      if (brdf_lut_readback) {
+        const VkImageMemoryBarrier2 to_transfer_read = image_barrier_2d(
+            lut_entry->texture.image, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT, VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_GENERAL);
+        submit_barriers(cmd, {&to_transfer_read, 1});
+
+        const VkBufferImageCopy2 region{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_IMAGE_COPY_2,
+            .imageSubresource =
+                {
+                    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+                    .mipLevel = 0u,
+                    .baseArrayLayer = 0u,
+                    .layerCount = 1u,
+                },
+            .imageExtent = {.width = brdf_lut_size,
+                            .height = brdf_lut_size,
+                            .depth = 1u},
+        };
+        const VkCopyImageToBufferInfo2 copy_info{
+            .sType = VK_STRUCTURE_TYPE_COPY_IMAGE_TO_BUFFER_INFO_2,
+            .srcImage = lut_entry->texture.image,
+            .srcImageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .dstBuffer = brdf_lut_readback->get_buffer(),
+            .regionCount = 1u,
+            .pRegions = &region,
+        };
+        vkCmdCopyImageToBuffer2(cmd, &copy_info);
+      }
+    });
+  }
+
+  if (brdf_lut_readback) {
+    brdf_lut_readback->invalidate();
+    save_cached_brdf_lut(
+        brdf_lut_source_hash,
+        std::span{static_cast<const std::byte *>(
+                      brdf_lut_readback->get_mapped_pointer()),
+                  static_cast<usize>(brdf_lut_byte_size)});
+  }
 
   renderer.pipeline_registry->destroy(*pipe_equirect, *pipe_irradiance,
                                       *pipe_prefilter, *pipe_brdf_lut);

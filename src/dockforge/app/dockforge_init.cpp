@@ -198,7 +198,7 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
   auto &&[w, h] = ctx.window_extent;
 
   editor_camera = std::make_unique<EditorCamera>(
-      get_window(), glm::vec3{0.F, 5.F, -6.F}, glm::vec3{0.F, 0.F, 0.F}, w, h);
+      get_window(), glm::vec3{0.F, 1.F, -4.F}, glm::vec3{0.F, 0.F, 0.F}, w, h);
   {
     imgui_renderer = std::make_unique<ImGuiRenderer>(
         get_window(), 16, *renderer,

@@ -43,6 +43,7 @@ add_library(dockyard STATIC
         src/dockyard/animation.cpp
         src/dockyard/bindless_descriptor.cpp
         src/dockyard/texture.cpp
+        src/dockyard/screenshot.cpp
         src/dockyard/scene_renderer.cpp
         src/dockyard/imgui_renderer.cpp
         src/dockyard/pipeline_builder.cpp

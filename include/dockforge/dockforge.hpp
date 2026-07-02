@@ -12,6 +12,7 @@
 #include <dockyard/script_engine.hpp>
 #include <dockyard/vfs_path.hpp>
 
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -79,6 +80,7 @@ struct Dockforge : App {
   ViewportResources viewport_resources;
 
   std::optional<glm::vec2> pending_pick;
+  std::optional<std::filesystem::path> pending_screenshot_path;
   GizmoOp gizmo_op = GizmoOp::Translate;
   GizmoMode gizmo_mode = GizmoMode::Local; // only applied when gizmo_op == Translate
   VkExtent2D viewport_panel_extent{};
@@ -143,6 +145,7 @@ struct Dockforge : App {
   auto flush_material_overrides() -> void;
   auto patch_material_override_slots(u32 delta) -> void;
   auto draw_hdr_selector() -> void;
+  auto capture_screenshot() -> void;
 
   auto configure_window_hints() -> void override;
   auto destroy() -> void override;

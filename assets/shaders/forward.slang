@@ -6,6 +6,12 @@ import clustering;
 
 static const float PI = 3.14159265359f;
 
+// distribution_ggx() is 0/0 (NaN) at roughness == 0 exactly when NdotH == 1
+// (a perfect mirror reflection direction) — a real hazard on assets with
+// near-zero roughness regions (e.g. chrome-like metal). Matches the minimum
+// used by the Khronos glTF Sample Viewer / Filament.
+static const float min_roughness = 0.045f;
+
 // OPTIMIZATION: Stripped down interpolators to bare minimum to save parameter
 // cache space.
 struct V2F {
@@ -19,6 +25,15 @@ struct V2F {
   float2 uv1 : TEXCOORD3;
 };
 
+// Resolved shading inputs, regardless of which glTF workflow produced them
+// (metallic-roughness or KHR_materials_pbrSpecularGlossiness).
+struct SurfaceParams {
+  float roughness;
+  float metallic;
+  float3 f0;
+  float ao;
+};
+
 float4 sample_material_tex(uint idx, float2 uv) {
   return sampled_images[NonUniformResourceIndex(idx)].Sample(samplers[1], uv);
 }
@@ -26,6 +41,173 @@ float4 sample_material_tex(uint idx, float2 uv) {
 // Select UV0 or UV1 based on a bit in the material's uv_channel_mask.
 float2 mat_uv(float2 uv0, float2 uv1, uint mask, uint bit) {
   return ((mask >> bit) & 1u) ? uv1 : uv0;
+}
+
+float clamp_roughness(float roughness) {
+  return clamp(roughness, min_roughness, 1.0f);
+}
+
+float4 sample_albedo(V2F input, GPUMaterial mat) {
+  return sample_material_tex(
+             mat.albedo_index,
+             mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_albedo)) *
+         mat.albedo_factor;
+}
+
+// Decode the tangent-space normal map sample into a world-space normal.
+float3 sample_shading_normal(V2F input, GPUMaterial mat, float3 geom_n) {
+  float3 t =
+      normalize(input.tangent.xyz - dot(input.tangent.xyz, geom_n) * geom_n);
+  float3 b = cross(geom_n, t) * input.tangent.w;
+  float3x3 tbn = float3x3(t, b, geom_n);
+
+  float4 normal_sample = sample_material_tex(
+      mat.normal_index,
+      mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_normal));
+  float2 normal_xy = normal_sample.rg * 2.0f - 1.0f;
+  normal_xy *= mat.normal_scale;
+
+  float3 sampled_n;
+  sampled_n.xy = normal_xy;
+  sampled_n.z = sqrt(1.0f - dot(sampled_n.xy, sampled_n.xy));
+  return normalize(mul(sampled_n, tbn));
+}
+
+// KHR_materials_pbrSpecularGlossiness: specular/glossiness texture (RGB =
+// specular, A = glossiness). metallic_factor holds glossiness_factor;
+// specular_factor holds the F0 tint.
+SurfaceParams resolve_spec_gloss_workflow(V2F input, GPUMaterial mat) {
+  SurfaceParams surface;
+
+  float4 sg = sample_material_tex(
+      mat.specular_glossiness_index,
+      mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_specgloss));
+  float glossiness = sg.a * mat.metallic_factor;
+  surface.roughness = clamp_roughness(1.0f - glossiness);
+  surface.f0 = sg.rgb * mat.specular_factor;
+  surface.metallic = 0.0f;
+
+  surface.ao = 1.0f;
+  if ((mat.flags & MaterialFlags::no_occlusion) == MaterialFlags::none) {
+    float occlusion =
+        sample_material_tex(
+            mat.occlusion_index,
+            mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_occlusion))
+            .r;
+    surface.ao = saturate(1.0f + mat.occlusion_strength * (occlusion - 1.0f));
+  }
+  return surface;
+}
+
+// Default glTF metallic-roughness workflow (metallicRoughnessTexture: R =
+// occlusion if combined, G = roughness, B = metallic).
+SurfaceParams resolve_metallic_roughness_workflow(V2F input, GPUMaterial mat,
+                                                  float3 albedo_rgb) {
+  SurfaceParams surface;
+
+  float4 mr = sample_material_tex(
+      mat.metallic_roughness_index,
+      mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_mr));
+  surface.roughness = clamp_roughness(mr.g * mat.roughness_factor);
+  surface.metallic = clamp(mr.b * mat.metallic_factor, 0.00f, 1.0f);
+
+  // KHR_materials_specular: tint dielectric F0 by specularColorFactor *
+  // specularColorTexture.
+  float3 spec_color =
+      mat.specular_color_factor *
+      sample_material_tex(
+          mat.specular_color_index,
+          mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_speccolor))
+          .rgb;
+  float3 f0_dielectric = min(float3(0.04F) * spec_color, float3(1.0f));
+  surface.f0 = lerp(f0_dielectric, albedo_rgb, surface.metallic);
+
+  surface.ao = 1.0f;
+  if ((mat.flags & MaterialFlags::combined_orm) != MaterialFlags::none) {
+    surface.ao = saturate(1.0f + mat.occlusion_strength * (mr.r - 1.0f));
+  } else if ((mat.flags & MaterialFlags::no_occlusion) ==
+             MaterialFlags::none) {
+    float occlusion =
+        sample_material_tex(
+            mat.occlusion_index,
+            mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_occlusion))
+            .r;
+    surface.ao = saturate(1.0f + mat.occlusion_strength * (occlusion - 1.0f));
+  }
+  return surface;
+}
+
+SurfaceParams resolve_surface_params(V2F input, GPUMaterial mat,
+                                     float3 albedo_rgb) {
+  if ((mat.flags & MaterialFlags::spec_gloss_workflow) != MaterialFlags::none)
+    return resolve_spec_gloss_workflow(input, mat);
+  return resolve_metallic_roughness_workflow(input, mat, albedo_rgb);
+}
+
+float3 sample_emissive(V2F input, GPUMaterial mat) {
+  return sample_material_tex(
+             mat.emissive_index,
+             mat_uv(input.uv, input.uv1, mat.uv_channel_mask,
+                    uv_ch_emissive))
+             .rgb *
+         mat.emissive_factor.xyz * mat.emissive_factor.a;
+}
+
+// Direct analytic sun light: Cook-Torrance specular + Lambertian diffuse.
+float3 evaluate_sun_light(float3 n, float3 geom_n, float3 v, float ndotv_safe,
+                          float3 sun_dir, float3 albedo_rgb, float roughness,
+                          float metallic, float3 f0) {
+  const float3 sun_color = float3(1.0f, 0.95f, 0.8f);
+
+  float3 h = normalize(v + sun_dir);
+  float ndotl = max(dot(n, sun_dir), 0.0f);
+
+  // Soft horizon fade where the shading normal diverges from the geometric
+  // normal, to avoid hard light leaking on grazing normal-mapped surfaces.
+  float horizon = saturate(1.0f + dot(geom_n, sun_dir));
+  ndotl *= horizon * horizon;
+
+  float3 f = fresnel_schlick(max(dot(h, v), 0.0f), f0);
+  float ndf = distribution_ggx(n, h, roughness);
+  float g = geometry_smith(n, v, sun_dir, roughness);
+
+  float3 specular = (ndf * g * f) / max(4.0f * ndotv_safe * ndotl, 1e-4f);
+  float3 kd = (1.0f - f) * (1.0f - metallic);
+  float3 diffuse = kd * albedo_rgb / PI;
+
+  return (diffuse + specular) * sun_color * ndotl;
+}
+
+// Image-based ambient lighting: diffuse irradiance + prefiltered specular,
+// combined via the split-sum approximation (env_brdf = [scale, bias]).
+float3 evaluate_ibl_ambient(
+    Ptr<FrameUBO, Access.Read, AddressSpace.Device> frame_data, float3 n,
+    float3 v, float ndotv_safe, float3 albedo_rgb, float roughness,
+    float metallic, float3 f0, float ao) {
+  float3 irradiance =
+      sampled_cubemaps[NonUniformResourceIndex(frame_data.ibl_irradiance_index)]
+          .Sample(samplers[frame_data.ibl_sampler_index], n)
+          .rgb;
+
+  float3 r = reflect(-v, n);
+  float env_mip = roughness * float(frame_data.ibl_prefiltered_mips - 1u);
+  float3 prefiltered =
+      sampled_cubemaps[NonUniformResourceIndex(
+                           frame_data.ibl_prefiltered_index)]
+          .SampleLevel(samplers[frame_data.ibl_sampler_index], r, env_mip)
+          .rgb;
+
+  float2 env_brdf =
+      sampled_images[NonUniformResourceIndex(frame_data.ibl_brdf_lut_index)]
+          .Sample(samplers[0], float2(ndotv_safe, roughness))
+          .rg;
+
+  float3 f_ibl = fresnel_schlick_roughness(ndotv_safe, f0, roughness);
+  float3 kd_ibl = (1.0f - f_ibl) * (1.0f - metallic);
+
+  float3 diffuse_ibl = kd_ibl * albedo_rgb * irradiance;
+  float3 specular_ibl = prefiltered * (f0 * env_brdf.r + env_brdf.g);
+  return (diffuse_ibl + specular_ibl) * ao;
 }
 
 // Evaluate PBR contribution from all point lights visible to this cluster tile.
@@ -136,148 +318,37 @@ float4 fragmentMain(V2F input, uniform GpuPushConstants pc) : SV_Target {
   GPUMaterial mat =
       pc.material_buffer_ptr[NonUniformResourceIndex(input.material_id)];
 
-  float4 albedo =
-      sample_material_tex(
-          mat.albedo_index,
-          mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_albedo)) *
-      mat.albedo_factor;
+  float4 albedo = sample_albedo(input, mat);
 
   [branch]
   if (mat.alpha_mode == 1u && albedo.a < mat.alpha_cutoff)
     discard;
 
   float3 geom_n = normalize(input.normal);
-  float3 t =
-      normalize(input.tangent.xyz - dot(input.tangent.xyz, geom_n) * geom_n);
-  float3 b = cross(geom_n, t) * input.tangent.w;
-  float3x3 tbn = float3x3(t, b, geom_n);
+  float3 n = sample_shading_normal(input, mat, geom_n);
 
-  float4 normal_sample = sample_material_tex(
-      mat.normal_index,
-      mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_normal));
-  float2 normal_xy = normal_sample.rg * 2.0f - 1.0f;
-  normal_xy *= mat.normal_scale;
-
-  float3 sampled_n;
-  sampled_n.xy = normal_xy;
-  sampled_n.z = sqrt(1.0f - dot(sampled_n.xy, sampled_n.xy));
-  float3 n = normalize(mul(sampled_n, tbn));
-
-  float roughness;
-  float metallic;
-  float3 f0;
-  float ao = 1.0f;
-
-  [branch]
-  if ((mat.flags & MaterialFlags::spec_gloss_workflow) != MaterialFlags::none) {
-    // KHR_materials_pbrSpecularGlossiness: specular/glossiness texture
-    // (RGB=specular, A=glossiness). metallic_factor holds glossiness_factor;
-    // specular_factor holds the F0 tint.
-    float4 sg = sample_material_tex(
-        mat.specular_glossiness_index,
-        mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_specgloss));
-    float glossiness = sg.a * mat.metallic_factor;
-    roughness = clamp(1.0f - glossiness, 0.0f, 1.0f);
-    f0 = sg.rgb * mat.specular_factor;
-    metallic = 0.0f;
-    if ((mat.flags & MaterialFlags::no_occlusion) == MaterialFlags::none) {
-      float occlusion =
-          sample_material_tex(
-              mat.occlusion_index,
-              mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_occlusion))
-              .r;
-      ao = saturate(1.0f + mat.occlusion_strength * (occlusion - 1.0f));
-    }
-  } else {
-    // Metallic-roughness (default glTF PBR workflow).
-    float4 mr = sample_material_tex(
-        mat.metallic_roughness_index,
-        mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_mr));
-    roughness = clamp(mr.g * mat.roughness_factor, 0.00f, 1.0f);
-    metallic = clamp(mr.b * mat.metallic_factor, 0.00f, 1.0f);
-    // KHR_materials_specular: tint dielectric F0 by specularColorFactor *
-    // specularColorTexture.
-    float3 spec_color =
-        mat.specular_color_factor *
-        sample_material_tex(
-            mat.specular_color_index,
-            mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_speccolor))
-            .rgb;
-    float3 f0_dielectric = min(float3(0.04F) * spec_color, float3(1.0f));
-    f0 = lerp(f0_dielectric, albedo.rgb, metallic);
-    if ((mat.flags & MaterialFlags::combined_orm) != MaterialFlags::none) {
-      ao = saturate(1.0f + mat.occlusion_strength * (mr.r - 1.0f));
-    } else if ((mat.flags & MaterialFlags::no_occlusion) ==
-               MaterialFlags::none) {
-      float occlusion =
-          sample_material_tex(
-              mat.occlusion_index,
-              mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_occlusion))
-              .r;
-      ao = saturate(1.0f + mat.occlusion_strength * (occlusion - 1.0f));
-    }
-  }
-
-  float3 emissive =
-      sample_material_tex(
-          mat.emissive_index,
-          mat_uv(input.uv, input.uv1, mat.uv_channel_mask, uv_ch_emissive))
-          .rgb *
-      mat.emissive_factor.xyz * mat.emissive_factor.a;
+  SurfaceParams surface = resolve_surface_params(input, mat, albedo.rgb);
+  float3 emissive = sample_emissive(input, mat);
 
   float3 v = normalize(pc.frame_ubo.camera_pos.xyz - input.world_pos);
   float ndotv_safe = max(dot(n, v), 1e-5f);
+  float3 sun_dir = normalize(pc.frame_ubo.sun_direction.xyz);
 
-  const float3 sun_color = float3(1.0f, 0.95f, 0.8f);
-  const float3 sun_dir = normalize(pc.frame_ubo.sun_direction.xyz);
-
-  float3 h = normalize(v + sun_dir);
-  float ndotl = max(dot(n, sun_dir), 0.0f);
-
-  float horizon = saturate(1.0f + dot(geom_n, sun_dir));
-  ndotl *= horizon * horizon;
-
-  float3 f = fresnel_schlick(max(dot(h, v), 0.0f), f0);
-  float ndf = distribution_ggx(n, h, roughness);
-  float g = geometry_smith(n, v, sun_dir, roughness);
-
-  float3 specular = (ndf * g * f) / max(4.0f * ndotv_safe * ndotl, 1e-4f);
-  float3 kd = (1.0f - f) * (1.0f - metallic);
-  float3 diffuse = kd * albedo.rgb / PI;
-
-  float3 direct = (diffuse + specular) * sun_color * ndotl;
-
-  float3 irradiance = sampled_cubemaps[NonUniformResourceIndex(
-                                           pc.frame_ubo.ibl_irradiance_index)]
-                          .Sample(samplers[pc.frame_ubo.ibl_sampler_index], n)
-                          .rgb;
-
-  float3 r = reflect(-v, n);
-  float env_mip = roughness * float(pc.frame_ubo.ibl_prefiltered_mips - 1u);
-  float3 prefiltered =
-      sampled_cubemaps[NonUniformResourceIndex(
-                           pc.frame_ubo.ibl_prefiltered_index)]
-          .SampleLevel(samplers[pc.frame_ubo.ibl_sampler_index], r, env_mip)
-          .rgb;
-
-  float2 env_brdf =
-      sampled_images[NonUniformResourceIndex(pc.frame_ubo.ibl_brdf_lut_index)]
-          .Sample(samplers[0], float2(ndotv_safe, roughness))
-          .rg;
-
-  float3 f_ibl = fresnel_schlick_roughness(ndotv_safe, f0, roughness);
-  float3 kd_ibl = (1.0f - f_ibl) * (1.0f - metallic);
-
-  float3 diffuse_ibl = kd_ibl * albedo.rgb * irradiance;
-  float3 specular_ibl = prefiltered * (f0 * env_brdf.r + env_brdf.g);
-  float3 ambient = (diffuse_ibl + specular_ibl) * ao;
+  float3 direct =
+      evaluate_sun_light(n, geom_n, v, ndotv_safe, sun_dir, albedo.rgb,
+                        surface.roughness, surface.metallic, surface.f0);
+  float3 ambient =
+      evaluate_ibl_ambient(pc.frame_ubo, n, v, ndotv_safe, albedo.rgb,
+                           surface.roughness, surface.metallic, surface.f0,
+                           surface.ao);
 
   var shadow_result =
       compute_shadow(input.world_pos, geom_n, sun_dir, *pc.frame_ubo);
 
   float3 point_light_contribution = evaluate_clustered_lights(
       pc.frame_ubo, input.pos, input.world_pos, n, v, ndotv_safe, albedo.rgb,
-      roughness, metallic, f0, pc.cluster_list_ptr, pc.light_list_ptr);
+      surface.roughness, surface.metallic, surface.f0, pc.cluster_list_ptr,
+      pc.light_list_ptr);
 
   float3 final_color = (direct * shadow_result._0) + ambient + emissive +
                        point_light_contribution;

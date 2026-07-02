@@ -26,6 +26,8 @@ assets/textures/**/*.ktx2
 !assets/textures/env/*.ktx2
 assets/textures/**/*.ktx
 
-assets/binary/**/* 
+assets/binary/**/*
+
+assets/screenshots/
 
 dockyard_crash*

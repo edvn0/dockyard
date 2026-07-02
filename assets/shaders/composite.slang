@@ -1,6 +1,5 @@
 import bindless;
 import handle;
-import tonemap;
 
 struct CompositePushConstants {
   TextureHandle forward_output;
@@ -47,8 +46,12 @@ float4 fragmentMain(V2F input, uniform CompositePushConstants pc) : SV_Target {
   float exposure = 1.0F;
   hdr *= exposure;
 
+  // A second, AgX-specific "punchy look" pass used to run on top of this ACES
+  // curve (tonemap.slang: agx_look_punchy). That pass is only valid following
+  // the matching AgX log-encode step, and its lerp(luma, punchy, 1.1)
+  // extrapolation over-saturates non-AgX input — stacking it here was the
+  // source of the "wonky" PBR look. ACES alone is the tonemap.
   float3 ldr = tonemap_aces(hdr);
-  ldr = agx_look_punchy(ldr);
 
   // _SRGB swapchain target applies gamma automatically
   return float4(ldr, 1.0);

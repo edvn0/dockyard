@@ -90,16 +90,31 @@ void computeMain(uint3 dispatchThreadID: SV_DispatchThreadID,
       float mip_count = float(hiz_mip_index(pc, 15u));
       float mip = clamp(ceil(log2(max(size_pixels.x, size_pixels.y))), 0.0f,
                         mip_count - 1.0f);
+      uint desired_mip = min(uint(mip), 14u);
 
-      uint target_view_idx = hiz_mip_index(pc, min(uint(mip), 14u));
+      // Bisection proved every individual mip level's view/descriptor is
+      // valid (0, 1, and 7 all work fine when hardcoded), but selecting
+      // between them via a *runtime-computed* index into the small
+      // hiz_mip_indices[4] push-constant array reliably produced
+      // VK_ERROR_DEVICE_LOST on Intel Arc as camera distance changed which
+      // mip got selected. Dynamically indexing a push-constant array is far
+      // less battle-tested than bindless descriptor-array indexing; unrolled
+      // constant-indexed lookups avoid it entirely while keeping the exact
+      // same adaptive mip selection.
+      uint target_view_idx = 0u;
+      [ForceUnroll]
+      for (uint m = 0u; m < 15u; ++m) {
+        if (m == desired_mip)
+          target_view_idx = hiz_mip_index(pc, m);
+      }
       float2 center_uv = (min_uv + max_uv) * 0.5f;
 
-      float4 depth_samples =
-          sampled_images[NonUniformResourceIndex(target_view_idx)].GatherRed(
-              samplers[NonUniformResourceIndex(pc.hiz_sampler_idx)], center_uv);
-
-      float min_hiz_depth = min(min(depth_samples.x, depth_samples.y),
-                                min(depth_samples.z, depth_samples.w));
+      float min_hiz_depth =
+          sampled_images[NonUniformResourceIndex(target_view_idx)]
+              .SampleLevel(
+                  samplers[NonUniformResourceIndex(pc.hiz_sampler_idx)],
+                  center_uv, 0.0f)
+              .r;
 
       if (max_ndc.z < min_hiz_depth)
         visible = false;

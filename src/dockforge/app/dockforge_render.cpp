@@ -7,6 +7,7 @@
 #include <dockyard/crash_reporter.hpp>
 #include <dockyard/imgui_renderer.hpp>
 #include <dockyard/scene_renderer.hpp>
+#include <dockyard/screenshot.hpp>
 
 using namespace dy;
 
@@ -395,8 +396,8 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   {
     breadcrumb("depth_prepass");
     ZoneScopedNC("Dockforge::depth_prepass", 0xFF11AA);
-    const auto &resolve_target =
-        renderer->resolve(viewport_resources.depth_resolved_target);
+    const auto &resolve_target = renderer->resolve(
+        viewport_resources.depth_resolved_target.at(ctx.frame_index));
     VkRenderingAttachmentInfo depth_attachment{};
     depth_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     depth_attachment.imageView = viewport_resources.depth_msaa.sampled_view;
@@ -453,14 +454,15 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     breadcrumb("hiz_build");
     ZoneScopedNC("Dockforge::hiz_build", 0xDDA0DD);
     renderer->blit_depth_to_pre_hiz_pass(
-        ctx.main_cb, viewport_resources.depth_resolved_target,
-        viewport_resources.depth_pre_hiz);
+        ctx.main_cb, viewport_resources.depth_resolved_target.at(ctx.frame_index),
+        viewport_resources.depth_pre_hiz.at(ctx.frame_index));
     renderer->build_hierarchical_depth_pyramid_pass(
-        ctx.main_cb, viewport_resources.depth_pre_hiz,
-        viewport_resources.hierarchical_depth_pyramid_target);
+        ctx.main_cb, viewport_resources.depth_pre_hiz.at(ctx.frame_index),
+        viewport_resources.hierarchical_depth_pyramid_target.at(ctx.frame_index));
 
-    const auto &resolve_target =
-        renderer->resolve(viewport_resources.hierarchical_depth_pyramid_target);
+    const auto &resolve_target = renderer->resolve(
+        viewport_resources.hierarchical_depth_pyramid_target.at(
+            ctx.frame_index));
     VkImageMemoryBarrier2 hiz_barrier{
         .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
         .srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
@@ -482,7 +484,9 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
   {
     breadcrumb("forward_cull_pass");
     renderer->forward_occlusion_culling_pass(
-        ctx.main_cb, viewport_resources.hierarchical_depth_pyramid_target);
+        ctx.main_cb,
+        viewport_resources.hierarchical_depth_pyramid_target.at(
+            ctx.frame_index));
   }
   {
     breadcrumb("light_cluster_pass");
@@ -595,6 +599,23 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     composite_to_imgui.image = display_texture.image;
     composite_to_imgui.subresourceRange = color_range;
     emit_barrier(ctx.main_cb, composite_to_imgui);
+
+    if (pending_screenshot_path) {
+      breadcrumb("screenshot_capture");
+      auto readback = record_screenshot_copy(*context, ctx.main_cb,
+                                             display_texture,
+                                             *pending_screenshot_path);
+      if (readback) {
+        auto shared_readback =
+            std::make_shared<ScreenshotReadback>(std::move(*readback));
+        DeletionQueue::the().push([shared_readback] {
+          write_screenshot_png(*shared_readback);
+        });
+      } else {
+        error("Screenshot capture failed: {}", readback.error());
+      }
+      pending_screenshot_path.reset();
+    }
   }
   {
     breadcrumb("imgui_pass");

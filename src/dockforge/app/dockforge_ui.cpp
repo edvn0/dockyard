@@ -611,7 +611,29 @@ auto Dockforge::draw_toolbar() -> void {
     }
   }
 
+  ImGui::SameLine();
+  ImGui::TextDisabled("|");
+  ImGui::SameLine();
+  if (ImGui::Button("Screenshot##toolbar"))
+    capture_screenshot();
+
   ImGui::End();
+}
+
+auto Dockforge::capture_screenshot() -> void {
+  const auto dir = VFS::get().resolve(VFSPath::create("res://screenshots"));
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) {
+    error("Failed to create screenshot directory {}: {}", dir.string(),
+          ec.message());
+    return;
+  }
+
+  const auto timestamp =
+      std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+  const auto filename = std::format("screenshot_{:%Y%m%dT%H%M%S}.png", timestamp);
+  pending_screenshot_path = dir / filename;
 }
 
 auto Dockforge::build_ui() -> void {

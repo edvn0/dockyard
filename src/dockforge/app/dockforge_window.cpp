@@ -53,6 +53,9 @@ auto Dockforge::on_key_released(const events::KeyReleased &e) -> void {
       e.mods == (GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SHIFT)) {
     toggle_fullscreen(FullscreenMode::exclusive);
   }
+
+  if (e.key == GLFW_KEY_F12)
+    capture_screenshot();
 }
 
 auto Dockforge::resolve_camera() const -> std::pair<glm::mat4, glm::mat4> {

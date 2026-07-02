@@ -60,6 +60,7 @@ struct Texture {
     bool generate_mips{false};
     bool storage_view{false};
     bool dedicated_memory{false};
+    VkImageUsageFlags extra_usage{0};
   };
 
   static auto from_bytes(const VulkanContext &ctx, std::string_view name,

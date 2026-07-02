@@ -46,17 +46,17 @@
     {
       "name": "debug",
       "configurePreset": "ninja-debug",
-      "targets": ["sandbox", "dockforge", "gltf-imagemap", "dockyard-testing"]
+      "targets": ["dockforge", "gltf-imagemap", "dockyard-testing"]
     },
     {
       "name": "release",
       "configurePreset": "ninja-release",
-      "targets": ["sandbox", "dockforge", "gltf-imagemap", "dockyard-testing"]
+      "targets": ["dockforge", "gltf-imagemap", "dockyard-testing"]
     },
     {
       "name": "relwithdebinfo",
       "configurePreset": "ninja-relwithdebinfo",
-      "targets": ["sandbox", "dockforge", "gltf-imagemap", "dockyard-testing"]
+      "targets": ["dockforge", "gltf-imagemap", "dockyard-testing"]
     }
   ],
   "testPresets": [

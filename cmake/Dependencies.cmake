@@ -416,7 +416,7 @@ endif ()
 set(THIRD_PARTY_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/third_party")
 file(MAKE_DIRECTORY "${THIRD_PARTY_GENERATED_DIR}")
 file(WRITE "${THIRD_PARTY_GENERATED_DIR}/stb_impl.cpp"
-        "#define STB_IMAGE_IMPLEMENTATION\n#define STB_IMAGE_RESIZE_IMPLEMENTATION\n#include <stb_image.h>\n#include <stb_image_resize2.h>\n"
+        "#define STB_IMAGE_IMPLEMENTATION\n#define STB_IMAGE_RESIZE_IMPLEMENTATION\n#define STB_IMAGE_WRITE_IMPLEMENTATION\n#include <stb_image.h>\n#include <stb_image_resize2.h>\n#include <stb_image_write.h>\n"
 )
 
 add_library(ThirdPartySTB STATIC

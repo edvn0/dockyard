@@ -61,7 +61,7 @@ void VFS::initialize(const std::filesystem::path &assets_root) {
 auto VFS::resolve_to_output_stream(const VFSPath &path)
     -> std::expected<std::ofstream, std::string> {
   auto real_path = resolve(path);
-  std::ofstream f{real_path.string()};
+  std::ofstream f{real_path.string(), std::ios::binary};
   if (!f.is_open())
     return std::unexpected(
         std::format("Failed to open '{}' for writing", real_path.string()));
@@ -71,7 +71,7 @@ auto VFS::resolve_to_output_stream(const VFSPath &path)
 auto VFS::resolve_to_input_stream(const VFSPath &path)
     -> std::expected<std::ifstream, std::string> {
   auto real_path = resolve(path);
-  std::ifstream f{real_path.string()};
+  std::ifstream f{real_path.string(), std::ios::binary};
   if (!f.is_open())
     return std::unexpected(
         std::format("Failed to open '{}' for reading", real_path.string()));

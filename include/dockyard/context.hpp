@@ -127,11 +127,16 @@ struct ViewportResources {
   Texture forward_target_msaa{};
 
   TextureHandle forward_target{};
-  TextureHandle depth_resolved_target{};
-  TextureHandle depth_pre_hiz{};
+  // Read by one frame's occlusion-culling compute pass while the next
+  // frame's depth prepass / HiZ build is already writing new data — with
+  // frames_in_flight overlap and no cross-frame semaphore between them,
+  // a single shared instance is a write-after-read hazard. Double-buffered
+  // per frame-in-flight to give each frame its own copy.
+  FrameArray<TextureHandle> depth_resolved_target{};
+  FrameArray<TextureHandle> depth_pre_hiz{};
   TextureHandle display_target{};
 
-  TextureHandle hierarchical_depth_pyramid_target{};
+  FrameArray<TextureHandle> hierarchical_depth_pyramid_target{};
   TextureHandle bloom_chain{};
   TextureHandle bloom_scratch{};
 

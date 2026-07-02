@@ -208,38 +208,39 @@ function game.on_scene_load(scene, assets)
     end
     --]]
 
-	load_scene(scene, assets)
+	-- Walls/columns/humans test level disabled — default editor scene is a
+	-- single DamagedHelmet (see dockforge_init.cpp) for isolated PBR review.
+	-- load_scene(scene, assets)
 
-	-- Bistro courtyard load disabled for this test — walls scene only.
-	-- local bistro_path = "meshes://Bistro/BistroExterior.glb.zst"
-	-- local bistro_handle, err = assets:load_mesh(VFSPath.create(bistro_path), true)
-	-- if bistro_handle then
-	-- 	local e = scene:make("Bistro")
-	-- 	local mc = e:add_mesh()
-	-- 	mc.handle = bistro_handle
-	-- 	mc:set_source_path(bistro_path)
-	--
-	-- 	local tf = e:get_transform()
-	-- 	-- BistroExterior is already authored at real-world (meter) scale —
-	-- 	-- its node origins span roughly 85x30x110 units. Unlike the Fox model
-	-- 	-- below (authored in cm, needs 0.01), scaling this down would shrink
-	-- 	-- an ~85m courtyard to under a meter, leaving the player's spawn
-	-- 	-- point nowhere near the (now tiny) collision geometry.
-	-- 	tf.scale = vec3(1.0, 1.0, 1.0)
-	-- 	tf.rotation = quat_from_euler(0, 0, 0)
-	--
-	-- 	-- Static mesh collider built from the same asset's LOD0 geometry, so
-	-- 	-- the player collides with the actual courtyard shape rather than
-	-- 	-- falling through it. The entity's Transform (position/rotation/scale
-	-- 	-- above) is applied to the collision shape at Play time, same as the
-	-- 	-- visual mesh.
-	-- 	local col = e:add_collider()
-	-- 	col.shape = ColliderShape.Mesh
-	-- 	col:set_mesh_source_path(bistro_path)
-	-- 	e:add_rigid_body() -- mass defaults to 0 (static)
-	-- else
-	-- 	print("[sandbox] bistro load error: " .. (err or "?"))
-	-- end
+	local bistro_path = "meshes://Bistro/BistroExterior.glb.zst"
+	local bistro_handle, err = assets:load_mesh(VFSPath.create(bistro_path), true)
+	if bistro_handle then
+		local e = scene:make("Bistro")
+		local mc = e:add_mesh()
+		mc.handle = bistro_handle
+		mc:set_source_path(bistro_path)
+
+		local tf = e:get_transform()
+		-- BistroExterior is already authored at real-world (meter) scale —
+		-- its node origins span roughly 85x30x110 units. Unlike the Fox model
+		-- below (authored in cm, needs 0.01), scaling this down would shrink
+		-- an ~85m courtyard to under a meter, leaving the player's spawn
+		-- point nowhere near the (now tiny) collision geometry.
+		tf.scale = vec3(0.01, 0.01, 0.01)
+		tf.rotation = quat_from_euler(0, 0, 0)
+
+		-- Static mesh collider built from the same asset's LOD0 geometry, so
+		-- the player collides with the actual courtyard shape rather than
+		-- falling through it. The entity's Transform (position/rotation/scale
+		-- above) is applied to the collision shape at Play time, same as the
+		-- visual mesh.
+		local col = e:add_collider()
+		col.shape = ColliderShape.Mesh
+		col:set_mesh_source_path(bistro_path)
+		e:add_rigid_body() -- mass defaults to 0 (static)
+	else
+		print("[sandbox] bistro load error: " .. (err or "?"))
+	end
 end
 
 function game.begin_play(scene)

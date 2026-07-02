@@ -10,7 +10,8 @@ void computeMain(uint3 tid: SV_DispatchThreadID, uniform PushConstants pc) {
 
   float ndotv = (float(tid.x) + 0.5) / float(pc.size);
 
-  float roughness = 1.0 - (float(tid.y) + 0.5) / float(pc.size);
+  // Must increase with v to match forward.slang's Sample(uv=(ndotv, roughness)).
+  float roughness = (float(tid.y) + 0.5) / float(pc.size);
 
   float3 v = float3(sqrt(max(1.0 - ndotv * ndotv, 0.0)), 0.0, ndotv);
   float3 n = float3(0.0, 0.0, 1.0);
@@ -30,7 +31,7 @@ void computeMain(uint3 tid: SV_DispatchThreadID, uniform PushConstants pc) {
     float vdoth = max(dot(v, h), 0.0);
 
     if (ndotl > 0.0) {
-      float g = geometry_smith(n, v, l, roughness);
+      float g = geometry_smith_ibl(n, v, l, roughness);
 
       float g_vis = (g * vdoth) / (ndoth * ndotv * ndotl + 1e-4);
 
