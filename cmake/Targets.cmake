@@ -48,6 +48,12 @@ add_library(dockyard STATIC
         src/dockyard/imgui_renderer.cpp
         src/dockyard/pipeline_builder.cpp
         src/dockyard/mesh_loader.cpp
+        src/dockyard/mesh/animation_load.cpp
+        src/dockyard/mesh/lod.cpp
+        src/dockyard/mesh/material.cpp
+        src/dockyard/mesh/primitive.cpp
+        src/dockyard/mesh/tangents.cpp
+        src/dockyard/mesh/texture_decode.cpp
         src/dockyard/mesh_cache.cpp
         src/dockyard/scene.cpp
         src/dockyard/shader_watcher.cpp
@@ -235,6 +241,7 @@ if(DOCKYARD_BUILD_TESTING)
                 ${CMAKE_SOURCE_DIR}/tests/test_animation.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_physics.cpp
                 ${CMAKE_SOURCE_DIR}/tests/test_mesh_cache.cpp
+                ${CMAKE_SOURCE_DIR}/tests/test_mesh_loader.cpp
         )
   target_enable_native_arch(dockyard-testing)
   target_precompile_headers(dockyard-testing REUSE_FROM dockyard)
@@ -245,7 +252,12 @@ if(DOCKYARD_BUILD_TESTING)
   if(DOCKYARD_BUILD_SMOKE_TESTS)
     target_compile_definitions(dockyard-testing PRIVATE RUN_SERIALISATION_SMOKE_TESTS)
   endif()
-  target_link_libraries(dockyard-testing PRIVATE dockyard doctest::doctest)
+  target_link_libraries(dockyard-testing PRIVATE dockyard doctest::doctest ktx fastgltf::fastgltf)
+  if(ktx_SOURCE_DIR)
+    # test_mesh_loader.cpp includes dockyard/mesh/texture_decode.hpp, which
+    # pulls in ktx.h; reuse the KHR stub dir set up for the dockyard target above.
+    target_include_directories(dockyard-testing PRIVATE "${_khr_stub_dir}")
+  endif()
 
   if(WIN32)
     add_custom_command(TARGET dockyard-testing POST_BUILD
