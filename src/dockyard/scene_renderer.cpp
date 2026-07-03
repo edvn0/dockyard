@@ -364,6 +364,7 @@ SceneRenderer::SceneRenderer(VulkanContext &c, SwapchainResources &sc)
   dummy_texture_handle = white_texture;
 
   texture_upload_pool = std::make_unique<pool::TextureUploadPool>();
+  mesh_upload_pool = std::make_unique<pool::MeshUploadPool>();
 
   resize();
 
@@ -1012,6 +1013,7 @@ auto SceneRenderer::prepare(const FrameRenderInfo &info) -> PrepareResult {
   {
     ZoneScopedNC("Poll Registries", 0x00FF7F);
     texture_upload_pool->poll_n(*this, 5);
+    mesh_upload_pool->poll_n(*this, 2);
     pipeline_registry->poll_and_update_dirty_pipelines();
   }
 

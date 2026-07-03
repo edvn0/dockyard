@@ -179,9 +179,22 @@ auto SceneOutlinerPanel::draw(EditorState &state, const EditorActions &actions)
     pending_delete = entt::null;
   }
 
-  if (!ImGui::GetIO().WantTextInput && state.selected != entt::null &&
+  const auto &imgui_io = ImGui::GetIO();
+  if (!imgui_io.WantTextInput && state.selected != entt::null &&
       ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
     delete_candidate = state.selected;
+  }
+  if (!imgui_io.WantTextInput && imgui_io.KeyCtrl &&
+      ImGui::IsKeyPressed(ImGuiKey_N, false)) {
+    state.selected = actions.create_entity("Entity").handle();
+  }
+
+  if (ImGui::BeginPopupContextWindow(
+          "##outliner_empty_ctx",
+          ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+    if (ImGui::MenuItem("Create Entity"))
+      state.selected = actions.create_entity("Entity").handle();
+    ImGui::EndPopup();
   }
 
   ImGui::EndChild();

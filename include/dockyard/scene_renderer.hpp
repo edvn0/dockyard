@@ -13,6 +13,7 @@
 #include <dockyard/pipeline_builder.hpp>
 #include <dockyard/scene.hpp>
 #include <dockyard/texture.hpp>
+#include <dockyard/mesh_upload_pool.hpp>
 #include <dockyard/texture_upload_pool.hpp>
 #include <dockyard/thread_safe_memory_cache.hpp>
 
@@ -359,6 +360,7 @@ struct SceneRenderer {
   MeshAssetPool mesh_registry;
 
   std::unique_ptr<pool::TextureUploadPool> texture_upload_pool{nullptr};
+  std::unique_ptr<pool::MeshUploadPool> mesh_upload_pool{nullptr};
 
   TextureHandle dummy_texture_handle;
   SamplerHandle dummy_sampler_handle;

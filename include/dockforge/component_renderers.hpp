@@ -13,6 +13,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/euler_angles.hpp>
 #include <imgui.h>
+#include <unordered_map>
 
 [[nodiscard]] auto draw_material_editor(dy::GPUMaterial &mat) -> bool;
 
@@ -122,8 +123,17 @@ struct ComponentRenderer<dy::Components::Mesh>
     }
   }
 
+  // Entities with a load in flight, mapped to the path being loaded — read
+  // by this same inline (implicitly-inline) member function from every TU
+  // that includes this header, so a function-local static is one shared map,
+  // not one per TU. Cleared by the async on_complete below.
+  static auto loading_meshes() -> std::unordered_map<entt::entity, std::string> & {
+    static std::unordered_map<entt::entity, std::string> loading;
+    return loading;
+  }
+
   static auto draw(dy::Components::Mesh &m, dy::SceneRenderer &scene_renderer,
-                   dy::Scene &, dy::Entity &) -> bool {
+                   dy::Scene &scene, dy::Entity &entity) -> bool {
     bool modified = false;
     auto &registry = scene_renderer.mesh_registry;
 
@@ -135,7 +145,19 @@ struct ComponentRenderer<dy::Components::Mesh>
                                        : "Mesh Asset #" + std::to_string(current_handle.index()))
               : "None (Empty Handle)";
 
-      if (ImGui::Button("Load new mesh")) {
+      const auto loading_it = loading_meshes().find(entity.id());
+      const bool is_loading = loading_it != loading_meshes().end();
+
+      if (is_loading) {
+        ImGui::BeginDisabled();
+        constexpr std::array<const char *, 4> spinner_frames = {"|", "/", "-", "\\"};
+        const auto frame = static_cast<size_t>(ImGui::GetTime() * 8.0) %
+                           spinner_frames.size();
+        ImGui::Button(
+            std::format("Loading {} {}...", spinner_frames[frame], loading_it->second)
+                .c_str());
+        ImGui::EndDisabled();
+      } else if (ImGui::Button("Load new mesh")) {
       constexpr std::array<nfdfilteritem_t, 1> filters = {
           nfdfilteritem_t{.name = "Valid meshes", .spec = "dymesh,glb,zst,zstd,gz"},
       };
@@ -147,7 +169,28 @@ struct ComponentRenderer<dy::Components::Mesh>
       if (result == NFD_OKAY) {
           auto path = dy::VFS::get().mount_file("meshes", std::filesystem::path {out_path.get()});
           dy::info("OutPath: {}, VFSPath: {}", out_path.get(), path.view());
-          auto handle = dy::mesh::load_from_path(path, scene_renderer);
+
+          loading_meshes()[entity.id()] = std::string{path.view()};
+
+          auto &ent_registry = scene.registry();
+          const entt::entity ent = entity.id();
+
+          dy::mesh::load_from_path_async(
+              path, scene_renderer,
+              [&ent_registry, ent, path](dy::MeshAssetHandle handle) {
+                loading_meshes().erase(ent);
+                if (!ent_registry.valid(ent))
+                  return;
+                auto *mesh = ent_registry.try_get<dy::Components::Mesh>(ent);
+                if (mesh == nullptr)
+                  return;
+                if (!handle.valid()) {
+                  dy::warn("Async mesh load failed for '{}'", path.view());
+                  return;
+                }
+                mesh->handle = handle;
+                mesh->source_path = dy::NullableVFSPath{path};
+              });
       } else if (result == NFD_ERROR) {
         dy::warn("Native file dialog failed: {}", NFD::GetError());
       }

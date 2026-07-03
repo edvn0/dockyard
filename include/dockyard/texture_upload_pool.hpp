@@ -1,11 +1,10 @@
 #pragma once
 
 #include <dockyard/bindless_descriptor.hpp>
+#include <dockyard/upload_pool.hpp>
 
 #include <dockyard/forward.hpp>
 
-#include <atomic>
-#include <future>
 #include <span>
 
 namespace dy::pool {
@@ -53,48 +52,10 @@ struct CpuTextureData {
   }
 };
 
-struct PendingUpload {
-  std::future<CpuTextureData> cpu_work;
-  std::function<void(TextureHandle)> on_complete;
-  std::stop_source stop_src;
-};
-
-struct Stats {
-  usize pending;
-  u64 total_submitted;
-  u64 total_completed;
-};
-
-class TextureUploadPool {
+class TextureUploadPool : public UploadPool<CpuTextureData, TextureHandle> {
 public:
-  auto submit(std::future<CpuTextureData> fut, std::stop_source stop_src,
-              std::function<void(TextureHandle)> on_complete) {
-    std::scoped_lock lock{work_mutex};
-    if (stopped.load(std::memory_order_relaxed)) {
-      stop_src.request_stop();
-      return;
-    }
-
-    pending_work.push_back({
-        .cpu_work = std::move(fut),
-        .on_complete = std::move(on_complete),
-        .stop_src = std::move(stop_src),
-    });
-    submitted.fetch_add(1, std::memory_order_relaxed);
-  }
-
   auto poll_one(SceneRenderer &renderer) -> void { poll_n(renderer, 1); }
   auto poll_n(SceneRenderer &renderer, usize) -> void;
-  [[nodiscard]] auto stats() const -> Stats;
-  [[nodiscard]] bool empty() const;
-  auto drop() -> void;
-
-private:
-  mutable std::mutex work_mutex;
-  std::vector<PendingUpload> pending_work;
-  std::atomic<bool> stopped{false};
-  std::atomic<u64> submitted{0};
-  std::atomic<u64> completed{0};
 };
 
 } // namespace dy::pool

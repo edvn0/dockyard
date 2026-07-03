@@ -5,35 +5,8 @@
 
 namespace dy::pool {
 
-auto TextureUploadPool::drop() -> void {
-  std::scoped_lock lock{work_mutex};
-  stopped.store(true, std::memory_order_relaxed);
-
-  for (auto &entry : pending_work) {
-    entry.stop_src.request_stop();
-  }
-
-  pending_work.clear();
-}
-
 void TextureUploadPool::poll_n(SceneRenderer &renderer, usize n) {
-  std::vector<PendingUpload> batch;
-  batch.reserve(n);
-
-  {
-    std::scoped_lock lock{work_mutex};
-
-    auto it = pending_work.begin();
-    while (it != pending_work.end() && batch.size() < n) {
-      if (it->cpu_work.wait_for(std::chrono::seconds{0}) ==
-          std::future_status::ready) {
-        batch.push_back(std::move(*it));
-        it = pending_work.erase(it);
-      } else {
-        ++it;
-      }
-    }
-  }
+  auto batch = take_ready(n);
 
   if (batch.empty()) {
     return;
@@ -43,7 +16,7 @@ void TextureUploadPool::poll_n(SceneRenderer &renderer, usize n) {
 
   breadcrumb("texture_upload_commit");
   for (auto &entry : batch) {
-    auto data = entry.cpu_work.get();
+    auto data = entry.work.get();
 
     if (data.width == 0 || data.height == 0) {
       entry.on_complete(TextureHandle{});
@@ -70,25 +43,11 @@ void TextureUploadPool::poll_n(SceneRenderer &renderer, usize n) {
     entry.on_complete(handle);
   }
 
-  completed.fetch_add(batch.size(), std::memory_order_relaxed);
+  note_completed(batch.size());
 
   if (marked_dirty) {
     renderer.bindless.mark_dirty();
   }
-}
-
-auto TextureUploadPool::stats() const -> Stats {
-  std::scoped_lock lock{work_mutex};
-  return {
-      .pending = pending_work.size(),
-      .total_submitted = submitted.load(std::memory_order_relaxed),
-      .total_completed = completed.load(std::memory_order_relaxed),
-  };
-}
-
-[[nodiscard]] bool TextureUploadPool::empty() const {
-  std::scoped_lock lock{work_mutex};
-  return pending_work.empty();
 }
 
 } // namespace dy::pool

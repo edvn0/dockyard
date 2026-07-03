@@ -4,6 +4,7 @@
 #include <dockyard/log.hpp>
 #include <dockyard/mesh.hpp>
 #include <dockyard/mesh_cache.hpp>
+#include <dockyard/mesh_upload_pool.hpp>
 #include <dockyard/scene_renderer.hpp>
 #include <dockyard/types.hpp>
 #include <dockyard/vfs.hpp>
@@ -88,10 +89,6 @@ auto calculate_requirements(const auto &extracted_prims)
     }
   }
   return reqs;
-}
-
-template <typename O> auto cast(void *ptr, dy::usize offset) -> O * {
-  return reinterpret_cast<O *>(static_cast<dy::u8 *>(ptr) + offset);
 }
 } // namespace
 
@@ -947,9 +944,15 @@ using JointLookup = std::unordered_map<usize, std::pair<i32, i32>>;
   return clips;
 }
 
+// Templated so it can populate either a live MeshAsset (used by
+// load_from_memory's simple path) or a mesh_cache::BinaryMesh (the CPU-only
+// pipeline) — both share identical field types (nodes/meshes/submesh_aabbs/
+// root_node_indices/material_slots/collision_positions/collision_indices),
+// so the body needs no changes between the two.
+template <typename MeshOut>
 void flatten_nodes(
     const fastgltf::Asset &asset, std::span<const std::size_t> root_indices,
-    MeshAsset &out, const std::unordered_set<usize> &suppressed_mesh_indices,
+    MeshOut &out, const std::unordered_set<usize> &suppressed_mesh_indices,
     const std::unordered_map<usize, usize> &lod_to_primary_mesh,
     const RawCollisionGeometry &raw_collision) {
   struct Frame {
@@ -1309,12 +1312,16 @@ struct PrimLods {
   std::vector<std::vector<u32>> extra;
 };
 
-namespace {
-fastgltf::Parser parser{
-    fastgltf::Extensions::KHR_lights_punctual |
-        fastgltf::Extensions::KHR_materials_specular |
-        fastgltf::Extensions::KHR_materials_pbrSpecularGlossiness,
-};
+// A fresh Parser per call (rather than a shared instance) because
+// fastgltf::Parser is not safe to call concurrently from multiple threads —
+// the async mesh-load path (parse_to_binary_mesh) may run several parses in
+// parallel on different worker threads.
+[[nodiscard]] static auto make_gltf_parser() -> fastgltf::Parser {
+  return fastgltf::Parser{
+      fastgltf::Extensions::KHR_lights_punctual |
+          fastgltf::Extensions::KHR_materials_specular |
+          fastgltf::Extensions::KHR_materials_pbrSpecularGlossiness,
+  };
 }
 
 static auto parse_gltf_file(const std::filesystem::path &fs_path,
@@ -1324,6 +1331,7 @@ static auto parse_gltf_file(const std::filesystem::path &fs_path,
   if (!data)
     return std::unexpected(std::format("GltfDataBuffer from path failed: {}",
                                        fastgltf::getErrorMessage(data.error())));
+  auto parser = make_gltf_parser();
   auto result = parser.loadGltf(data.get(), gltf_dir,
                                 fastgltf::Options::GenerateMeshIndices);
   if (!result)
@@ -1339,6 +1347,7 @@ static auto parse_gltf_memory(std::span<const std::byte> bytes)
     return std::unexpected(
         std::format("GltfDataBuffer from memory failed: {}",
                     fastgltf::getErrorMessage(data.error())));
+  auto parser = make_gltf_parser();
   auto result =
       parser.loadGltf(data.get(), {}, fastgltf::Options::GenerateMeshIndices);
   if (!result)
@@ -1764,261 +1773,177 @@ static auto generate_lods_parallel(
   return {std::move(prim_lods), total_lod_indices};
 }
 
-static void allocate_materials(const fastgltf::Asset &asset, GeometryPool &pool,
-                               MeshAsset &result) {
+// CPU-only twin of the old pool-writing allocate_materials: builds the
+// GPUMaterial list and asset-relative (0-based) material_slots into a
+// BinaryMesh, using a placeholder texture handle for every slot (textures
+// haven't been decoded/uploaded yet at this point). GeometryPool::allocate_
+// materials + mesh_cache::rebase apply the live pool's base slot at commit
+// time — see build_from_cache.
+static void assemble_materials_cpu(const fastgltf::Asset &asset,
+                                   TextureHandle dummy_texture_handle,
+                                   mesh_cache::BinaryMesh &out) {
   if (asset.materials.empty())
     return;
-  PROFILE_SCOPE("Allocate materials");
+  PROFILE_SCOPE("Assemble materials (CPU)");
 
-  std::vector<GPUMaterial> gpu_mats;
-  gpu_mats.reserve(asset.materials.size());
+  const std::vector<TextureHandle> placeholder_handles(asset.images.size(),
+                                                        dummy_texture_handle);
+
+  out.materials.reserve(asset.materials.size());
   for (const auto &mat : asset.materials)
-    gpu_mats.push_back(build_gpu_material(mat, asset, result.texture_handles));
+    out.materials.push_back(build_gpu_material(mat, asset, placeholder_handles));
 
-  const auto mat_offset = pool.allocate_materials(gpu_mats);
-  result.material_base_slot = mat_offset.start_index;
-  result.material_count = static_cast<u32>(gpu_mats.size());
-  for (usize i = 0; i < gpu_mats.size(); ++i)
-    result.material_slots[i] = result.material_base_slot + static_cast<u32>(i);
+  out.material_slots.resize(asset.materials.size());
+  for (usize i = 0; i < asset.materials.size(); ++i)
+    out.material_slots[i] = static_cast<u32>(i);
 }
 
+// CPU-only twin of the old pool-writing upload_geometry: assembles
+// vertices/indices/skin_vertices and MeshLodGroup records into a BinaryMesh
+// at asset-relative (0-based) offsets — no GeometryPool/renderer access, so
+// this is safe to run on a worker thread. Position-only shadow vertices are
+// deliberately not produced here: GeometryPool::allocate derives them from
+// vertex positions at commit time, so BinaryMesh never needs to carry them.
 static void
-upload_geometry(const fastgltf::Asset &asset,
-                const std::vector<PrimWork> &prim_work_list,
-                const std::vector<std::expected<PrimitiveResult, std::string>>
-                    &extracted_prims,
-                const std::vector<PrimLods> &prim_lods, usize total_lod_indices,
-                GeometryPool &pool, MeshAsset &result,
-                bool retain_collision_geometry,
-                RawCollisionGeometry &raw_collision_out) {
-  PROFILE_SCOPE("Allocate geometry TOTAL");
+assemble_geometry_cpu(const std::vector<PrimWork> &prim_work_list,
+                      const std::vector<std::expected<PrimitiveResult, std::string>>
+                          &extracted_prims,
+                      const std::vector<PrimLods> &prim_lods,
+                      usize total_lod_indices, mesh_cache::BinaryMesh &out,
+                      bool retain_collision_geometry,
+                      RawCollisionGeometry &raw_collision_out) {
+  PROFILE_SCOPE("Assemble geometry (CPU)");
 
-  {
-    PROFILE_SCOPE("Pool Reserve & Transaction Init");
-
-    // Only count vertices for LOD0 (or non-LOD) entries.  Higher LOD meshes
-    // share LOD0's vertex range — their vertices are never uploaded.
-    usize total_v = 0;
-    usize total_i = 0;
-    usize total_skin = 0;
-    for (usize i = 0; i < prim_work_list.size(); ++i) {
-      if (!extracted_prims[i])
-        continue;
-      const auto &w = prim_work_list[i];
-      const bool uploads_vertices = !w.is_explicit_lod || w.lod_slot == 0;
-      if (uploads_vertices) {
-        total_v += extracted_prims[i]->data.vertices.size();
-        total_skin += extracted_prims[i]->data.skin.size();
-      }
-      total_i += extracted_prims[i]->data.indices.size();
+  // Only count vertices for LOD0 (or non-LOD) entries. Higher LOD meshes
+  // share LOD0's vertex range — their vertices are never duplicated.
+  usize total_v = 0;
+  usize total_i = 0;
+  usize total_skin = 0;
+  for (usize i = 0; i < prim_work_list.size(); ++i) {
+    if (!extracted_prims[i])
+      continue;
+    const auto &w = prim_work_list[i];
+    const bool uploads_vertices = !w.is_explicit_lod || w.lod_slot == 0;
+    if (uploads_vertices) {
+      total_v += extracted_prims[i]->data.vertices.size();
+      total_skin += extracted_prims[i]->data.skin.size();
     }
-    pool.reserve(total_v, total_i + total_lod_indices);
-    if (total_skin > 0)
-      pool.ensure_skin_capacity(total_skin);
+    total_i += extracted_prims[i]->data.indices.size();
   }
+  out.vertices.reserve(total_v);
+  out.indices.reserve(total_i + total_lod_indices);
+  if (total_skin > 0)
+    out.skin_vertices.reserve(total_skin);
 
-  auto batch = pool.begin_transaction();
-
-  result.meshes.resize(asset.meshes.size());
-  result.submesh_aabbs.resize(asset.meshes.size());
-  result.vertex_base_offset = pool.vertex_offset;
   if (retain_collision_geometry)
-    raw_collision_out.resize(asset.meshes.size());
+    raw_collision_out.resize(out.meshes.size());
 
-  auto *v_base = cast<Vertex>(pool.vertex_buffer->get_mapped_pointer(),
-                              pool.vertex_offset);
-  auto *sv_base = cast<PositionOnlyVertex>(
-      pool.position_only_vertex_buffer->get_mapped_pointer(),
-      pool.shadow_vertex_offset);
-  auto *i_base =
-      cast<u32>(pool.index_buffer->get_mapped_pointer(), pool.index_offset);
+  for (usize i = 0; i < prim_work_list.size(); ++i) {
+    const auto &w = prim_work_list[i];
+    const auto &res = extracted_prims[i];
 
-  usize cur_v = 0;
-  usize cur_sv = 0;
-  usize cur_i = 0;
-  // Skin vertices are packed densely (only skinned prims contribute), starting
-  // at the pool's current skin offset. skin_base stays valid for the whole loop
-  // because ensure_skin_capacity already reserved the full range above.
-  const usize skin_base = pool.skin_vertex_offset;
-  usize cur_skin = 0;
+    // For LOD meshes with slot > 0 we only need to write their (remapped)
+    // index data — their vertices live in LOD0's range.
+    const bool uploads_vertices = !w.is_explicit_lod || w.lod_slot == 0;
 
-  {
-    PROFILE_SCOPE("Serial Processing Loop");
+    // Determine which mesh owns the MeshLodGroup for this primitive.
+    // For LOD0 / non-LOD prims it's w.mesh_idx itself.
+    // For LODn (n>0) it's w.primary_mesh_idx.
+    const usize owning_mesh_idx =
+        (w.is_explicit_lod && w.lod_slot > 0) ? w.primary_mesh_idx : w.mesh_idx;
 
-    for (usize i = 0; i < prim_work_list.size(); ++i) {
-      const auto &w = prim_work_list[i];
-      const auto &res = extracted_prims[i];
+    if (!res) {
+      warn("assemble_geometry_cpu: skipping primitive (mesh={}, prim={}): {}",
+           w.mesh_idx, w.prim_idx, res.error());
+      if (uploads_vertices)
+        out.submesh_aabbs[owning_mesh_idx].push_back(AABB::create());
+      continue;
+    }
 
-      // For LOD meshes with slot > 0 we only need to write their (remapped)
-      // index data into the pool — their vertices live in LOD0's range.
-      const bool uploads_vertices = !w.is_explicit_lod || w.lod_slot == 0;
+    const auto &[pdata, aabb] = *res;
 
-      // Determine which mesh owns the MeshLodGroup for this primitive.
-      // For LOD0 / non-LOD prims it's w.mesh_idx itself.
-      // For LODn (n>0) it's w.primary_mesh_idx.
-      const usize owning_mesh_idx = (w.is_explicit_lod && w.lod_slot > 0)
-                                        ? w.primary_mesh_idx
-                                        : w.mesh_idx;
+    // Index upload always happens; vertex upload is skipped for LODn > 0
+    // (patched into the LOD0 MeshLodGroup below instead).
+    const usize index_offset = out.indices.size();
+    usize vertex_offset = 0;
+    if (uploads_vertices) {
+      vertex_offset = out.vertices.size();
+      out.vertices.insert(out.vertices.end(), pdata.vertices.begin(),
+                          pdata.vertices.end());
+    }
+    out.indices.insert(out.indices.end(), pdata.indices.begin(),
+                       pdata.indices.end());
 
-      if (!res) {
-        warn("upload_geometry: skipping primitive (mesh={}, prim={}): {}",
-             w.mesh_idx, w.prim_idx, res.error());
-        if (uploads_vertices)
-          result.submesh_aabbs[owning_mesh_idx].push_back(AABB::create());
-        continue;
+    if (uploads_vertices) {
+      // LOD0 / standalone: create the group entry.
+      MeshLodGroup lod_group;
+      lod_group.vertex_offset = static_cast<i32>(vertex_offset);
+      lod_group.lods[0].first_index = static_cast<u32>(index_offset);
+      lod_group.lods[0].index_count = static_cast<u32>(pdata.indices.size());
+      lod_group.vertex_count = static_cast<u32>(pdata.vertices.size());
+      lod_group.lod_count = 1;
+
+      // Skin vertices (when present) are written densely, parallel to this
+      // LOD0's vertices; higher LODs reuse this offset since they share
+      // LOD0's vertex range.
+      if (!pdata.skin.empty()) {
+        const usize skin_idx = out.skin_vertices.size();
+        out.skin_vertices.insert(out.skin_vertices.end(), pdata.skin.begin(),
+                                 pdata.skin.end());
+        lod_group.skin_vertex_offset = static_cast<i32>(skin_idx);
       }
 
-      const auto &[pdata, aabb] = *res;
-      const auto ispan = std::span(pdata.indices);
-
-      // ----------------------------------------------------------------
-      // Vertex upload (skipped for LODn > 0)
-      // ----------------------------------------------------------------
-      AllocatedOffset offsets{};
-      if (uploads_vertices) {
-        const auto vspan = std::span(pdata.vertices);
-
-        offsets = AllocatedOffset{
-            .vertex_offset = pool.vertex_offset + cur_v,
-            .shadow_vertex_offset = pool.shadow_vertex_offset + cur_sv,
-            .index_offset = pool.index_offset + cur_i,
-        };
-
-        auto *v_dst = cast<Vertex>(v_base, cur_v);
-        auto *sv_dst = cast<PositionOnlyVertex>(sv_base, cur_sv);
-
-        std::memcpy(v_dst, vspan.data(), vspan.size_bytes());
-        for (usize idx = 0; idx < vspan.size(); ++idx) {
-          sv_dst[idx].position[0] = vspan[idx].position[0];
-          sv_dst[idx].position[1] = vspan[idx].position[1];
-          sv_dst[idx].position[2] = vspan[idx].position[2];
+      // Append meshopt-generated LODs (only for non-explicit-lod prims).
+      if (!w.is_explicit_lod) {
+        for (const auto &lod_indices : prim_lods[i].extra) {
+          auto &lod = lod_group.lods[lod_group.lod_count++];
+          lod.first_index = static_cast<u32>(out.indices.size());
+          lod.index_count = static_cast<u32>(lod_indices.size());
+          out.indices.insert(out.indices.end(), lod_indices.begin(),
+                             lod_indices.end());
         }
-
-        cur_v += vspan.size_bytes();
-        cur_sv += vspan.size() * sizeof(PositionOnlyVertex);
-      } else {
-        // Reuse LOD0's vertex offset. Find the owning (LOD0) entry.
-        // We scan backwards since LOD0 must have been processed earlier.
-        for (usize j = i; j-- > 0;) {
-          if (prim_work_list[j].mesh_idx == w.primary_mesh_idx &&
-              prim_work_list[j].lod_slot == 0 && extracted_prims[j]) {
-            offsets.vertex_offset =
-                pool.vertex_offset +
-                /* byte offset already advanced when lod0 was written */
-                /* we stored it in the MeshLodGroup — recover from there */
-                static_cast<usize>(result.meshes[w.primary_mesh_idx][w.prim_idx]
-                                       .vertex_offset) *
-                    sizeof(Vertex);
-            break;
-          }
-        }
-        // index_offset advances normally
-        offsets.index_offset = pool.index_offset + cur_i;
       }
 
-      // ----------------------------------------------------------------
-      // Index upload (always)
-      // ----------------------------------------------------------------
-      auto *i_dst = cast<u32>(i_base, cur_i);
-      std::memcpy(i_dst, ispan.data(), ispan.size_bytes());
-      cur_i += ispan.size_bytes();
+      out.meshes[owning_mesh_idx].push_back(lod_group);
+      out.submesh_aabbs[owning_mesh_idx].push_back(aabb);
+      out.mesh_aabb.merge(aabb);
 
-      // ----------------------------------------------------------------
-      // MeshLodGroup bookkeeping
-      // ----------------------------------------------------------------
-      if (uploads_vertices) {
-        // LOD0 / standalone: create the group entry.
-        MeshLodGroup lod_group;
-        lod_group.vertex_offset =
-            static_cast<i32>(offsets.vertex_offset / sizeof(Vertex));
-        lod_group.lods[0].first_index =
-            static_cast<u32>(offsets.index_offset / sizeof(u32));
-        lod_group.lods[0].index_count = static_cast<u32>(pdata.indices.size());
-        lod_group.vertex_count = static_cast<u32>(pdata.vertices.size());
-        lod_group.lod_count = 1;
+      if (retain_collision_geometry) {
+        // Use the coarsest generated LOD's indices, not LOD0's — collision
+        // doesn't need render-quality detail, and a large environment mesh
+        // at full LOD0 density (millions of triangles) is both far too
+        // slow for real-time collision and large enough to blow past
+        // Bullet's BVH-build limits. LODn indices reference the same LOD0
+        // vertex range (see generate_lods), so vertices are unaffected.
+        const auto &collision_source_indices = prim_lods[i].extra.empty()
+                                                   ? pdata.indices
+                                                   : prim_lods[i].extra.back();
 
-        // Skin vertices (when present) are written densely into the skin buffer
-        // parallel to this LOD0's vertices; higher LODs reuse this offset since
-        // they share LOD0's vertex range.
-        if (!pdata.skin.empty()) {
-          const usize skin_idx = skin_base + cur_skin;
-          std::memcpy(pool.skin_mapped_pointer(skin_idx), pdata.skin.data(),
-                      pdata.skin.size() * sizeof(SkinVertex));
-          lod_group.skin_vertex_offset = static_cast<i32>(skin_idx);
-          cur_skin += pdata.skin.size();
-        }
-
-        // Append meshopt-generated LODs (only for non-explicit-lod prims).
-        if (!w.is_explicit_lod) {
-          for (const auto &lod_indices : prim_lods[i].extra) {
-            const auto as_span = std::span(lod_indices);
-            auto *lod_i_dst = cast<u32>(i_base, cur_i);
-            std::memcpy(lod_i_dst, lod_indices.data(), as_span.size_bytes());
-
-            auto &lod = lod_group.lods[lod_group.lod_count++];
-            lod.first_index =
-                static_cast<u32>((pool.index_offset + cur_i) / sizeof(u32));
-            lod.index_count = static_cast<u32>(as_span.size());
-            cur_i += as_span.size_bytes();
-          }
-        }
-
-        result.meshes[owning_mesh_idx].push_back(lod_group);
-        result.submesh_aabbs[owning_mesh_idx].push_back(aabb);
-        result.mesh_aabb.merge(aabb);
-
-        if (retain_collision_geometry) {
-          // Use the coarsest generated LOD's indices, not LOD0's — collision
-          // doesn't need render-quality detail, and a large environment mesh
-          // at full LOD0 density (millions of triangles) is both far too
-          // slow for real-time collision and large enough to blow past
-          // Bullet's BVH-build limits. LODn indices reference the same LOD0
-          // vertex range (see generate_lods), so vertices are unaffected.
-          const auto &collision_source_indices = prim_lods[i].extra.empty()
-                                                     ? pdata.indices
-                                                     : prim_lods[i].extra.back();
-
-          // Stored in this primitive's own local space, indices untouched —
-          // flatten_nodes applies each owning node's world transform and
-          // flattens these into MeshAsset::collision_positions/indices once
-          // the node hierarchy (and thus per-node transforms) is known.
-          RawCollisionPrimitive raw_prim;
-          raw_prim.positions.reserve(pdata.vertices.size());
-          for (const auto &vtx : pdata.vertices)
-            raw_prim.positions.push_back(
-                {.position = {vtx.position[0], vtx.position[1], vtx.position[2]}});
-          raw_prim.indices.assign(collision_source_indices.begin(),
-                                  collision_source_indices.end());
-          raw_collision_out[owning_mesh_idx].push_back(std::move(raw_prim));
-        }
-      } else {
-        // LODn > 0: patch the lod_slot into the existing MeshLodGroup.
-        auto &lod_group = result.meshes[owning_mesh_idx][w.prim_idx];
-        if (w.lod_slot < static_cast<u32>(max_lods)) {
-          auto &lod_entry = lod_group.lods[w.lod_slot];
-          lod_entry.first_index =
-              static_cast<u32>(offsets.index_offset / sizeof(u32));
-          lod_entry.index_count = static_cast<u32>(pdata.indices.size());
-          lod_group.lod_count =
-              static_cast<u8>(glm::max(static_cast<u32>(lod_group.lod_count),
-                                       static_cast<u32>(w.lod_slot + 1)));
-        }
+        // Stored in this primitive's own local space, indices untouched —
+        // flatten_nodes applies each owning node's world transform and
+        // flattens these into collision_positions/collision_indices once
+        // the node hierarchy (and thus per-node transforms) is known.
+        RawCollisionPrimitive raw_prim;
+        raw_prim.positions.reserve(pdata.vertices.size());
+        for (const auto &vtx : pdata.vertices)
+          raw_prim.positions.push_back(
+              {.position = {vtx.position[0], vtx.position[1], vtx.position[2]}});
+        raw_prim.indices.assign(collision_source_indices.begin(),
+                                collision_source_indices.end());
+        raw_collision_out[owning_mesh_idx].push_back(std::move(raw_prim));
+      }
+    } else {
+      // LODn > 0: patch the lod_slot into the existing MeshLodGroup.
+      auto &lod_group = out.meshes[owning_mesh_idx][w.prim_idx];
+      if (w.lod_slot < static_cast<u32>(max_lods)) {
+        auto &lod_entry = lod_group.lods[w.lod_slot];
+        lod_entry.first_index = static_cast<u32>(index_offset);
+        lod_entry.index_count = static_cast<u32>(pdata.indices.size());
+        lod_group.lod_count =
+            static_cast<u8>(glm::max(static_cast<u32>(lod_group.lod_count),
+                                     static_cast<u32>(w.lod_slot + 1)));
       }
     }
-  }
-
-  pool.vertex_offset += cur_v;
-  pool.shadow_vertex_offset += cur_sv;
-  pool.index_offset += cur_i;
-
-  if (cur_skin > 0) {
-    pool.flush_skin_range(skin_base, cur_skin);
-    pool.skin_vertex_offset += cur_skin;
-  }
-
-  {
-    PROFILE_SCOPE("Transaction Commit & VMA Flush");
-    batch.commit();
   }
 }
 
@@ -2158,53 +2083,47 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
   return std::get<std::vector<std::byte>>(src.data);
 }
 
-// Shared mesh-building pipeline called by both load_from_path and
-// load_from_compressed after the glTF asset has already been parsed.
+// Fully CPU-side glTF → BinaryMesh pipeline, shared by the file-based
+// (parse_to_binary_mesh) and archive-based (load_from_compressed) loaders.
+// Touches no SceneRenderer/GPU state beyond a plain TextureHandle value and
+// the shared worker pool used for fan-out, so it's safe to run entirely off
+// the main thread. The result is committed to the live pool by
+// build_from_cache, exactly like a warm mesh-cache hit — cold and warm loads
+// share the same GPU-writing code path.
 // gltf_dir  — directory used to resolve sidecar KTX2 files and external image
-// URIs;
-//             pass an empty path for GLB loaded from memory (no external
-//             files).
+// URIs; pass an empty path for GLB loaded from memory (no external files).
 // debug_path — used only in log messages.
-static auto
-build_mesh_from_parsed(fastgltf::Asset &asset,
-                       const std::filesystem::path &gltf_dir,
-                       const std::filesystem::path &debug_path,
-                       SceneRenderer &renderer, const LoadOptions &opts,
-                       NullableVFSPath source_path,
-                       mesh_cache::BinaryMesh *out_snapshot = nullptr)
-    -> std::expected<MeshAssetHandle, std::string> {
-  auto &pool = *renderer.geometry_pool;
-
-  auto result =
-      std::make_unique<MeshAsset>(MeshAsset{.mesh_aabb = AABB::create()});
-  result->source_path = source_path;
-  result->texture_handles.resize(asset.images.size(),
-                                 renderer.dummy_texture_handle);
-  result->material_slots.resize(asset.materials.size(), 0u);
+static auto assemble_binary_mesh(fastgltf::Asset &asset,
+                                 const std::filesystem::path &gltf_dir,
+                                 const std::filesystem::path &debug_path,
+                                 TextureHandle dummy_texture_handle,
+                                 const LoadOptions &opts,
+                                 BS::priority_thread_pool &thread_pool)
+    -> mesh_cache::BinaryMesh {
+  mesh_cache::BinaryMesh out;
+  out.mesh_aabb = AABB::create();
+  out.meshes.resize(asset.meshes.size());
+  out.submesh_aabbs.resize(asset.meshes.size());
 
   const auto color_spaces = classify_images(asset);
   auto image_sources =
       collect_image_sources(asset, gltf_dir, debug_path, color_spaces);
 
-  // Snapshot the encoded texture bytes before launch_texture_futures moves
-  // image_sources into async decode tasks — needed so the mesh cache is
-  // self-contained (no dependency on the source glTF / sidecar files).
-  std::vector<mesh_cache::ImageRecord> cached_images;
-  if (out_snapshot != nullptr) {
-    cached_images.reserve(image_sources.size());
-    for (const auto &src : image_sources) {
-      cached_images.push_back({
-          .encoded_bytes = resolve_image_source_bytes(src),
-          .format = src.format,
-          .srgb = src.srgb,
-          .debug_name = src.debug_name,
-          .cache_key = src.cache_key,
-      });
-    }
+  // Encoded bytes are captured up front (rather than deferred to async
+  // decode, as the live-render path does) so BinaryMesh stays self-contained
+  // — no runtime dependency on the source glTF / sidecar files.
+  out.images.reserve(image_sources.size());
+  for (const auto &src : image_sources) {
+    out.images.push_back({
+        .encoded_bytes = resolve_image_source_bytes(src),
+        .format = src.format,
+        .srgb = src.srgb,
+        .debug_name = src.debug_name,
+        .cache_key = src.cache_key,
+    });
   }
-
-  auto pending = launch_texture_futures(image_sources, renderer, *result);
-  const usize skin_base_before = pool.skin_vertex_offset;
+  for (usize image_idx = 0; image_idx < out.images.size(); ++image_idx)
+    out.images[image_idx].patches = build_patch_list(asset, image_idx);
 
   // -------------------------------------------------------------------------
   // Detect explicit LOD groups from mesh names (e.g. _lod0 … _lod5)
@@ -2251,8 +2170,9 @@ build_mesh_from_parsed(fastgltf::Asset &asset,
   // Build the flat work list
   //
   // Key ordering requirement: LOD0 primitives MUST appear before LOD1+
-  // primitives for the same group, because upload_geometry processes them
-  // serially and LODn patching reads from the already-written MeshLodGroup.
+  // primitives for the same group, because assemble_geometry_cpu processes
+  // them serially and LODn patching reads from the already-written
+  // MeshLodGroup.
   //
   // We achieve this by emitting all LOD0 (and non-LOD) entries first, then
   // the higher LOD entries in lod_slot order.
@@ -2310,37 +2230,31 @@ build_mesh_from_parsed(fastgltf::Asset &asset,
   }
 
   // -------------------------------------------------------------------------
-  // Parallel extract → remap → LOD generation → upload
+  // Parallel extract → remap → LOD generation → CPU geometry/material
+  // assembly (all pure CPU — thread_pool is used only for fan-out here)
   // -------------------------------------------------------------------------
   auto extracted_prims =
-      extract_primitives_parallel(asset, prim_work_list, renderer.thread_pool);
+      extract_primitives_parallel(asset, prim_work_list, thread_pool);
 
   // Remap LODn indices to point into LOD0's vertex range.
   if (!lod_groups.empty())
-    remap_explicit_lod_indices(prim_work_list, extracted_prims,
-                               renderer.thread_pool);
+    remap_explicit_lod_indices(prim_work_list, extracted_prims, thread_pool);
 
-  auto [prim_lods, total_lod_indices] = generate_lods_parallel(
-      prim_work_list, extracted_prims, renderer.thread_pool);
+  auto [prim_lods, total_lod_indices] =
+      generate_lods_parallel(prim_work_list, extracted_prims, thread_pool);
 
-  allocate_materials(asset, pool, *result);
-
-  for (auto &pu : pending) {
-    pu.patches = build_patch_list(asset, pu.image_idx);
-    if (out_snapshot != nullptr)
-      cached_images[pu.image_idx].patches = pu.patches;
-  }
+  assemble_materials_cpu(asset, dummy_texture_handle, out);
 
   RawCollisionGeometry raw_collision;
-  upload_geometry(asset, prim_work_list, extracted_prims, prim_lods,
-                  total_lod_indices, pool, *result,
-                  opts.retain_collision_geometry, raw_collision);
+  assemble_geometry_cpu(prim_work_list, extracted_prims, prim_lods,
+                        total_lod_indices, out, opts.retain_collision_geometry,
+                        raw_collision);
 
   {
     PROFILE_SCOPE("Load skeletons & animations");
-    result->skeletons = load_skeletons(asset);
-    const auto joint_lookup = build_joint_lookup(result->skeletons);
-    result->animations = load_animations(asset, joint_lookup);
+    out.skeletons = load_skeletons(asset);
+    const auto joint_lookup = build_joint_lookup(out.skeletons);
+    out.animations = load_animations(asset, joint_lookup);
   }
 
   using Def = decltype(asset.scenes[0].nodeIndices);
@@ -2349,82 +2263,77 @@ build_mesh_from_parsed(fastgltf::Asset &asset,
                                : Def{};
   if (!scene_roots.empty()) {
     PROFILE_SCOPE("Iterate nodes");
-    flatten_nodes(asset, scene_roots, *result, suppressed_mesh_indices,
+    flatten_nodes(asset, scene_roots, out, suppressed_mesh_indices,
                   lod_to_primary_mesh, raw_collision);
   }
 
   // Count effective LOD levels for the log message.
   u32 max_lod_count = 0;
-  for (const auto &mesh_lod_groups : result->meshes)
+  for (const auto &mesh_lod_groups : out.meshes)
     for (const auto &lg : mesh_lod_groups)
       max_lod_count = glm::max(max_lod_count, static_cast<u32>(lg.lod_count));
 
   info("load_gltf: '{}' - {} image(s), {} material(s), {} mesh(es), {} "
        "node(s), {} LOD level(s)",
        debug_path.filename().string(), asset.images.size(),
-       asset.materials.size(), asset.meshes.size(), result->nodes.size(),
+       asset.materials.size(), asset.meshes.size(), out.nodes.size(),
        max_lod_count);
 
-  if (out_snapshot != nullptr) {
-    PROFILE_SCOPE("Build mesh cache snapshot");
-    mesh_cache::BinaryMesh &snap = *out_snapshot;
+  return out;
+}
 
-    const usize vertex_count =
-        (pool.vertex_offset - result->vertex_base_offset) / sizeof(Vertex);
-    const usize index_count =
-        (pool.index_offset - result->index_base_offset) / sizeof(u32);
-    const usize skin_vertex_count = pool.skin_vertex_offset - skin_base_before;
+// File-based CPU pipeline entry point: parses the source and hands off to
+// assemble_binary_mesh. Used by the async loader (parse_to_binary_mesh runs
+// entirely on a worker thread) and by the synchronous load_from_path.
+static auto
+parse_to_binary_mesh(const std::filesystem::path &fs_path,
+                     const std::filesystem::path &gltf_dir,
+                     TextureHandle dummy_texture_handle,
+                     const LoadOptions &opts,
+                     BS::priority_thread_pool &thread_pool)
+    -> std::expected<mesh_cache::BinaryMesh, std::string> {
+  auto asset = parse_gltf_file(fs_path, gltf_dir);
+  if (!asset)
+    return std::unexpected(asset.error());
+  return assemble_binary_mesh(*asset, gltf_dir, fs_path, dummy_texture_handle,
+                              opts, thread_pool);
+}
 
-    snap.vertices.resize(vertex_count);
-    std::memcpy(snap.vertices.data(),
-               cast<Vertex>(pool.vertex_buffer->get_mapped_pointer(),
-                            result->vertex_base_offset),
-               vertex_count * sizeof(Vertex));
-
-    snap.indices.resize(index_count);
-    std::memcpy(snap.indices.data(),
-               cast<u32>(pool.index_buffer->get_mapped_pointer(),
-                         result->index_base_offset),
-               index_count * sizeof(u32));
-
-    if (skin_vertex_count > 0) {
-      snap.skin_vertices.resize(skin_vertex_count);
-      std::memcpy(snap.skin_vertices.data(),
-                 pool.skin_mapped_pointer(skin_base_before),
-                 skin_vertex_count * sizeof(SkinVertex));
-    }
-
-    const auto live_materials =
-        pool.get_materials(result->material_base_slot, result->material_count);
-    snap.materials.assign(live_materials.begin(), live_materials.end());
-
-    snap.material_slots = result->material_slots;
-    snap.meshes = result->meshes;
-    snap.submesh_aabbs = result->submesh_aabbs;
-    snap.mesh_aabb = result->mesh_aabb;
-    snap.nodes = result->nodes;
-    snap.root_node_indices = result->root_node_indices;
-    snap.skeletons = result->skeletons;
-    snap.animations = result->animations;
-    snap.collision_positions = result->collision_positions;
-    snap.collision_indices = result->collision_indices;
-    snap.images = std::move(cached_images);
-
-    // result keeps its live, pool-absolute offsets (it's about to be
-    // registered and rendered); the snapshot is rebased to asset-relative
-    // (0-based) so it stays valid regardless of where a future load lands
-    // in a (possibly different) pool.
-    mesh_cache::rebase(
-        snap, -static_cast<i64>(result->vertex_base_offset / sizeof(Vertex)),
-        -static_cast<i64>(result->index_base_offset / sizeof(u32)),
-        -static_cast<i64>(skin_base_before),
-        -static_cast<i64>(result->material_base_slot));
-  }
-
-  const u32 material_base_slot = result->material_base_slot;
-  auto handle = renderer.register_gltf(std::move(*result));
-  submit_texture_uploads(pending, renderer, handle, material_base_slot);
-  return handle;
+// Serializes and writes a mesh cache entry on a background task, without
+// blocking the caller. Takes the BinaryMesh by value (copied at the call
+// site) so the caller's own copy — about to be handed to build_from_cache —
+// is never touched concurrently by the background write. Takes the thread
+// pool directly (rather than SceneRenderer&) so it never dereferences any
+// renderer state from a worker thread beyond the pool itself, which is safe
+// by construction — a thread pool's destructor cannot run while one of its
+// own tasks is still executing.
+static void write_mesh_cache_async(BS::priority_thread_pool &thread_pool,
+                                   mesh_cache::BinaryMesh mesh,
+                                   VFSPath cache_path, u64 source_hash) {
+  auto snapshot = std::make_shared<mesh_cache::BinaryMesh>(std::move(mesh));
+  [[maybe_unused]] auto write_task = thread_pool.submit_task(
+      [snapshot, cache_path, source_hash]() {
+        try {
+          info("mesh cache: background write starting for '{}'",
+               cache_path.view());
+          auto bytes = mesh_cache::serialize(*snapshot, source_hash);
+          std::filesystem::create_directories(
+              VFS::get().resolve(cache_path).parent_path());
+          auto stream = VFS::get().resolve_to_output_stream(cache_path);
+          if (!stream) {
+            warn("mesh cache write failed for '{}': {}", cache_path.view(),
+                 stream.error());
+            return;
+          }
+          stream->write(reinterpret_cast<const char *>(bytes.data()),
+                       static_cast<std::streamsize>(bytes.size()));
+          info("mesh cache: wrote '{}' ({} bytes)", cache_path.view(),
+               bytes.size());
+        } catch (const std::exception &e) {
+          warn("mesh cache write threw for '{}': {}", cache_path.view(),
+               e.what());
+        }
+      });
 }
 
 // Expands a cached BinaryMesh back into the live GeometryPool with a single
@@ -2532,46 +2441,82 @@ auto load_from_path(const VFSPath &path, SceneRenderer &renderer,
   if (!std::filesystem::exists(fs_path))
     return std::unexpected("File not found");
 
-  auto asset = parse_gltf_file(fs_path, gltf_dir);
-  if (!asset)
-    return std::unexpected(asset.error());
-
-  auto snapshot = std::make_unique<mesh_cache::BinaryMesh>();
-  auto handle = build_mesh_from_parsed(*asset, gltf_dir, fs_path, renderer,
-                                       opts, NullableVFSPath{path},
-                                       snapshot.get());
-  if (!handle)
-    return handle;
+  auto binary_mesh = parse_to_binary_mesh(
+      fs_path, gltf_dir, renderer.dummy_texture_handle, opts,
+      renderer.thread_pool);
+  if (!binary_mesh)
+    return std::unexpected(binary_mesh.error());
 
   // Compress + write in the background — never blocks the caller on a cache
   // miss, and a write failure is not fatal (next cold load just retries it).
-  // The future is intentionally not awaited; any failure is caught and
-  // logged inside the task itself so nothing is silently dropped.
-  [[maybe_unused]] auto write_task = renderer.thread_pool.submit_task(
-      [snapshot = std::move(snapshot), cache_path, source_hash]() mutable {
-        try {
-          info("mesh cache: background write starting for '{}'",
-               cache_path.view());
-          auto bytes = mesh_cache::serialize(*snapshot, source_hash);
-          std::filesystem::create_directories(
-              VFS::get().resolve(cache_path).parent_path());
-          auto stream = VFS::get().resolve_to_output_stream(cache_path);
-          if (!stream) {
-            warn("mesh cache write failed for '{}': {}", cache_path.view(),
-                 stream.error());
-            return;
+  write_mesh_cache_async(renderer.thread_pool, *binary_mesh, cache_path,
+                        source_hash);
+
+  return build_from_cache(std::move(*binary_mesh), renderer,
+                          NullableVFSPath{path});
+}
+
+// Async counterpart to load_from_path. The whole cache-check/parse/LOD
+// pipeline runs as a task on renderer.thread_pool (not a separately-owned
+// thread) — the same pool extract_primitives_parallel/generate_lods_parallel
+// fan out onto internally, and the same pool every other background mesh/
+// texture task already uses, so its lifetime is governed by the exact
+// mechanism SceneRenderer's teardown already relies on. This makes the
+// dispatch a nested submit-and-wait (a pool task waiting on more work
+// submitted to the same pool); safe in practice since mesh loads are rare,
+// UI-driven, one-at-a-time events relative to the pool's thread count — a
+// hypothetical future bulk-import path issuing hardware_concurrency()+
+// simultaneous loads could stall until a worker frees up.
+// on_complete fires on the main thread once SceneRenderer::prepare drains
+// mesh_upload_pool (see SceneRenderer::prepare's "Poll Registries" step).
+auto load_from_path_async(const VFSPath &path, SceneRenderer &renderer,
+                          std::function<void(MeshAssetHandle)> on_complete,
+                          const LoadOptions &opts) -> void {
+  auto stop_src = std::stop_source{};
+  auto token = stop_src.get_token();
+  const TextureHandle dummy_texture_handle = renderer.dummy_texture_handle;
+
+  auto fut = renderer.thread_pool.submit_task(
+      [&thread_pool = renderer.thread_pool, path, opts, dummy_texture_handle,
+       token]() mutable -> pool::MeshLoadResult {
+        if (token.stop_requested())
+          return {};
+
+        const u64 source_hash = mesh_cache::hash_source(path, opts);
+        const auto cache_path = mesh_cache::cache_path_for(path, source_hash);
+
+        if (auto cache_bytes = VFS::get().read_bytes(cache_path)) {
+          if (auto cached =
+                  mesh_cache::deserialize(*cache_bytes, source_hash)) {
+            info("load_gltf: '{}' — loaded from mesh cache '{}' (async)",
+                path.view(), cache_path.view());
+            return {.mesh = std::move(*cached),
+                    .source_path = NullableVFSPath{path}};
+          } else {
+            info("load_gltf: '{}' — mesh cache miss ({}), doing a cold load "
+                "(async)",
+                path.view(), cached.error());
           }
-          stream->write(reinterpret_cast<const char *>(bytes.data()),
-                       static_cast<std::streamsize>(bytes.size()));
-          info("mesh cache: wrote '{}' ({} bytes)", cache_path.view(),
-               bytes.size());
-        } catch (const std::exception &e) {
-          warn("mesh cache write threw for '{}': {}", cache_path.view(),
-               e.what());
         }
+
+        const auto fs_path = VFS::get().resolve(path);
+        const auto gltf_dir = fs_path.parent_path();
+        if (!std::filesystem::exists(fs_path))
+          return {.mesh = std::unexpected("File not found"),
+                  .source_path = NullableVFSPath{path}};
+
+        auto binary_mesh = parse_to_binary_mesh(
+            fs_path, gltf_dir, dummy_texture_handle, opts, thread_pool);
+        if (binary_mesh)
+          write_mesh_cache_async(thread_pool, *binary_mesh, cache_path,
+                                source_hash);
+
+        return {.mesh = std::move(binary_mesh),
+                .source_path = NullableVFSPath{path}};
       });
 
-  return handle;
+  renderer.mesh_upload_pool->submit(std::move(fut), std::move(stop_src),
+                                    std::move(on_complete));
 }
 
 auto load_from_compressed(const VFSPath &archive_path, SceneRenderer &renderer,
@@ -2602,9 +2547,48 @@ auto load_from_compressed(const VFSPath &archive_path, SceneRenderer &renderer,
   const std::filesystem::path debug_path =
       std::format("{}/{}", archive_path.view(), *glb_key);
   const auto gltf_dir = VFS::get().resolve(archive_path).parent_path();
-  return build_mesh_from_parsed(*asset, gltf_dir, debug_path, renderer, opts,
-                               NullableVFSPath{archive_path});
+  auto binary_mesh =
+      assemble_binary_mesh(*asset, gltf_dir, debug_path,
+                          renderer.dummy_texture_handle, opts,
+                          renderer.thread_pool);
+  return build_from_cache(std::move(binary_mesh), renderer,
+                          NullableVFSPath{archive_path});
 }
 
 } // namespace mesh
+
+// Defined here (rather than in a standalone mesh_upload_pool.cpp) because the
+// commit step is exactly build_from_cache — a function private to this file.
+auto pool::MeshUploadPool::poll_n(SceneRenderer &renderer, usize n) -> void {
+  auto batch = take_ready(n);
+  if (batch.empty())
+    return;
+
+  for (auto &entry : batch) {
+    auto result = entry.work.get();
+    if (!result.mesh) {
+      warn("MeshUploadPool: load failed for '{}': {}",
+          result.source_path.valid() ? result.source_path.view()
+                                     : std::string_view{"<unknown>"},
+          result.mesh.error());
+      entry.on_complete(MeshAssetHandle{});
+      continue;
+    }
+
+    auto handle = mesh::build_from_cache(std::move(*result.mesh), renderer,
+                                         result.source_path);
+    if (!handle) {
+      warn("MeshUploadPool: commit failed for '{}': {}",
+          result.source_path.valid() ? result.source_path.view()
+                                     : std::string_view{"<unknown>"},
+          handle.error());
+      entry.on_complete(MeshAssetHandle{});
+      continue;
+    }
+    entry.on_complete(*handle);
+  }
+
+  note_completed(batch.size());
+}
+
 } // namespace dy

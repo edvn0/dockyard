@@ -10,6 +10,8 @@
 
 #include <glm/glm.hpp>
 
+#include <functional>
+
 namespace dy::mesh {
 
 enum class LodDetection : u8 {
@@ -61,5 +63,15 @@ auto load_from_memory(SceneRenderer &renderer, std::span<const Vertex> vertices,
                       std::span<const u32> indices,
                       NullableVFSPath source_path = {})
     -> std::expected<MeshAssetHandle, std::string>;
+
+// Async counterpart to load_from_path: parsing runs off the calling thread,
+// and on_complete fires on the main thread — once SceneRenderer::prepare
+// drains renderer.mesh_upload_pool — with the loaded handle, or an empty
+// (invalid) handle if the load failed (see the log for the error).
+// on_complete may run after the requesting entity/component no longer
+// exists; check liveness before applying the handle.
+auto load_from_path_async(const VFSPath &path, SceneRenderer &renderer,
+                          std::function<void(MeshAssetHandle)> on_complete,
+                          const LoadOptions &opts = {}) -> void;
 
 } // namespace dy::mesh
