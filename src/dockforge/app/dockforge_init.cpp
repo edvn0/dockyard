@@ -241,7 +241,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
         .shader_path = VFSPath::create("shaders://forward.slang"),
         .layout = renderer->pipeline_layout,
         .render_targets = {.color_formats = {VK_FORMAT_R16G16B16A16_SFLOAT},
-                           .depth_format = VK_FORMAT_D32_SFLOAT},
+                           .depth_format = renderer->ctx.depth_stencil_format,
+                           .stencil_format = renderer->ctx.depth_stencil_format},
         .cull_mode = VK_CULL_MODE_BACK_BIT,
         .samples = VK_SAMPLE_COUNT_4_BIT,
         .depth = {.test = true,
@@ -268,7 +269,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
         .shader_path = VFSPath::create("shaders://forward.slang"),
         .layout = renderer->pipeline_layout,
         .render_targets = {.color_formats = {VK_FORMAT_R16G16B16A16_SFLOAT},
-                           .depth_format = VK_FORMAT_D32_SFLOAT},
+                           .depth_format = renderer->ctx.depth_stencil_format,
+                           .stencil_format = renderer->ctx.depth_stencil_format},
         .cull_mode = VK_CULL_MODE_NONE,
         .samples = VK_SAMPLE_COUNT_4_BIT,
         .depth = {.test = true,
@@ -289,7 +291,8 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
     auto result = registry.create_graphics({
         .shader_path = VFSPath::create("shaders://depth.slang"),
         .layout = renderer->pipeline_layout,
-        .render_targets = {.depth_format = VK_FORMAT_D32_SFLOAT},
+        .render_targets = {.depth_format = renderer->ctx.depth_stencil_format,
+                           .stencil_format = renderer->ctx.depth_stencil_format},
         .cull_mode = VK_CULL_MODE_BACK_BIT,
         .samples = VK_SAMPLE_COUNT_4_BIT,
         .depth = {.test = true,
@@ -303,6 +306,69 @@ auto Dockforge::init(const InitialisationContext &ctx) -> void {
       std::abort();
     }
     depth_pipeline = *result;
+  }
+  {
+    // Marks the selected entity's silhouette into the stencil buffer.
+    // Depth-tests (read-only) against the already-written prepass depth, so
+    // only the visible (non-occluded) part of the selection gets stencil=1 —
+    // this is what makes the outline occlusion-aware.
+    auto result = registry.create_graphics({
+        .shader_path = VFSPath::create("shaders://stencil_mark.slang"),
+        .render_targets = {.depth_format = renderer->ctx.depth_stencil_format,
+                           .stencil_format = renderer->ctx.depth_stencil_format},
+        .cull_mode = VK_CULL_MODE_BACK_BIT,
+        .samples = VK_SAMPLE_COUNT_4_BIT,
+        .depth = {.test = true,
+                  .write = false,
+                  .compare_op = VK_COMPARE_OP_GREATER_OR_EQUAL},
+        .stencil = {.test = true,
+                    .compare_op = VK_COMPARE_OP_ALWAYS,
+                    .fail_op = VK_STENCIL_OP_KEEP,
+                    .pass_op = VK_STENCIL_OP_REPLACE,
+                    .depth_fail_op = VK_STENCIL_OP_KEEP,
+                    .reference = 1,
+                    .write_mask = 0xFF,
+                    .compare_mask = 0xFF},
+        .extra_dynamic_states = {VK_DYNAMIC_STATE_CULL_MODE,
+                                 VK_DYNAMIC_STATE_FRONT_FACE},
+    });
+    if (!result) {
+      error("stencil mark pipeline: {}", result.error());
+      std::abort();
+    }
+    stencil_mark_pipeline = *result;
+  }
+  {
+    // Extruded-hull outline rim: draws the selected mesh's back faces pushed
+    // outward along vertex normals, visible only outside the marked
+    // silhouette (stencil != 1) and only where not occluded by other scene
+    // geometry (depth test against the same prepass depth).
+    auto result = registry.create_graphics({
+        .shader_path = VFSPath::create("shaders://outline_rim.slang"),
+        .render_targets = {.color_formats = {VK_FORMAT_R16G16B16A16_SFLOAT},
+                           .depth_format = renderer->ctx.depth_stencil_format,
+                           .stencil_format = renderer->ctx.depth_stencil_format},
+        .cull_mode = VK_CULL_MODE_FRONT_BIT,
+        .front_face = VK_FRONT_FACE_CLOCKWISE,
+        .samples = VK_SAMPLE_COUNT_4_BIT,
+        .depth = {.test = true,
+                  .write = false,
+                  .compare_op = VK_COMPARE_OP_GREATER_OR_EQUAL},
+        .stencil = {.test = true,
+                    .compare_op = VK_COMPARE_OP_NOT_EQUAL,
+                    .fail_op = VK_STENCIL_OP_KEEP,
+                    .pass_op = VK_STENCIL_OP_KEEP,
+                    .depth_fail_op = VK_STENCIL_OP_KEEP,
+                    .reference = 1,
+                    .write_mask = 0x00,
+                    .compare_mask = 0xFF},
+        .blending = {BlendMode::opaque()},
+    });
+    if (!result) {
+      error("outline rim pipeline: {}", result.error());
+      std::abort();
+    }
+    outline_rim_pipeline = *result;
   }
 
   renderer->bindless.repopulate_if_needed(

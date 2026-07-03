@@ -72,6 +72,17 @@ struct DepthState {
   VkCompareOp compare_op = VK_COMPARE_OP_LESS;
 };
 
+struct StencilState {
+  bool test = false;
+  VkCompareOp compare_op = VK_COMPARE_OP_ALWAYS;
+  VkStencilOp fail_op = VK_STENCIL_OP_KEEP;
+  VkStencilOp pass_op = VK_STENCIL_OP_KEEP;
+  VkStencilOp depth_fail_op = VK_STENCIL_OP_KEEP;
+  u8 reference = 0;
+  u8 write_mask = 0xFF;
+  u8 compare_mask = 0xFF;
+};
+
 struct RenderTargetLayout {
   std::vector<VkFormat> color_formats{};
   VkFormat depth_format = VK_FORMAT_UNDEFINED;
@@ -91,6 +102,7 @@ struct GraphicsPipelineDescription {
   VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
 
   DepthState depth{};
+  StencilState stencil{};
   std::vector<BlendMode> blending{};
 
   std::vector<VkDynamicState> extra_dynamic_states{};

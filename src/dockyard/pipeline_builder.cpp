@@ -252,6 +252,18 @@ auto build_graphics_pipeline(VulkanContext &ctx,
   depth_stencil.depthTestEnable = desc.depth.test ? VK_TRUE : VK_FALSE;
   depth_stencil.depthWriteEnable = desc.depth.write ? VK_TRUE : VK_FALSE;
   depth_stencil.depthCompareOp = desc.depth.compare_op;
+  depth_stencil.stencilTestEnable = desc.stencil.test ? VK_TRUE : VK_FALSE;
+  const VkStencilOpState stencil_op_state{
+      .failOp = desc.stencil.fail_op,
+      .passOp = desc.stencil.pass_op,
+      .depthFailOp = desc.stencil.depth_fail_op,
+      .compareOp = desc.stencil.compare_op,
+      .compareMask = desc.stencil.compare_mask,
+      .writeMask = desc.stencil.write_mask,
+      .reference = desc.stencil.reference,
+  };
+  depth_stencil.front = stencil_op_state;
+  depth_stencil.back = stencil_op_state;
 
   VkPipelineColorBlendStateCreateInfo color_blending{};
   color_blending.sType =

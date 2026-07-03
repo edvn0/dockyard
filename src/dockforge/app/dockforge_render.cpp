@@ -36,6 +36,68 @@ auto resolve_material_slot(Entity e) -> u32 {
     return Components::MaterialOverride::invalid_material;
   return ov->gpu_slot;
 }
+
+struct SelectedMeshDraw {
+  const MeshAsset *asset;
+  glm::mat4 world;
+};
+
+// Looks up the mesh + world transform of the currently selected entity, for
+// the stencil-mark and outline-rim draws. Mirrors the lookup previously done
+// ad-hoc in the AABB-wireframe selection highlight (now removed).
+auto resolve_selected_mesh(Dockforge &app) -> std::optional<SelectedMeshDraw> {
+  if (app.editor_state.selected == entt::null)
+    return std::nullopt;
+  Entity selected_entity{*app.active_scene, app.editor_state.selected};
+  auto *mesh = selected_entity.try_get<Components::Mesh>();
+  auto *ltw = selected_entity.try_get<Components::LocalToWorld>();
+  if (mesh == nullptr || ltw == nullptr)
+    return std::nullopt;
+  const auto *asset = app.renderer->resolve(mesh->handle);
+  if (asset == nullptr)
+    return std::nullopt;
+  return SelectedMeshDraw{.asset = asset, .world = ltw->matrix};
+}
+
+struct StencilMarkPushConstants {
+  glm::mat4 mvp;
+  DeviceAddress vertex_buffer_ptr;
+};
+static_assert(sizeof(StencilMarkPushConstants) == 72);
+
+struct OutlineRimPushConstants {
+  glm::mat4 mvp;
+  DeviceAddress vertex_buffer_ptr;
+  glm::vec2 inv_viewport_size;
+  f32 outline_width_px;
+  f32 _pad{};
+};
+static_assert(sizeof(OutlineRimPushConstants) == 88);
+
+constexpr f32 outline_width_px = 2.0F;
+
+// Draws every LOD0 primitive of the selected mesh's node tree with `pipeline`,
+// pushing `make_push_constants` per-primitive. Used for both the stencil-mark
+// pass (depth prepass) and the outline-rim pass (forward pass) — they differ
+// only in pipeline and push-constant contents.
+auto draw_selected_mesh_primitives(
+    Dockforge &app, VkCommandBuffer cmd, const SelectedMeshDraw &selected,
+    PipelineHandle pipeline,
+    const std::function<void(const glm::mat4 &node_world)> &push_constants_fn)
+    -> void {
+  auto *pipe = app.renderer->pipeline_registry->get(pipeline);
+  vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+
+  for (const auto &node : selected.asset->nodes) {
+    const glm::mat4 node_world = selected.world * node.local_transform;
+    for (const auto &prim : node.primitives) {
+      push_constants_fn(node_world);
+      const Mesh lod0 = prim.lod_group.resolve(0);
+      vkCmdDrawIndexed(cmd, lod0.index_count, 1U, lod0.first_index,
+                       lod0.vertex_offset, 0U);
+    }
+  }
+}
 } // namespace
 
 static void emit_barrier(VkCommandBuffer cmd,
@@ -414,11 +476,25 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
                 .stencil = 0U,
             },
     };
+    VkRenderingAttachmentInfo stencil_attachment{};
+    stencil_attachment.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    stencil_attachment.imageView = viewport_resources.depth_msaa.sampled_view;
+    stencil_attachment.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    stencil_attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    stencil_attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    stencil_attachment.clearValue = {
+        .depthStencil =
+            {
+                .depth = 0.F,
+                .stencil = 0U,
+            },
+    };
     VkRenderingInfo prepass_ri{};
     prepass_ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     prepass_ri.renderArea = scissor;
     prepass_ri.layerCount = 1u;
     prepass_ri.pDepthAttachment = &depth_attachment;
+    prepass_ri.pStencilAttachment = &stencil_attachment;
 
     vkCmdBeginRendering(ctx.main_cb, &prepass_ri);
     vkCmdSetViewport(ctx.main_cb, 0u, 1u, &viewport);
@@ -429,6 +505,25 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
 
     renderer->render_pass(ctx.main_cb, renderer->depth_prepass,
                           renderer->pipeline_registry->get(depth_pipeline));
+
+    if (const auto selected = resolve_selected_mesh(*this)) {
+      const auto &entry =
+          renderer->pipeline_registry->get_entry(stencil_mark_pipeline);
+      const DeviceAddress vertex_buffer_ptr =
+          renderer->geometry_pool->vertex_buffer->get_device_address();
+      draw_selected_mesh_primitives(
+          *this, ctx.main_cb, *selected, stencil_mark_pipeline,
+          [&](const glm::mat4 &node_world) {
+            const StencilMarkPushConstants pc{
+                .mvp = projection * view * node_world,
+                .vertex_buffer_ptr = vertex_buffer_ptr,
+            };
+            vkCmdPushConstants(ctx.main_cb, entry.layout,
+                               VK_SHADER_STAGE_VERTEX_BIT, 0U, sizeof(pc),
+                               &pc);
+          });
+    }
+
     vkCmdEndRendering(ctx.main_cb);
 
     VkImageMemoryBarrier2 depth_barrier{};
@@ -442,7 +537,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     depth_barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     depth_barrier.image = viewport_resources.depth_msaa.image;
     depth_barrier.subresourceRange = {
-        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+        .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
         .levelCount = 1u,
         .layerCount = 1u,
     };
@@ -513,6 +608,12 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     forward_depth.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
     forward_depth.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     forward_depth.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    VkRenderingAttachmentInfo forward_stencil{};
+    forward_stencil.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    forward_stencil.imageView = viewport_resources.depth_msaa.sampled_view;
+    forward_stencil.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    forward_stencil.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    forward_stencil.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     VkRenderingInfo forward_ri{};
     forward_ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
     forward_ri.renderArea = scissor;
@@ -520,6 +621,7 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
     forward_ri.colorAttachmentCount = 1u;
     forward_ri.pColorAttachments = &forward_color;
     forward_ri.pDepthAttachment = &forward_depth;
+    forward_ri.pStencilAttachment = &forward_stencil;
 
     vkCmdBeginRendering(ctx.main_cb, &forward_ri);
     vkCmdSetViewport(ctx.main_cb, 0u, 1u, &viewport);
@@ -542,10 +644,38 @@ auto Dockforge::render(RenderContext &ctx) -> u64 {
                          0u, VK_INDEX_TYPE_UINT32);
     renderer->render_pass(ctx.main_cb, renderer->forward_pass);
 
+    if (const auto selected = resolve_selected_mesh(*this)) {
+      const auto &entry =
+          renderer->pipeline_registry->get_entry(outline_rim_pipeline);
+      const DeviceAddress vertex_buffer_ptr =
+          renderer->geometry_pool->vertex_buffer->get_device_address();
+      const glm::vec2 inv_viewport_size{1.0F / static_cast<f32>(vp_extent.width),
+                                        1.0F /
+                                            static_cast<f32>(vp_extent.height)};
+      draw_selected_mesh_primitives(
+          *this, ctx.main_cb, *selected, outline_rim_pipeline,
+          [&](const glm::mat4 &node_world) {
+            const OutlineRimPushConstants pc{
+                .mvp = projection * view * node_world,
+                .vertex_buffer_ptr = vertex_buffer_ptr,
+                .inv_viewport_size = inv_viewport_size,
+                .outline_width_px = outline_width_px,
+            };
+            // outline_rim.slang has both a vertex and fragment entry point,
+            // so PipelineBuilder's reflection-derived push-constant range
+            // covers both stages even though only the vertex stage reads it —
+            // vkCmdPushConstants' stageFlags must match that range exactly.
+            vkCmdPushConstants(ctx.main_cb, entry.layout,
+                               VK_SHADER_STAGE_VERTEX_BIT |
+                                   VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0U, sizeof(pc), &pc);
+          });
+    }
+
     canvas_renderer->render(ctx.main_cb, projection * view,
                             std::make_tuple(VK_FORMAT_R16G16B16A16_SFLOAT,
-                                            VK_FORMAT_D32_SFLOAT, viewport,
-                                            scissor));
+                                            context->depth_stencil_format,
+                                            viewport, scissor));
 
     vkCmdEndRendering(ctx.main_cb);
 

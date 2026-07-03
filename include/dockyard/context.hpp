@@ -41,6 +41,11 @@ struct VulkanContext {
     bool device_fault = false; // VK_EXT_device_fault
   } caps;
 
+  // Best depth-stencil format supported for optimal-tiling attachments,
+  // resolved once at context creation (VK_FORMAT_D32_SFLOAT_S8_UINT preferred,
+  // VK_FORMAT_D24_UNORM_S8_UINT fallback — the spec guarantees at least one).
+  VkFormat depth_stencil_format = VK_FORMAT_UNDEFINED;
+
   auto graphics_queue() const -> VkQueue;
   auto present_queue() const -> VkQueue;
   auto destroy() -> void;

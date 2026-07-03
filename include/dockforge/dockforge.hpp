@@ -71,6 +71,8 @@ struct Dockforge : App {
   PipelineHandle forward_pipeline{};
   PipelineHandle forward_blend_pipeline{};
   PipelineHandle depth_pipeline{};
+  PipelineHandle stencil_mark_pipeline{};
+  PipelineHandle outline_rim_pipeline{};
 
   VulkanContext *context{};
   std::unique_ptr<EditorCamera> editor_camera;

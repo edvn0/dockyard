@@ -688,15 +688,6 @@ auto Dockforge::build_ui() -> void {
 
     glm::mat4 world_matrix = ltw.matrix;
 
-    if (auto *mesh = selected_entity.try_get<Components::Mesh>();
-        mesh != nullptr) {
-      if (const auto *asset = renderer->resolve(mesh->handle)) {
-        canvas_renderer->box(transform.matrix_without_rotation(),
-                             asset->mesh_aabb,
-                             glm::vec4{0.9F, 0.1F, 0.1F, 1.0F});
-      }
-    }
-
     // World mode only makes sense for translation; rotate/scale always use local.
     const ImGuizmo::MODE mode =
         (gizmo_op == GizmoOp::Translate)

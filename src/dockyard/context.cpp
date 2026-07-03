@@ -32,6 +32,25 @@ constexpr std::array brdf_lut_source_paths = {
     "shaders://include/constants.slang",
 };
 
+// Picks the best depth-stencil format for optimal-tiling attachments. The
+// Vulkan spec guarantees at least one of these two supports
+// VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT, but never both on every GPU.
+auto select_depth_stencil_format(VkPhysicalDevice phys) -> VkFormat {
+  constexpr std::array candidates{VK_FORMAT_D32_SFLOAT_S8_UINT,
+                                  VK_FORMAT_D24_UNORM_S8_UINT};
+  for (const VkFormat format : candidates) {
+    VkFormatProperties props{};
+    vkGetPhysicalDeviceFormatProperties(phys, format, &props);
+    if (props.optimalTilingFeatures &
+        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+      return format;
+    }
+  }
+  error("No supported depth-stencil format found (checked D32_SFLOAT_S8_UINT, "
+        "D24_UNORM_S8_UINT)");
+  std::abort();
+}
+
 struct BrdfLutCacheHeader {
   u32 magic;
   u32 version;
@@ -208,10 +227,11 @@ auto SwapchainResources::create(const VulkanContext &ctx, VkSurfaceKHR surface,
 auto ViewportResources::resize(const VulkanContext &ctx,
                                SceneRenderer &renderer, u32 w, u32 h) -> void {
   depth_msaa.destroy(ctx);
-  depth_msaa = Texture::create(ctx, "depth_msaa", w, h, VK_FORMAT_D32_SFLOAT,
-                               VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-                               VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_4_BIT,
-                               1U, true);
+  depth_msaa = Texture::create(
+      ctx, "depth_msaa", w, h, ctx.depth_stencil_format,
+      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+      VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
+      VK_SAMPLE_COUNT_4_BIT, 1U, true);
 
   forward_target_msaa.destroy(ctx);
   forward_target_msaa = Texture::create(
@@ -235,8 +255,12 @@ auto ViewportResources::resize(const VulkanContext &ctx,
 
   for (u32 i = 0; i < frames_in_flight; ++i) {
     resize_or_create(depth_resolved_target[i], [&] {
+      // Format must match depth_msaa's (combined depth-stencil) even though
+      // only the depth aspect is ever resolved into or sampled from this
+      // target — VUID-VkRenderingAttachmentInfo-imageView-06865 requires the
+      // depth attachment's imageView and resolveImageView formats to match.
       return Texture::create(
-          ctx, "depth_resolved_target", w, h, VK_FORMAT_D32_SFLOAT,
+          ctx, "depth_resolved_target", w, h, ctx.depth_stencil_format,
           VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
               VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
           VK_IMAGE_ASPECT_DEPTH_BIT, VK_SAMPLE_COUNT_1_BIT, 1U, true);
@@ -579,6 +603,10 @@ auto VulkanContext::create(vkb::Instance &&inst, VkSurfaceKHR &&s)
   }
   ctx.physical_device = std::move(phys_ret.value());
   info("Selected GPU: {}", ctx.physical_device.name);
+
+  ctx.depth_stencil_format =
+      select_depth_stencil_format(ctx.physical_device.physical_device);
+  info("Depth-stencil format: {}", static_cast<int>(ctx.depth_stencil_format));
 
   auto dev_ret = vkb::DeviceBuilder{ctx.physical_device}.build();
   if (!dev_ret) {

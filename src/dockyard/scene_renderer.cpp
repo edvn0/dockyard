@@ -571,7 +571,8 @@ auto SceneRenderer::initialise_bindless() -> void {
           .render_targets =
               {
                   .color_formats = {VK_FORMAT_R16G16B16A16_SFLOAT},
-                  .depth_format = VK_FORMAT_D32_SFLOAT,
+                  .depth_format = ctx.depth_stencil_format,
+                  .stencil_format = ctx.depth_stencil_format,
               },
           .cull_mode = VK_CULL_MODE_NONE,
           .samples = VK_SAMPLE_COUNT_4_BIT,
@@ -1369,7 +1370,13 @@ auto SceneRenderer::blit_depth_to_pre_hiz_pass(VkCommandBuffer cmd,
           .image = src->texture.image,
           .subresourceRange =
               {
-                  .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT,
+                  // depth_resolved_target's format now matches depth_msaa's
+                  // combined depth-stencil format (required for the resolve
+                  // attachment format-match VUID), so barriers on it must
+                  // include the stencil aspect too even though only depth is
+                  // ever read from it (VUID-VkImageMemoryBarrier2-image-03320).
+                  .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT |
+                                VK_IMAGE_ASPECT_STENCIL_BIT,
                   .levelCount = 1,
                   .layerCount = 1,
               },

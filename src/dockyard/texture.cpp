@@ -573,7 +573,17 @@ auto Texture::create(const VulkanContext &ctx, std::string_view name, u32 width,
                         std::string(name) + "_storage_view");
   }
 
-  ctx.transition_to_general(rt.image, aspect, mips, 1);
+  // A combined depth-stencil image must always be transitioned with both
+  // aspects present in the barrier (VUID-VkImageMemoryBarrier2-image-03320),
+  // even when the caller only ever samples/attaches the depth aspect (e.g.
+  // depth_resolved_target, whose format is forced to match depth_msaa's).
+  VkImageAspectFlags barrier_aspect = aspect;
+  if (format == VK_FORMAT_D16_UNORM_S8_UINT ||
+      format == VK_FORMAT_D24_UNORM_S8_UINT ||
+      format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+    barrier_aspect |= VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+  }
+  ctx.transition_to_general(rt.image, barrier_aspect, mips, 1);
 
   return rt;
 }

@@ -291,6 +291,7 @@ auto CanvasRenderer::LineCanvas3D::create_pipeline(VkFormat colour,
               {
                   .color_formats = {colour},
                   .depth_format = depth,
+                  .stencil_format = depth,
               },
           .topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
           .cull_mode = VK_CULL_MODE_NONE,
